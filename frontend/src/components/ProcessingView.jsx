@@ -16,7 +16,11 @@ import {
   ArrowRight,
   ExternalLink,
   ChevronRight,
-  RotateCcw
+  RotateCcw,
+  FileCode,
+  FolderTree,
+  Box,
+  Settings2
 } from 'lucide-react';
 
 const STAGE_ICONS = {
@@ -61,6 +65,8 @@ export default function ProcessingView({
   const isCompleted = job.status === 'completed' || job.progress_percentage === 100;
   const isFailed = job.status === 'failed';
   const isStageOneInProgress = job.stages?.[0]?.status === 'in_progress';
+  const isStageTwoInProgress = job.stages?.[1]?.status === 'in_progress';
+  const analysis = job.analysis;
 
   return (
     <div className="max-w-4xl mx-auto py-8 px-4 sm:px-6">
@@ -70,9 +76,9 @@ export default function ProcessingView({
           <div className="flex items-start gap-3">
             <AlertCircle className="w-5 h-5 text-rose-600 flex-shrink-0 mt-0.5" />
             <div>
-              <h4 className="text-sm font-bold text-rose-900">Ingestion Error Encountered</h4>
+              <h4 className="text-sm font-bold text-rose-900">Ingestion or Analysis Error</h4>
               <p className="text-xs text-rose-700 mt-1 leading-relaxed">
-                {job.error || 'The repository could not be ingested. Verify that the repository is public and accessible.'}
+                {job.error || 'The repository processing could not be completed.'}
               </p>
             </div>
           </div>
@@ -90,7 +96,7 @@ export default function ProcessingView({
       <div className="bg-white rounded-2xl border border-slate-200/90 shadow-sm p-6 sm:p-8 mb-6">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-6 border-b border-slate-100">
           <div>
-            <div className="flex items-center gap-2 mb-1">
+            <div className="flex items-center gap-2 mb-1 flex-wrap">
               <span className="text-xs font-semibold uppercase tracking-wider text-indigo-600">
                 Pipeline Processing
               </span>
@@ -99,6 +105,11 @@ export default function ProcessingView({
               {isStageOneInProgress && (
                 <span className="inline-flex items-center gap-1 text-[11px] font-medium text-indigo-700 bg-indigo-50 border border-indigo-200 px-2 py-0.5 rounded-full">
                   <Loader2 className="w-3 h-3 animate-spin" /> Ingesting Git Repository
+                </span>
+              )}
+              {isStageTwoInProgress && (
+                <span className="inline-flex items-center gap-1 text-[11px] font-medium text-violet-700 bg-violet-50 border border-violet-200 px-2 py-0.5 rounded-full">
+                  <Loader2 className="w-3 h-3 animate-spin" /> Analyzing Structure & Languages
                 </span>
               )}
             </div>
@@ -131,7 +142,7 @@ export default function ProcessingView({
             ) : !isFailed && (
               <button
                 onClick={onSimulateStep}
-                disabled={isSimulating || isStageOneInProgress}
+                disabled={isSimulating || isStageOneInProgress || isStageTwoInProgress}
                 className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200/70 text-xs font-semibold transition disabled:opacity-50"
                 title="Advance to next stage"
               >
@@ -159,7 +170,7 @@ export default function ProcessingView({
             <span className="text-slate-700 flex items-center gap-2">
               <span className="text-slate-400">Current Stage:</span>
               <span className={`font-bold ${isFailed ? 'text-rose-600' : 'text-indigo-600'}`}>
-                {isFailed ? 'Ingestion Failed' : job.current_stage}
+                {isFailed ? 'Processing Failed' : job.current_stage}
               </span>
             </span>
             <span className="text-slate-900 font-mono text-sm">{job.progress_percentage}%</span>
@@ -179,6 +190,136 @@ export default function ProcessingView({
           </div>
         </div>
       </div>
+
+      {/* Milestone 2.3: Repository Analysis Summary Card */}
+      {analysis && (
+        <div className="bg-white rounded-2xl border border-slate-200/90 shadow-sm p-6 sm:p-8 mb-6 transition-all">
+          <div className="flex items-center justify-between pb-4 border-b border-slate-100 mb-5">
+            <div>
+              <h3 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2">
+                <Search className="w-4 h-4 text-indigo-600" />
+                <span>Repository Structure & Language Analysis</span>
+              </h3>
+              <p className="text-xs text-slate-500 mt-0.5">
+                Static inspection of directory hierarchy, source files, and configuration files.
+              </p>
+            </div>
+            <span className="px-2.5 py-1 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200 text-xs font-semibold">
+              Analysis Verified
+            </span>
+          </div>
+
+          {/* Statistics Grid */}
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-6">
+            <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200/70">
+              <div className="flex items-center gap-1.5 text-xs text-slate-500 mb-1">
+                <FileCode className="w-3.5 h-3.5 text-indigo-600" />
+                <span>Source Files</span>
+              </div>
+              <p className="text-lg font-bold text-slate-900 font-mono">
+                {analysis.statistics.source_files.toLocaleString()}
+              </p>
+              <span className="text-[11px] text-slate-400">
+                of {analysis.statistics.total_files.toLocaleString()} total files
+              </span>
+            </div>
+
+            <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200/70">
+              <div className="flex items-center gap-1.5 text-xs text-slate-500 mb-1">
+                <FolderTree className="w-3.5 h-3.5 text-indigo-600" />
+                <span>Directories</span>
+              </div>
+              <p className="text-lg font-bold text-slate-900 font-mono">
+                {analysis.statistics.total_directories.toLocaleString()}
+              </p>
+              <span className="text-[11px] text-slate-400">traversed hierarchy</span>
+            </div>
+
+            <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200/70">
+              <div className="flex items-center gap-1.5 text-xs text-slate-500 mb-1">
+                <Box className="w-3.5 h-3.5 text-indigo-600" />
+                <span>Dependency Files</span>
+              </div>
+              <p className="text-lg font-bold text-slate-900 font-mono">
+                {analysis.statistics.dependency_manifests}
+              </p>
+              <span className="text-[11px] text-slate-400">package manifests</span>
+            </div>
+
+            <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200/70">
+              <div className="flex items-center gap-1.5 text-xs text-slate-500 mb-1">
+                <Settings2 className="w-3.5 h-3.5 text-indigo-600" />
+                <span>Config Files</span>
+              </div>
+              <p className="text-lg font-bold text-slate-900 font-mono">
+                {analysis.statistics.configuration_files}
+              </p>
+              <span className="text-[11px] text-slate-400">Docker, CI/CD, tools</span>
+            </div>
+          </div>
+
+          {/* Detected Languages */}
+          <div className="mb-5">
+            <h4 className="text-xs font-semibold text-slate-700 uppercase tracking-wider mb-2.5">
+              Detected Languages ({analysis.languages.length})
+            </h4>
+            <div className="flex flex-wrap gap-2">
+              {analysis.languages.map((lang) => (
+                <div
+                  key={lang.name}
+                  className="flex items-center gap-1.5 px-3 py-1 rounded-lg bg-indigo-50 border border-indigo-100 text-xs text-indigo-900"
+                >
+                  <span className="font-semibold">{lang.name}</span>
+                  <span className="text-indigo-500 font-mono text-[11px]">{lang.percentage}%</span>
+                  <span className="text-[10px] text-indigo-400 font-mono">({lang.file_count})</span>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Manifests and Config Highlights */}
+          {analysis.dependency_files.length > 0 && (
+            <div>
+              <h4 className="text-xs font-semibold text-slate-700 uppercase tracking-wider mb-2">
+                Manifest & Configuration Signals
+              </h4>
+              <div className="flex flex-wrap gap-2">
+                {analysis.dependency_files.map((dep) => (
+                  <span
+                    key={dep.file_path}
+                    className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md bg-slate-100 border border-slate-200 text-slate-700 text-xs font-mono"
+                  >
+                    <Box className="w-3 h-3 text-slate-500" />
+                    <span>{dep.file_path}</span>
+                    <span className="text-slate-400">({dep.dependencies_count} deps)</span>
+                  </span>
+                ))}
+                {analysis.configuration_files.slice(0, 5).map((cfg) => (
+                  <span
+                    key={cfg.file_path}
+                    className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md bg-slate-50 border border-slate-200 text-slate-600 text-xs font-mono"
+                  >
+                    <Settings2 className="w-3 h-3 text-slate-400" />
+                    <span>{cfg.file_path}</span>
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Warnings if any limit was reached */}
+          {analysis.warnings.length > 0 && (
+            <div className="mt-4 p-3 rounded-lg bg-amber-50 border border-amber-200 text-amber-800 text-xs space-y-1">
+              {analysis.warnings.map((w, idx) => (
+                <div key={idx} className="flex items-center gap-1.5">
+                  <AlertCircle className="w-3.5 h-3.5 text-amber-600 flex-shrink-0" />
+                  <span>{w}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* 9 Stages List */}
       <div className="bg-white rounded-2xl border border-slate-200/90 shadow-sm p-6 sm:p-8">

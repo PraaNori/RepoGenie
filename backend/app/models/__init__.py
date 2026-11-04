@@ -1,8 +1,15 @@
 """Data models and schemas."""
 from .schemas import (
+    ConfigurationFileInfo,
+    DependencyItem,
+    DirectoryTreeNode,
     HealthResponse,
     JobCreateRequest,
     JobResponse,
+    LanguageStat,
+    ManifestInfo,
+    RepoAnalysisResult,
+    RepoStatistics,
     StageEnum,
     StageInfo,
     StatusEnum,
@@ -10,9 +17,16 @@ from .schemas import (
 )
 
 __all__ = [
+    "ConfigurationFileInfo",
+    "DependencyItem",
+    "DirectoryTreeNode",
     "HealthResponse",
     "JobCreateRequest",
     "JobResponse",
+    "LanguageStat",
+    "ManifestInfo",
+    "RepoAnalysisResult",
+    "RepoStatistics",
     "StageEnum",
     "StageInfo",
     "StatusEnum",

@@ -5,6 +5,7 @@ from typing import Dict, List, Optional
 from pydantic import BaseModel
 from ...models.schemas import (
     JobResponse,
+    RepoAnalysisResult,
     StageEnum,
     StageInfo,
     StatusEnum,
@@ -39,6 +40,7 @@ class JobInternal(BaseModel):
     stages: List[StageInfo]
     created_at: datetime
     updated_at: datetime
+    analysis: Optional[RepoAnalysisResult] = None
     result: Optional[VideoResult] = None
     error: Optional[str] = None
 
@@ -58,6 +60,7 @@ class JobInternal(BaseModel):
             stages=self.stages,
             created_at=self.created_at,
             updated_at=self.updated_at,
+            analysis=self.analysis,
             result=self.result,
             error=self.error,
         )
@@ -162,6 +165,52 @@ class JobStore:
         job.stages[0].completed_at = now
         job.stages[0].detail = f"Cloning failed: {error_message}"
         job.error = error_message
+        job.updated_at = now
+        return job
+
+    def update_job_analysis_started(self, job_id: str) -> Optional[JobInternal]:
+        job = self._jobs.get(job_id)
+        if not job:
+            return None
+        now = datetime.now(timezone.utc)
+        job.current_stage = PIPELINE_STAGES[1]
+        job.stages[1].status = StatusEnum.IN_PROGRESS
+        job.stages[1].started_at = now
+        job.stages[1].detail = "Analyzing repository structure, languages, and dependencies..."
+        job.updated_at = now
+        return job
+
+    def update_job_analysis_success(
+        self, job_id: str, analysis: RepoAnalysisResult
+    ) -> Optional[JobInternal]:
+        job = self._jobs.get(job_id)
+        if not job:
+            return None
+        now = datetime.now(timezone.utc)
+        job.analysis = analysis
+        job.stages[1].status = StatusEnum.COMPLETED
+        job.stages[1].completed_at = now
+        job.stages[1].detail = (
+            f"Analyzed {analysis.statistics.source_files} source files across "
+            f"{analysis.statistics.recognized_languages_count} languages"
+        )
+        job.progress_percentage = 22
+        # Set next stage ready (Stage 3: Code Understanding)
+        job.current_stage = PIPELINE_STAGES[2]
+        job.stages[2].status = StatusEnum.PENDING
+        job.stages[2].detail = "Ready for code understanding"
+        job.updated_at = now
+        return job
+
+    def update_job_analysis_failed(self, job_id: str, error_message: str) -> Optional[JobInternal]:
+        job = self._jobs.get(job_id)
+        if not job:
+            return None
+        now = datetime.now(timezone.utc)
+        job.stages[1].status = StatusEnum.FAILED
+        job.stages[1].completed_at = now
+        job.stages[1].detail = f"Analysis failed: {error_message}"
+        # Keep cloned repo intact, mark error in warnings/detail
         job.updated_at = now
         return job
 

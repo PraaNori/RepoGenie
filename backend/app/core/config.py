@@ -7,7 +7,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     APP_NAME: str = "RepoGenie API"
-    APP_VERSION: str = "0.2.0"
+    APP_VERSION: str = "0.2.1"
     APP_ENV: str = "development"
     DEBUG: bool = True
     PORT: int = 8000
@@ -24,6 +24,11 @@ class Settings(BaseSettings):
     CLONE_TIMEOUT_SECONDS: int = 120
     MAX_REPO_SIZE_MB: int = 500
     CLONE_DEPTH: int = 1
+
+    # Repository Structure & Analysis limits (Milestone 2.3)
+    MAX_TRAVERSAL_DEPTH: int = 15
+    MAX_FILES_INDEXED: int = 5000
+    MAX_FILE_SIZE_BYTES: int = 1_048_576  # 1 MB maximum for manifest content inspection
 
     @property
     def cors_origins_list(self) -> List[str]:

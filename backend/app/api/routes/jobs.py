@@ -4,9 +4,11 @@ from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, status
 from ...models.schemas import (
     JobCreateRequest,
     JobResponse,
+    RepoAnalysisResult,
     StatusEnum,
     VideoResult,
 )
+from ...services.repo.analyzer import repo_analyzer_service
 from ...services.repo.ingest import (
     CloneExecutionError,
     CloneTimeoutError,
@@ -28,12 +30,13 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
 
-def run_ingestion_task(job_id: str, clone_url: str):
+def run_ingestion_and_analysis_task(job_id: str, clone_url: str):
     """
-    Background worker task to clone the repository and update job state.
+    Background worker task to clone the repository and automatically perform structure & file analysis.
     """
     job_store.update_job_ingestion_started(job_id)
     try:
+        # Step 1: Clone repository
         result = repo_ingestion_service.ingest_repository(job_id, clone_url)
         job_store.update_job_ingestion_success(
             job_id=job_id,
@@ -47,6 +50,28 @@ def run_ingestion_task(job_id: str, clone_url: str):
             result.file_count,
             result.size_mb,
         )
+
+        # Step 2: Milestone 2.3 Repository Structure and File Analysis
+        internal_job = job_store.get_internal_job(job_id)
+        if internal_job and internal_job.local_path:
+            job_store.update_job_analysis_started(job_id)
+            try:
+                analysis = repo_analyzer_service.analyze_repository(
+                    job_id=job_id,
+                    repo_name=internal_job.repo_name,
+                    local_path=internal_job.local_path,
+                )
+                job_store.update_job_analysis_success(job_id, analysis)
+                logger.info(
+                    "Successfully analyzed repository for job %s: %d source files, %d languages",
+                    job_id,
+                    analysis.statistics.source_files,
+                    analysis.statistics.recognized_languages_count,
+                )
+            except Exception as exc:
+                job_store.update_job_analysis_failed(job_id, str(exc))
+                logger.exception("Repository analysis failed for job %s: %s", job_id, exc)
+
     except DestinationExistsError as exc:
         job_store.update_job_ingestion_failed(job_id, str(exc))
         logger.error("Destination exists for job %s: %s", job_id, exc)
@@ -69,11 +94,11 @@ def create_job(
     background_tasks: BackgroundTasks,
     wait: bool = Query(
         False,
-        description="If True, performs cloning synchronously before returning response.",
+        description="If True, performs cloning and analysis synchronously before returning response.",
     ),
 ):
     """
-    Validate GitHub repository URL, verify accessibility, and initialize repository ingestion.
+    Validate GitHub repository URL, verify accessibility, and initialize repository ingestion and analysis.
     """
     # 1. Validate GitHub URL format
     try:
@@ -111,17 +136,17 @@ def create_job(
     # 4. Ingest repository (synchronously if wait=True, or via background task)
     if wait:
         try:
-            run_ingestion_task(internal_job.job_id, parsed.clone_url)
+            run_ingestion_and_analysis_task(internal_job.job_id, parsed.clone_url)
         except Exception as exc:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Ingestion failed: {exc}",
+                detail=f"Ingestion and analysis failed: {exc}",
             ) from exc
         return job_store.get_job(internal_job.job_id)
 
-    # Initiate background cloning
+    # Initiate background cloning and subsequent analysis
     job_store.update_job_ingestion_started(internal_job.job_id)
-    background_tasks.add_task(run_ingestion_task, internal_job.job_id, parsed.clone_url)
+    background_tasks.add_task(run_ingestion_and_analysis_task, internal_job.job_id, parsed.clone_url)
     return internal_job.to_response()
 
 @router.get("", response_model=list[JobResponse])
@@ -140,11 +165,44 @@ def get_job(job_id: str):
         )
     return job
 
+@router.get("/{job_id}/analysis", response_model=RepoAnalysisResult)
+def get_job_analysis(job_id: str):
+    """
+    Get the detailed repository structure, languages, dependency manifests, and statistics.
+    """
+    internal = job_store.get_internal_job(job_id)
+    if not internal:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Job with ID '{job_id}' not found",
+        )
+    if internal.ingestion_status == StatusEnum.FAILED:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Repository ingestion failed for job '{job_id}': {internal.error}",
+        )
+    if internal.ingestion_status in (StatusEnum.PENDING, StatusEnum.IN_PROGRESS):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Repository ingestion is still in progress for job '{job_id}'.",
+        )
+    if not internal.analysis:
+        if internal.stages[1].status == StatusEnum.FAILED:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Repository analysis failed: {internal.stages[1].detail}",
+            )
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Repository analysis is still in progress for job '{job_id}'.",
+        )
+    return internal.analysis
+
 @router.post("/{job_id}/simulate-step", response_model=JobResponse)
 def simulate_job_step(job_id: str):
     """
     Simulation helper endpoint:
-    Advances the pipeline by one stage for stages after Repository Fetching.
+    Advances the pipeline by one stage for stages after Repository Fetching and Analysis.
     """
     internal_job = job_store.get_internal_job(job_id)
     if not internal_job:

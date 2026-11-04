@@ -44,10 +44,12 @@ export default function App() {
       return;
     }
 
-    const isIngesting = currentJob.ingestion_status === 'in_progress' ||
-                        currentJob.stages?.[0]?.status === 'in_progress';
+    const isProcessing =
+      currentJob.ingestion_status === 'in_progress' ||
+      currentJob.stages?.[0]?.status === 'in_progress' ||
+      currentJob.stages?.[1]?.status === 'in_progress';
 
-    if (!isIngesting) {
+    if (!isProcessing) {
       return;
     }
 
