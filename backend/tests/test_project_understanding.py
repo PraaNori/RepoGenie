@@ -15,6 +15,7 @@ from app.models.schemas import (
     EntryPointCandidate,
     ImportantFileInfo,
     KnowledgeAnalysisMetadata,
+    ParsedFile,
     ProjectOverviewInfo,
     RepositoryKnowledge,
     RepositoryMetadataInfo,
@@ -96,6 +97,34 @@ def sample_knowledge() -> RepositoryKnowledge:
             total_directories=5,
             total_files=42,
             important_directories=["src/click", "tests", "docs"],
+            directory_tree=DirectoryTreeNode(
+                name="click",
+                path="",
+                type="directory",
+                children=[
+                    DirectoryTreeNode(
+                        name="src",
+                        path="src",
+                        type="directory",
+                        children=[
+                            DirectoryTreeNode(
+                                name="click",
+                                path="src/click",
+                                type="directory",
+                                children=[
+                                    DirectoryTreeNode(name="__init__.py", path="src/click/__init__.py", type="file"),
+                                    DirectoryTreeNode(name="core.py", path="src/click/core.py", type="file"),
+                                    DirectoryTreeNode(name="decorators.py", path="src/click/decorators.py", type="file"),
+                                    DirectoryTreeNode(name="types.py", path="src/click/types.py", type="file"),
+                                    DirectoryTreeNode(name="parser.py", path="src/click/parser.py", type="file"),
+                                ],
+                            )
+                        ],
+                    ),
+                    DirectoryTreeNode(name="pyproject.toml", path="pyproject.toml", type="file"),
+                    DirectoryTreeNode(name="README.rst", path="README.rst", type="file"),
+                ],
+            ),
         ),
         statistics=UnifiedStatistics(
             total_files=42,
@@ -120,7 +149,11 @@ def sample_knowledge() -> RepositoryKnowledge:
         code_structure=CodeStructureSummary(
             parsed_files_count=35,
             supported_languages=["Python"],
-            files=[],
+            files=[
+                ParsedFile(file_path="src/click/core.py", language="python", status="success", total_lines=500),
+                ParsedFile(file_path="src/click/decorators.py", language="python", status="success", total_lines=300),
+                ParsedFile(file_path="src/click/parser.py", language="python", status="success", total_lines=250),
+            ],
         ),
         architecture=ArchitectureSummary(
             dependency_graph=DependencyGraph(
@@ -575,9 +608,11 @@ def test_evidence_validator_fabricated_file_paths(sample_knowledge, sample_valid
     validated = evidence_validator.validate_understanding(understanding, sample_knowledge)
     ev = validated.core_features[0].supporting_evidence[0]
     assert ev.is_valid is False
+    assert ev.path_verified is False
+    assert ev.line_range_verified is False
     assert ev.status == "unverified"
     assert ev.confidence == "low"
-    assert "does not exist in repository files" in ev.detail
+    assert "does not exist in repository inventory" in ev.detail
     # Feature confidence should be downgraded
     assert validated.core_features[0].confidence == "low"
     # Validation warnings recorded
@@ -585,35 +620,151 @@ def test_evidence_validator_fabricated_file_paths(sample_knowledge, sample_valid
     assert "fabricated_crypto_ledger.py" in validated.validation_warnings[0]
 
 
-def test_evidence_validator_line_numbers_sanitization(sample_knowledge, sample_valid_llm_json_str):
+def test_evidence_validator_inventory_file_not_in_important_files(sample_knowledge, sample_valid_llm_json_str):
+    """
+    Verifies that a legitimate repository file present in the complete file inventory (directory_tree)
+    is recognized as valid and path_verified=True, even when omitted from the selected important_files list.
+    """
+    # Verify pre-condition: src/click/parser.py is in directory_tree, but NOT in important_files
+    important_paths = [f.relative_path for f in sample_knowledge.important_files]
+    assert "src/click/parser.py" not in important_paths
+
     data = json.loads(sample_valid_llm_json_str)
     data["core_features"][0]["supporting_evidence"] = [
         {
-            "file_path": "src/click/core.py",
-            "line_start": -15,  # Invalid negative line number
+            "file_path": "src/click/parser.py",
+            "line_start": 10,
+            "line_end": 30,
             "evidence_type": "code",
             "confidence": "high",
             "status": "confirmed",
-        },
+        }
+    ]
+    understanding = ProjectUnderstanding.model_validate(data)
+    validated = evidence_validator.validate_understanding(understanding, sample_knowledge)
+
+    ev = validated.core_features[0].supporting_evidence[0]
+    assert ev.is_valid is True
+    assert ev.path_verified is True
+    assert ev.line_range_verified is True
+    assert ev.status == "confirmed"
+    assert "verified" in ev.detail
+
+
+def test_evidence_validator_incomplete_inventory_marked_unverified(sample_knowledge, sample_valid_llm_json_str):
+    """
+    Verifies that when complete repository inventory is unavailable (directory_tree is None and disk unavailable),
+    an unlisted file reference is marked status='unverified' and path_verified=False rather than incorrectly
+    declaring the file nonexistent.
+    """
+    # Strip complete directory tree to simulate absent inventory
+    knowledge_no_tree = sample_knowledge.model_copy(deep=True)
+    knowledge_no_tree.repository_structure.directory_tree = None
+
+    data = json.loads(sample_valid_llm_json_str)
+    data["core_features"][0]["supporting_evidence"] = [
         {
-            "file_path": "src/click/decorators.py",
-            "line_start": 100,
-            "line_end": 20,  # Inverted line numbers
+            "file_path": "src/click/untracked_submodule.py",
+            "line_start": 5,
+            "line_end": 15,
             "evidence_type": "code",
             "confidence": "high",
             "status": "confirmed",
+        }
+    ]
+    understanding = ProjectUnderstanding.model_validate(data)
+    validated = evidence_validator.validate_understanding(understanding, knowledge_no_tree)
+
+    ev = validated.core_features[0].supporting_evidence[0]
+    # File is marked unverified, but NOT falsely claimed as nonexistent
+    assert ev.is_valid is True
+    assert ev.path_verified is False
+    assert ev.line_range_verified is False
+    assert ev.status == "unverified"
+    assert "complete file inventory unavailable" in ev.detail
+
+
+def test_evidence_validator_line_numbers_bounds_and_inversion(sample_knowledge, sample_valid_llm_json_str):
+    """
+    Tests line number validation:
+    - Non-positive line number -> is_valid=False, line_range_verified=False
+    - Inverted range -> is_valid=False, line_range_verified=False
+    - Out-of-bounds line number exceeding file lines -> is_valid=False, line_range_verified=False
+    - Valid line range within bounds -> is_valid=True, line_range_verified=True
+    - No line numbers specified -> is_valid=True, path_verified=True, line_range_verified=False
+    """
+    data = json.loads(sample_valid_llm_json_str)
+    data["core_features"][0]["supporting_evidence"] = [
+        # 1. Non-positive line number
+        {
+            "file_path": "src/click/core.py",
+            "line_start": -5,
+            "evidence_type": "code",
+            "confidence": "high",
+        },
+        # 2. Inverted line range
+        {
+            "file_path": "src/click/core.py",
+            "line_start": 100,
+            "line_end": 20,
+            "evidence_type": "code",
+            "confidence": "high",
+        },
+        # 3. Exceeds file length (core.py has 500 lines in fixture)
+        {
+            "file_path": "src/click/core.py",
+            "line_start": 600,
+            "line_end": 650,
+            "evidence_type": "code",
+            "confidence": "high",
+        },
+        # 4. Valid line range
+        {
+            "file_path": "src/click/core.py",
+            "line_start": 20,
+            "line_end": 50,
+            "evidence_type": "code",
+            "confidence": "high",
+        },
+        # 5. Whole-file reference (no lines)
+        {
+            "file_path": "src/click/core.py",
+            "evidence_type": "code",
+            "confidence": "high",
         },
     ]
     understanding = ProjectUnderstanding.model_validate(data)
     validated = evidence_validator.validate_understanding(understanding, sample_knowledge)
 
-    ev1 = validated.core_features[0].supporting_evidence[0]
-    assert ev1.is_valid is True
-    assert ev1.line_start is None  # Sanitized to None
+    ev_non_pos = validated.core_features[0].supporting_evidence[0]
+    assert ev_non_pos.is_valid is False
+    assert ev_non_pos.path_verified is True
+    assert ev_non_pos.line_range_verified is False
+    assert "positive" in ev_non_pos.detail
 
-    ev2 = validated.core_features[0].supporting_evidence[1]
-    assert ev2.is_valid is True
-    assert ev2.line_end == 100  # Sanitized to line_start
+    ev_inverted = validated.core_features[0].supporting_evidence[1]
+    assert ev_inverted.is_valid is False
+    assert ev_inverted.path_verified is True
+    assert ev_inverted.line_range_verified is False
+    assert "Inverted line range" in ev_inverted.detail
+
+    ev_exceeds = validated.core_features[0].supporting_evidence[2]
+    assert ev_exceeds.is_valid is False
+    assert ev_exceeds.path_verified is True
+    assert ev_exceeds.line_range_verified is False
+    assert "exceeds file total lines" in ev_exceeds.detail
+
+    ev_valid = validated.core_features[0].supporting_evidence[3]
+    assert ev_valid.is_valid is True
+    assert ev_valid.path_verified is True
+    assert ev_valid.line_range_verified is True
+    assert ev_valid.status == "confirmed"
+
+    ev_no_lines = validated.core_features[0].supporting_evidence[4]
+    assert ev_no_lines.is_valid is True
+    assert ev_no_lines.path_verified is True
+    assert ev_no_lines.line_range_verified is False
+    assert "no line numbers specified" in ev_no_lines.detail
 
 
 def test_fallback_provenance_and_no_fabricated_tokens(sample_knowledge):
@@ -646,4 +797,51 @@ def test_api_post_project_understanding_in_progress_guard(sample_knowledge):
     resp = client.post(f"/api/v1/jobs/{job.job_id}/project-understanding")
     assert resp.status_code == 409
     assert "already in progress" in resp.json()["detail"]
+
+
+@pytest.mark.anyio
+async def test_concurrent_generation_requests_per_job_serialization(sample_knowledge, sample_valid_llm_json_str):
+    """
+    Verifies that concurrent requests for the same job are serialized atomically:
+    The first acquires the per-job lock and runs LLM analysis, while the concurrent
+    second call reuses the completed result safely without redundant LLM execution.
+    """
+    import asyncio
+    from app.api.routes.jobs import generate_job_project_understanding
+
+    job = job_store.create_job(
+        repo_url="https://github.com/pallets/click",
+        repo_name="click",
+        repository_owner="pallets",
+        repository_name="click",
+        clone_url="https://github.com/pallets/click.git",
+    )
+    job.stages[0].status = StatusEnum.COMPLETED
+    job.stages[1].status = StatusEnum.COMPLETED
+    job.stages[2].status = StatusEnum.COMPLETED
+    job.knowledge = sample_knowledge
+    job_store.update_job(job)
+
+    understanding_obj = ProjectUnderstanding.model_validate(json.loads(sample_valid_llm_json_str))
+    understanding_obj.provider = "groq"
+    understanding_obj.model = "openai/gpt-oss-120b"
+
+    execution_count = 0
+
+    async def mock_analyze_slow(*args, **kwargs):
+        nonlocal execution_count
+        execution_count += 1
+        await asyncio.sleep(0.05)  # Simulate generation duration
+        return understanding_obj
+
+    with patch.object(project_understanding_analyzer, "analyze_project", side_effect=mock_analyze_slow):
+        task1 = generate_job_project_understanding(job_id=job.job_id, provider=None, refresh=False)
+        task2 = generate_job_project_understanding(job_id=job.job_id, provider=None, refresh=False)
+        res1, res2 = await asyncio.gather(task1, task2)
+
+        # Both return the identical grounded understanding
+        assert res1.identity.name == "pallets/click"
+        assert res2.identity.name == "pallets/click"
+        # Analyzer was executed exactly once due to atomic per-job locking and cache reuse
+        assert execution_count == 1
 

@@ -486,40 +486,52 @@ async def generate_job_project_understanding(
             detail=f"Repository knowledge consolidation must be completed first (current status: {internal.stages[2].status.value}).",
         )
 
-    # Return cached if already available and refresh not requested
-    if internal.project_understanding and not refresh:
-        return internal.project_understanding
+    # Acquire dedicated per-job lock to serialize concurrent requests for the same job atomically
+    job_lock = await job_store.get_job_lock(job_id)
+    async with job_lock:
+        # Re-fetch latest internal job state inside the lock
+        internal = job_store.get_internal_job(job_id)
+        if not internal or not internal.knowledge:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Job with ID '{job_id}' not found",
+            )
 
-    # Prevent concurrent duplicate generation requests
-    if internal.stages[3].status == StatusEnum.IN_PROGRESS and not refresh:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=f"Project understanding generation is already in progress for job '{job_id}'.",
-        )
+        # Return cached if already available and refresh not requested
+        if internal.project_understanding and not refresh:
+            return internal.project_understanding
 
-    # Update job stage to IN_PROGRESS
-    job_store.update_job_ai_summary_started(job_id)
+        # Prevent duplicate execution if another process or thread marked Stage 4 IN_PROGRESS
+        if internal.stages[3].status == StatusEnum.IN_PROGRESS and not refresh:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Project understanding generation is already in progress for job '{job_id}'.",
+            )
 
-    try:
-        understanding = await project_understanding_analyzer.analyze_project(
-            job_id=job_id,
-            knowledge=internal.knowledge,
-            provider_name=provider,
-        )
-        job_store.update_job_ai_summary_success(job_id, understanding)
-        return understanding
-    except AIError as ai_err:
-        job_store.update_job_ai_summary_failed(job_id, str(ai_err))
-        raise HTTPException(
-            status_code=ai_err.status_code if ai_err.status_code and ai_err.status_code >= 400 else 500,
-            detail=f"AI project understanding failed: {ai_err.message}",
-        )
-    except Exception as exc:
-        job_store.update_job_ai_summary_failed(job_id, str(exc))
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Unexpected error during project understanding: {exc}",
-        )
+        # Update job stage to IN_PROGRESS atomically
+        job_store.update_job_ai_summary_started(job_id)
+
+        try:
+            understanding = await project_understanding_analyzer.analyze_project(
+                job_id=job_id,
+                knowledge=internal.knowledge,
+                provider_name=provider,
+                local_path=internal.local_path,
+            )
+            job_store.update_job_ai_summary_success(job_id, understanding)
+            return understanding
+        except AIError as ai_err:
+            job_store.update_job_ai_summary_failed(job_id, str(ai_err))
+            raise HTTPException(
+                status_code=ai_err.status_code if ai_err.status_code and ai_err.status_code >= 400 else 500,
+                detail=f"AI project understanding failed: {ai_err.message}",
+            )
+        except Exception as exc:
+            job_store.update_job_ai_summary_failed(job_id, str(exc))
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Unexpected error during project understanding: {exc}",
+            )
 
 @router.post("/{job_id}/simulate-step", response_model=JobResponse)
 def simulate_job_step(job_id: str):

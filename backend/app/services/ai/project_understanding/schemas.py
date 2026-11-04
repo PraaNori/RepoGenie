@@ -14,6 +14,8 @@ class EvidenceReference(BaseModel):
     status: str = "confirmed"  # "confirmed", "inferred", "unknown", "unverified"
     detail: Optional[str] = None
     is_valid: bool = True
+    path_verified: bool = False
+    line_range_verified: bool = False
 
 
 class ProjectIdentity(BaseModel):

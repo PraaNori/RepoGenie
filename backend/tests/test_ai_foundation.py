@@ -187,6 +187,11 @@ async def test_gemini_provider_successful_generation():
     assert res.token_usage.job_id == "job-99"
     assert res.latency_ms >= 0.0
 
+    # Verify SDK options passed to Gemini client
+    call_kwargs = mock_client.aio.models.generate_content.call_args.kwargs
+    assert call_kwargs["config"].max_output_tokens == 1000
+    assert call_kwargs["config"].temperature == 0.3
+
 
 @pytest.mark.anyio
 async def test_gemini_provider_error_mapping():
@@ -287,6 +292,10 @@ async def test_groq_provider_successful_generation():
     assert res.token_usage.total_tokens == 70
     assert res.token_usage.is_estimated is False
     assert res.latency_ms >= 0.0
+
+    # Verify SDK options passed to Groq client
+    call_kwargs = mock_client.chat.completions.create.call_args.kwargs
+    assert call_kwargs["max_tokens"] == 500
 
 
 @pytest.mark.anyio
@@ -466,3 +475,40 @@ async def test_api_test_connectivity_endpoint_unconfigured():
     assert "is_reachable" in data
     if not data["is_reachable"]:
         assert "not configured" in data["message"].lower() or "failed" in data["message"].lower()
+
+
+@pytest.mark.anyio
+async def test_providers_respect_configured_ai_max_output_tokens():
+    from app.core.config import settings
+
+    # 1. Gemini
+    gemini_mock = MagicMock()
+    gemini_resp = MagicMock()
+    gemini_resp.text = "{}"
+    gemini_resp.candidates = [MagicMock(finish_reason="STOP")]
+    gemini_mock.aio.models.generate_content = AsyncMock(return_value=gemini_resp)
+
+    gemini_prov = GeminiProvider(api_key="mock", client=gemini_mock)
+    await gemini_prov.generate_text(
+        prompt="Test tokens",
+        options=LLMGenerationOptions(max_output_tokens=settings.AI_MAX_OUTPUT_TOKENS),
+    )
+    gemini_kwargs = gemini_mock.aio.models.generate_content.call_args.kwargs
+    assert gemini_kwargs["config"].max_output_tokens == settings.AI_MAX_OUTPUT_TOKENS
+
+    # 2. Groq
+    groq_mock = MagicMock()
+    groq_resp = MagicMock()
+    groq_choice = MagicMock()
+    groq_choice.message.content = "{}"
+    groq_choice.finish_reason = "stop"
+    groq_resp.choices = [groq_choice]
+    groq_mock.chat.completions.create = AsyncMock(return_value=groq_resp)
+
+    groq_prov = GroqProvider(api_key="mock", client=groq_mock)
+    await groq_prov.generate_text(
+        prompt="Test tokens",
+        options=LLMGenerationOptions(max_output_tokens=settings.AI_MAX_OUTPUT_TOKENS),
+    )
+    groq_kwargs = groq_mock.chat.completions.create.call_args.kwargs
+    assert groq_kwargs["max_tokens"] == settings.AI_MAX_OUTPUT_TOKENS

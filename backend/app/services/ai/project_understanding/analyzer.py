@@ -100,9 +100,19 @@ class ProjectUnderstandingAnalyzer:
         job_id: str,
         knowledge: RepositoryKnowledge,
         provider_name: Optional[str] = None,
+        local_path: Optional[str] = None,
     ) -> ProjectUnderstanding:
         """
         Executes end-to-end project understanding analysis using the configured LLM.
+
+        Token Budget and Rate Limit Note:
+            The input evidence package is capped at ~1,600 estimated tokens (~6,500 chars)
+            which, combined with system instructions and JSON schemas (~1,950 tokens) and
+            settings.AI_MAX_OUTPUT_TOKENS (2,048 tokens), produces an estimated total request
+            size of ~5,600 tokens. This keeps the single-request envelope safely within
+            strict per-minute rate limits (e.g., Groq's 8,000 TPM limit). Note that this
+            heuristic is a concurrency and rate-limit safety budget, not a guarantee of
+            external API quota availability.
         """
         logger.info("Starting AI project understanding for job %s (repo: %s)", job_id, knowledge.repository.name)
 
@@ -194,7 +204,9 @@ class ProjectUnderstandingAnalyzer:
                 understanding.latency_ms,
             )
             # 8. Statically validate every evidence reference against actual repository files
-            understanding = evidence_validator.validate_understanding(understanding, knowledge)
+            understanding = evidence_validator.validate_understanding(
+                understanding, knowledge, local_path=local_path
+            )
             return understanding
         except Exception as val_exc:
             logger.error("ProjectUnderstanding validation failed for job %s: %s", job_id, val_exc)
@@ -389,6 +401,7 @@ class ProjectUnderstandingAnalyzer:
         knowledge: RepositoryKnowledge,
         provider: str = "rule_based_fallback",
         model: str = "deterministic-rule-based",
+        local_path: Optional[str] = None,
     ) -> ProjectUnderstanding:
         """
         Creates a grounded, deterministic fallback ProjectUnderstanding when LLM APIs are offline.
@@ -524,7 +537,9 @@ class ProjectUnderstandingAnalyzer:
             latency_ms=0.0,
             token_usage=None,
         )
-        return evidence_validator.validate_understanding(fallback_obj, knowledge)
+        return evidence_validator.validate_understanding(
+            fallback_obj, knowledge, local_path=local_path
+        )
 
 
 project_understanding_analyzer = ProjectUnderstandingAnalyzer()

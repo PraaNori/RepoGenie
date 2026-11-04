@@ -1,4 +1,5 @@
 """Job storage service."""
+import asyncio
 import uuid
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
@@ -80,6 +81,18 @@ class JobInternal(BaseModel):
 class JobStore:
     def __init__(self):
         self._jobs: Dict[str, JobInternal] = {}
+        self._job_locks: Dict[str, asyncio.Lock] = {}
+        self._meta_lock = asyncio.Lock()
+
+    async def get_job_lock(self, job_id: str) -> asyncio.Lock:
+        """
+        Returns a dedicated asyncio.Lock for the specified job_id to ensure
+        per-job atomicity without blocking requests for other jobs.
+        """
+        async with self._meta_lock:
+            if job_id not in self._job_locks:
+                self._job_locks[job_id] = asyncio.Lock()
+            return self._job_locks[job_id]
 
     def create_job(
         self,

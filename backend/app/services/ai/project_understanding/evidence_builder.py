@@ -14,6 +14,14 @@ class EvidenceBuilder:
     """
     Constructs a compact, structured, grounded evidence package from RepositoryKnowledge
     to serve as the factual context for AI project-level understanding.
+
+    Token Budget Heuristic:
+        MAX_CHAR_BUDGET is set to 6,500 characters (~1,600 prompt tokens).
+        Combined with system prompt instructions and output schema definitions (~1,950 tokens)
+        and max output tokens (2,048), total requested tokens per operation remain around ~5,600,
+        safely below provider per-minute rate limits (e.g. Groq 8,000 TPM limit).
+        Note: This calculation is an operational heuristic against provider rate limits,
+        not a guarantee of available API quota.
     """
 
     MAX_CHAR_BUDGET = 6500  # ~1,600 tokens budget to stay safely within TPM free-tier limits
