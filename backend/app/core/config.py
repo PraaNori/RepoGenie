@@ -1,6 +1,6 @@
 import os
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
@@ -45,6 +45,20 @@ class Settings(BaseSettings):
     # Unified Repository Knowledge limits (Milestone 2.6)
     MAX_IMPORTANT_FILES: int = 50           # Maximum ranked important files retained
     MAX_SOURCE_EVIDENCE_RECORDS: int = 500  # Maximum trace evidence records retained
+
+    # AI Configuration Foundation (Milestone 3.1)
+    AI_PROVIDER: str = "gemini"
+
+    GEMINI_API_KEY: Optional[str] = None
+    GEMINI_MODEL: str = "gemini-2.5-flash"
+
+    GROQ_API_KEY: Optional[str] = None
+    GROQ_MODEL: str = "llama-3.3-70b-versatile"
+
+    AI_REQUEST_TIMEOUT: int = 60
+    AI_MAX_RETRIES: int = 2
+    AI_MAX_OUTPUT_TOKENS: int = 2048
+    AI_TEMPERATURE: float = 0.2
 
     @property
     def cors_origins_list(self) -> List[str]:
