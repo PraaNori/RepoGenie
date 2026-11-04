@@ -13,12 +13,14 @@ import {
   Sparkles,
   Layers,
   FileCode,
-  Workflow
+  Workflow,
+  AlertCircle
 } from 'lucide-react';
 
 export default function VideoResultView({ job, onReset }) {
   const [isPlaying, setIsPlaying] = useState(false);
   const [workflowUnderstanding, setWorkflowUnderstanding] = useState(job?.workflow_understanding || null);
+  const [workflowError, setWorkflowError] = useState(null);
 
   useEffect(() => {
     let isMounted = true;
@@ -28,12 +30,25 @@ export default function VideoResultView({ job, onReset }) {
       } else {
         getWorkflowUnderstanding(job.job_id)
           .then((res) => {
-            if (isMounted && res.success) {
+            if (!isMounted) return;
+            if (res.success) {
               setWorkflowUnderstanding(res.data);
+              setWorkflowError(null);
+            } else if (res.status === 404) {
+              // HTTP 404 indicates an absent optional workflow analysis; treat cleanly as absent
+              setWorkflowUnderstanding(null);
+              setWorkflowError(null);
+            } else {
+              // Unexpected server or network error: record for non-intrusive alert
+              setWorkflowUnderstanding(null);
+              setWorkflowError(res.error || 'Failed to load optional workflow analysis');
             }
           })
-          .catch(() => {
-            // Silently ignore optional workflow fetch failure (e.g. 404) in result view
+          .catch((err) => {
+            if (isMounted) {
+              setWorkflowUnderstanding(null);
+              setWorkflowError(err.message || 'Unexpected error loading optional workflow analysis');
+            }
           });
       }
     }
@@ -179,6 +194,24 @@ export default function VideoResultView({ job, onReset }) {
             workflowUnderstanding={workflowUnderstanding}
             readOnly
           />
+        </div>
+      )}
+
+      {/* Non-intrusive notification for unexpected optional workflow load failures */}
+      {workflowError && (
+        <div className="mt-8 pt-6 border-t border-slate-200">
+          <div className="p-4 rounded-xl bg-slate-50 border border-slate-200 text-xs text-slate-600 flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2">
+              <AlertCircle className="w-4 h-4 text-amber-500 flex-shrink-0" />
+              <span>Optional workflow analysis could not be retrieved: {workflowError}</span>
+            </div>
+            <button
+              onClick={() => setWorkflowError(null)}
+              className="text-slate-400 hover:text-slate-600 font-medium transition"
+            >
+              Dismiss
+            </button>
+          </div>
         </div>
       )}
     </div>

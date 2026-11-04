@@ -312,16 +312,26 @@ export async function getWorkflowUnderstanding(jobId) {
       },
     });
 
-    const data = await response.json();
-
-    if (!response.ok) {
-      throw new Error(data.detail || `Failed to fetch workflow understanding (${response.status})`);
+    let data;
+    try {
+      data = await response.json();
+    } catch {
+      data = {};
     }
 
-    return { success: true, data };
+    if (!response.ok) {
+      return {
+        success: false,
+        status: response.status,
+        error: data.detail || `Failed to fetch workflow understanding (${response.status})`,
+      };
+    }
+
+    return { success: true, status: response.status, data };
   } catch (error) {
     return {
       success: false,
+      status: 0,
       error: error.message || 'Error checking workflow understanding',
     };
   }
@@ -341,16 +351,26 @@ export async function generateWorkflowUnderstanding(jobId, provider = null, refr
       },
     });
 
-    const data = await response.json();
-
-    if (!response.ok) {
-      throw new Error(data.detail || `Failed to generate workflow understanding (${response.status})`);
+    let data;
+    try {
+      data = await response.json();
+    } catch {
+      data = {};
     }
 
-    return { success: true, data };
+    if (!response.ok) {
+      return {
+        success: false,
+        status: response.status,
+        error: data.detail || `Failed to generate workflow understanding (${response.status})`,
+      };
+    }
+
+    return { success: true, status: response.status, data };
   } catch (error) {
     return {
       success: false,
+      status: 0,
       error: error.message || 'Error generating workflow understanding',
     };
   }

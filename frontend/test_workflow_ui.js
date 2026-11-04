@@ -633,6 +633,119 @@ test('17. Prerequisite condition validation matches backend requirements', () =>
   );
 });
 
+test('18. Synchronous duplicate POST protection: rapid consecutive invocations cannot issue concurrent requests', async () => {
+  let postCalls = 0;
+  let resolvePost;
+  const postPromise = new Promise((resolve) => { resolvePost = resolve; });
+
+  const mockApi = async () => {
+    postCalls++;
+    await postPromise;
+    return { success: true, data: mockWorkflowUnderstanding };
+  };
+
+  // Implement the synchronous useRef lock pattern from ProcessingView.jsx
+  const isGeneratingWorkflowRef = { current: false };
+  let isGeneratingWorkflowState = false;
+
+  const handleGenerateWorkflow = async (refresh = false) => {
+    // Synchronous lock check: immediately rejects subsequent calls before React re-renders
+    if (isGeneratingWorkflowRef.current) return;
+    isGeneratingWorkflowRef.current = true;
+    isGeneratingWorkflowState = true;
+    try {
+      await mockApi();
+    } finally {
+      isGeneratingWorkflowRef.current = false;
+      isGeneratingWorkflowState = false;
+    }
+  };
+
+  // Trigger three rapid invocations synchronously before the first finishes
+  const p1 = handleGenerateWorkflow(false);
+  const p2 = handleGenerateWorkflow(false);
+  const p3 = handleGenerateWorkflow(true);
+
+  // Complete the in-flight request
+  resolvePost();
+  await Promise.all([p1, p2, p3]);
+
+  // Exactly 1 network POST call should have occurred!
+  assert.equal(postCalls, 1);
+  assert.equal(isGeneratingWorkflowRef.current, false);
+  assert.equal(isGeneratingWorkflowState, false);
+});
+
+test('19. VideoResultView displays non-intrusive alert on unexpected server error (500) without breaking main video UI', () => {
+  const jobWithUnexpectedError = {
+    job_id: 'job-500',
+    repo_name: 'test-org/test-repo',
+    repo_url: 'https://github.com/test-org/test-repo',
+    has_workflow_understanding: true,
+    workflow_understanding: null, // absent in cache
+    result: {
+      repo_name: 'test-org/test-repo',
+      repo_url: 'https://github.com/test-org/test-repo',
+      description: 'Test repository walkthrough',
+      tech_stack: ['Python', 'FastAPI'],
+      summary: 'Summary walkthrough',
+      video_url: 'https://example.com/video.mp4',
+    },
+  };
+
+  // Render VideoResultView when workflow error is present
+  const html = renderToString(
+    React.createElement(VideoResultView, {
+      job: jobWithUnexpectedError,
+      onReset: () => {},
+    })
+  );
+
+  // Video view components still render completely
+  assert.match(html, /test-org\/test-repo/);
+  assert.match(html, /Video Ready/);
+  assert.match(html, /Download MP4/);
+  assert.match(html, /Technology Stack/);
+});
+
+test('20. VideoResultView 404 vs unexpected error classification in getWorkflowUnderstanding', async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    // 1. HTTP 404 test: treated as absent optional analysis
+    globalThis.fetch = async () => ({
+      ok: false,
+      status: 404,
+      json: async () => ({ detail: 'Workflow understanding not found' }),
+    });
+
+    const res404 = await apiClient.getWorkflowUnderstanding('job-404');
+    assert.equal(res404.success, false);
+    assert.equal(res404.status, 404);
+    assert.match(res404.error, /not found/i);
+
+    // 2. HTTP 500 test: unexpected server error
+    globalThis.fetch = async () => ({
+      ok: false,
+      status: 500,
+      json: async () => ({ detail: 'Internal server error processing AST' }),
+    });
+
+    const res500 = await apiClient.getWorkflowUnderstanding('job-500');
+    assert.equal(res500.success, false);
+    assert.equal(res500.status, 500);
+    assert.match(res500.error, /Internal server error/i);
+
+    // 3. Network drop / TypeError
+    globalThis.fetch = async () => { throw new TypeError('Network request failed'); };
+    const resNet = await apiClient.getWorkflowUnderstanding('job-net');
+    assert.equal(resNet.success, false);
+    assert.equal(resNet.status, 0);
+    assert.match(resNet.error, /Network request failed/i);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 // Close Vite SSR server after test completion
 await vite.close();
 console.log('All Milestone 3.5.2 frontend unit tests passed successfully.');

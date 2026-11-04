@@ -76,6 +76,7 @@ export default function ProcessingView({
   const [isGeneratingWorkflow, setIsGeneratingWorkflow] = useState(false);
   const [workflowError, setWorkflowError] = useState(null);
   const isFetchingWorkflowRef = useRef(false);
+  const isGeneratingWorkflowRef = useRef(false);
 
   useEffect(() => {
     // If the job has code understanding generated and we haven't loaded it yet, fetch it
@@ -147,7 +148,10 @@ export default function ProcessingView({
   };
 
   const handleGenerateWorkflow = async (refresh = false) => {
-    if (!job?.job_id || isGeneratingWorkflow) return;
+    if (!job?.job_id) return;
+    // Synchronous lock check to prevent concurrent invocations before React re-renders
+    if (isGeneratingWorkflowRef.current) return;
+    isGeneratingWorkflowRef.current = true;
     setIsGeneratingWorkflow(true);
     setWorkflowError(null);
     try {
@@ -163,6 +167,7 @@ export default function ProcessingView({
     } catch (err) {
       setWorkflowError(err.message || 'Error generating workflow understanding');
     } finally {
+      isGeneratingWorkflowRef.current = false;
       setIsGeneratingWorkflow(false);
     }
   };
