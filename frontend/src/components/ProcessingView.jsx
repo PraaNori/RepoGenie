@@ -1,10 +1,13 @@
 import React, { useState, useEffect } from 'react';
 import ProjectUnderstandingCard from './ProjectUnderstandingCard';
 import CodeUnderstandingCard from './CodeUnderstandingCard';
+import WorkflowUnderstandingCard from './WorkflowUnderstandingCard';
 import {
   generateProjectUnderstanding,
   getCodeUnderstanding,
   generateCodeUnderstanding,
+  getWorkflowUnderstanding,
+  generateWorkflowUnderstanding,
 } from '../api/client';
 import { 
   GitBranch, 
@@ -69,6 +72,10 @@ export default function ProcessingView({
   const [isGeneratingCodeUnderstanding, setIsGeneratingCodeUnderstanding] = useState(false);
   const [codeUnderstandingError, setCodeUnderstandingError] = useState(null);
 
+  const [workflowUnderstanding, setWorkflowUnderstanding] = useState(null);
+  const [isGeneratingWorkflow, setIsGeneratingWorkflow] = useState(false);
+  const [workflowError, setWorkflowError] = useState(null);
+
   useEffect(() => {
     // If the job has code understanding generated and we haven't loaded it yet, fetch it
     if (job?.job_id && (job?.has_code_understanding || job?.code_understanding) && !codeUnderstanding) {
@@ -83,6 +90,21 @@ export default function ProcessingView({
       }
     }
   }, [job?.job_id, job?.has_code_understanding, job?.code_understanding]);
+
+  useEffect(() => {
+    // If the job has workflow understanding generated and we haven't loaded it yet, fetch it
+    if (job?.job_id && (job?.has_workflow_understanding || job?.workflow_understanding) && !workflowUnderstanding) {
+      if (job.workflow_understanding) {
+        setWorkflowUnderstanding(job.workflow_understanding);
+      } else {
+        getWorkflowUnderstanding(job.job_id).then((res) => {
+          if (res.success) {
+            setWorkflowUnderstanding(res.data);
+          }
+        });
+      }
+    }
+  }, [job?.job_id, job?.has_workflow_understanding, job?.workflow_understanding]);
 
   const handleGenerateUnderstanding = async (refresh = false) => {
     if (!job?.job_id) return;
@@ -114,6 +136,22 @@ export default function ProcessingView({
     }
     setIsGeneratingCodeUnderstanding(false);
   };
+
+  const handleGenerateWorkflow = async (refresh = false) => {
+    if (!job?.job_id) return;
+    setIsGeneratingWorkflow(true);
+    setWorkflowError(null);
+    const res = await generateWorkflowUnderstanding(job.job_id, null, refresh);
+    if (res.success) {
+      setWorkflowUnderstanding(res.data);
+      if (onJobUpdated) {
+        onJobUpdated({ ...job, has_workflow_understanding: true });
+      }
+    } else {
+      setWorkflowError(res.error);
+    }
+    setIsGeneratingWorkflow(false);
+  };
   if (!job) {
     return (
       <div className="max-w-3xl mx-auto py-16 text-center">
@@ -143,6 +181,13 @@ export default function ProcessingView({
   const codeAnalysis = job.code_analysis;
   const architecture = job.architecture;
   const knowledge = job.knowledge;
+  const isWorkflowPrereqReady = Boolean(
+    !isFailed &&
+    analysis &&
+    codeAnalysis &&
+    architecture?.call_graph &&
+    knowledge
+  );
 
   return (
     <div className="max-w-4xl mx-auto py-8 px-4 sm:px-6">
@@ -930,6 +975,17 @@ export default function ProcessingView({
           isLoading={isGeneratingCodeUnderstanding}
           onGenerate={handleGenerateCodeUnderstanding}
           error={codeUnderstandingError}
+        />
+      )}
+
+      {/* Milestone 3.4 & 3.5 AI Application Workflow Understanding */}
+      {(knowledge || architecture?.call_graph) && (
+        <WorkflowUnderstandingCard
+          workflowUnderstanding={workflowUnderstanding}
+          isLoading={isGeneratingWorkflow}
+          onGenerate={handleGenerateWorkflow}
+          error={workflowError}
+          isPrerequisiteReady={isWorkflowPrereqReady}
         />
       )}
 

@@ -1,4 +1,6 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
+import WorkflowUnderstandingCard from './WorkflowUnderstandingCard';
+import { getWorkflowUnderstanding } from '../api/client';
 import { 
   Download, 
   RotateCcw, 
@@ -10,11 +12,27 @@ import {
   CheckCircle2, 
   Sparkles,
   Layers,
-  FileCode
+  FileCode,
+  Workflow
 } from 'lucide-react';
 
 export default function VideoResultView({ job, onReset }) {
   const [isPlaying, setIsPlaying] = useState(false);
+  const [workflowUnderstanding, setWorkflowUnderstanding] = useState(job?.workflow_understanding || null);
+
+  useEffect(() => {
+    if (job?.job_id && (job?.has_workflow_understanding || job?.workflow_understanding) && !workflowUnderstanding) {
+      if (job.workflow_understanding) {
+        setWorkflowUnderstanding(job.workflow_understanding);
+      } else {
+        getWorkflowUnderstanding(job.job_id).then((res) => {
+          if (res.success) {
+            setWorkflowUnderstanding(res.data);
+          }
+        });
+      }
+    }
+  }, [job?.job_id, job?.has_workflow_understanding, job?.workflow_understanding]);
 
   // Fallback data if viewing directly without active job
   const repoName = job?.repo_name || 'fastapi/fastapi';
@@ -145,6 +163,16 @@ export default function VideoResultView({ job, onReset }) {
           </div>
         </div>
       </div>
+
+      {/* Discovered Application Workflows & Data Flows (Milestone 3.5.2) */}
+      {(workflowUnderstanding || job?.has_workflow_understanding) && (
+        <div className="mt-8 pt-6 border-t border-slate-200">
+          <WorkflowUnderstandingCard
+            workflowUnderstanding={workflowUnderstanding}
+            readOnly
+          />
+        </div>
+      )}
     </div>
   );
 }
