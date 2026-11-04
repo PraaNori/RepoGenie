@@ -7,12 +7,14 @@ from ...models.schemas import (
     JobResponse,
     ParsedRepository,
     RepoAnalysisResult,
+    RepositoryKnowledge,
     StatusEnum,
     VideoResult,
 )
 from ...services.repo.analyzer import repo_analyzer_service
 from ...services.repo.architecture_analyzer import architecture_analyzer_service
 from ...services.repo.code_parser import code_parser_service
+from ...services.repo.knowledge_builder import knowledge_builder_service
 from ...services.repo.ingest import (
     CloneExecutionError,
     CloneTimeoutError,
@@ -103,11 +105,6 @@ def run_ingestion_and_analysis_task(job_id: str, clone_url: str):
                     analysis=analysis_result,
                     local_path=internal_job.local_path,
                 )
-                job_store.update_job_code_and_architecture_success(
-                    job_id=job_id,
-                    code_analysis=code_analysis,
-                    architecture=architecture,
-                )
                 logger.info(
                     "Successfully analyzed architecture for job %s: %d internal dependencies, %d resolved calls, %d entry points, %d components",
                     job_id,
@@ -116,9 +113,36 @@ def run_ingestion_and_analysis_task(job_id: str, clone_url: str):
                     len(architecture.entry_points),
                     len(architecture.components),
                 )
+
+                # Step 5: Milestone 2.6 Unified Repository Knowledge Representation
+                knowledge = knowledge_builder_service.build_knowledge(
+                    job_id=job_id,
+                    repo_name=internal_job.repo_name,
+                    repo_owner=internal_job.repository_owner,
+                    repo_url=internal_job.repo_url,
+                    local_path=internal_job.local_path,
+                    size_mb=result.size_mb,
+                    file_count=result.file_count,
+                    analysis=analysis_result,
+                    parsed_repo=code_analysis,
+                    architecture=architecture,
+                )
+                job_store.update_job_knowledge_success(
+                    job_id=job_id,
+                    code_analysis=code_analysis,
+                    architecture=architecture,
+                    knowledge=knowledge,
+                )
+                logger.info(
+                    "Successfully built repository knowledge for job %s: %d important files, %d frameworks, %d source evidence records",
+                    job_id,
+                    len(knowledge.important_files),
+                    len(knowledge.technology_stack.frameworks),
+                    len(knowledge.source_evidence),
+                )
             except Exception as exc:
                 job_store.update_job_code_parsing_failed(job_id, str(exc))
-                logger.exception("Code parsing or architecture analysis failed for job %s: %s", job_id, exc)
+                logger.exception("Code understanding or knowledge consolidation failed for job %s: %s", job_id, exc)
 
     except DestinationExistsError as exc:
         job_store.update_job_ingestion_failed(job_id, str(exc))
@@ -331,6 +355,49 @@ def get_job_architecture(job_id: str):
             detail=f"Architecture analysis metadata is not ready for job '{job_id}'.",
         )
     return internal.architecture
+
+@router.get("/{job_id}/knowledge", response_model=RepositoryKnowledge)
+def get_job_knowledge(job_id: str):
+    """
+    Get the unified repository knowledge representation consolidating structure, code parsing, and architecture.
+    """
+    internal = job_store.get_internal_job(job_id)
+    if not internal:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Job with ID '{job_id}' not found",
+        )
+    if internal.ingestion_status == StatusEnum.FAILED:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Repository ingestion failed for job '{job_id}': {internal.error}",
+        )
+    if internal.ingestion_status in (StatusEnum.PENDING, StatusEnum.IN_PROGRESS):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Repository ingestion is still in progress for job '{job_id}'.",
+        )
+    if internal.stages[1].status in (StatusEnum.PENDING, StatusEnum.IN_PROGRESS):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Repository structure analysis is still in progress for job '{job_id}'.",
+        )
+    if internal.stages[2].status in (StatusEnum.PENDING, StatusEnum.IN_PROGRESS):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Code understanding and knowledge consolidation are still in progress for job '{job_id}'.",
+        )
+    if not internal.knowledge:
+        if internal.stages[2].status == StatusEnum.FAILED:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Knowledge consolidation failed: {internal.stages[2].detail}",
+            )
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Repository knowledge representation is not ready for job '{job_id}'.",
+        )
+    return internal.knowledge
 
 @router.post("/{job_id}/simulate-step", response_model=JobResponse)
 def simulate_job_step(job_id: str):

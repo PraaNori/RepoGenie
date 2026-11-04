@@ -32,6 +32,10 @@ from .entry_point_detector import (
     EntryPointDetector,
     entry_point_detector,
 )
+from .knowledge_builder import (
+    KnowledgeBuilderService,
+    knowledge_builder_service,
+)
 from .ingest import (
     CloneExecutionError,
     CloneTimeoutError,
@@ -56,6 +60,7 @@ __all__ = [
     "EXCLUDED_EXTENSIONS",
     "EntryPointDetector",
     "IngestionResult",
+    "KnowledgeBuilderService",
     "LANGUAGE_EXTENSION_MAP",
     "RepoAnalyzerService",
     "RepoIngestionError",
@@ -67,6 +72,7 @@ __all__ = [
     "component_classifier",
     "dependency_resolver",
     "entry_point_detector",
+    "knowledge_builder_service",
     "repo_analyzer_service",
     "repo_ingestion_service",
 ]

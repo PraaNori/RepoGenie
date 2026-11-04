@@ -42,6 +42,10 @@ class Settings(BaseSettings):
     MAX_RELATIONSHIPS_PER_FILE: int = 100   # Maximum extracted relationships per file
     MAX_UNRESOLVED_REFS_RETAINED: int = 500 # Maximum unresolved references stored
 
+    # Unified Repository Knowledge limits (Milestone 2.6)
+    MAX_IMPORTANT_FILES: int = 50           # Maximum ranked important files retained
+    MAX_SOURCE_EVIDENCE_RECORDS: int = 500  # Maximum trace evidence records retained
+
     @property
     def cors_origins_list(self) -> List[str]:
         return [origin.strip() for origin in self.CORS_ORIGINS.split(",") if origin.strip()]

@@ -8,6 +8,7 @@ from ...models.schemas import (
     JobResponse,
     ParsedRepository,
     RepoAnalysisResult,
+    RepositoryKnowledge,
     StageEnum,
     StageInfo,
     StatusEnum,
@@ -45,6 +46,7 @@ class JobInternal(BaseModel):
     analysis: Optional[RepoAnalysisResult] = None
     code_analysis: Optional[ParsedRepository] = None
     architecture: Optional[ArchitectureAnalysisResult] = None
+    knowledge: Optional[RepositoryKnowledge] = None
     result: Optional[VideoResult] = None
     error: Optional[str] = None
 
@@ -67,6 +69,7 @@ class JobInternal(BaseModel):
             analysis=self.analysis,
             code_analysis=self.code_analysis,
             architecture=self.architecture,
+            knowledge=self.knowledge,
             result=self.result,
             error=self.error,
         )
@@ -276,6 +279,36 @@ class JobStore:
             f"({architecture.dependency_graph.total_internal_dependencies} internal dependencies, "
             f"{architecture.call_graph.total_resolved_calls} resolved calls, "
             f"{len(architecture.entry_points)} entry points)"
+        )
+        job.progress_percentage = 33
+        # Set next stage ready (Stage 4: AI Summary Generation)
+        job.current_stage = PIPELINE_STAGES[3]
+        job.stages[3].status = StatusEnum.PENDING
+        job.stages[3].detail = "Ready for AI summary generation"
+        job.updated_at = now
+        return job
+
+    def update_job_knowledge_success(
+        self,
+        job_id: str,
+        code_analysis: ParsedRepository,
+        architecture: ArchitectureAnalysisResult,
+        knowledge: RepositoryKnowledge,
+    ) -> Optional[JobInternal]:
+        job = self._jobs.get(job_id)
+        if not job:
+            return None
+        now = datetime.now(timezone.utc)
+        job.code_analysis = code_analysis
+        job.architecture = architecture
+        job.knowledge = knowledge
+        job.stages[2].status = StatusEnum.COMPLETED
+        job.stages[2].completed_at = now
+        job.stages[2].detail = (
+            f"Consolidated knowledge ({code_analysis.total_parsed_files} files, "
+            f"{architecture.dependency_graph.total_internal_dependencies} internal deps, "
+            f"{len(knowledge.important_files)} important files, "
+            f"{len(knowledge.technology_stack.frameworks)} frameworks)"
         )
         job.progress_percentage = 33
         # Set next stage ready (Stage 4: AI Summary Generation)

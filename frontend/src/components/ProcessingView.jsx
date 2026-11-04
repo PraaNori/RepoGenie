@@ -28,7 +28,11 @@ import {
   Network,
   Compass,
   Share2,
-  Boxes
+  Boxes,
+  BookOpen,
+  Database,
+  Star,
+  ShieldCheck
 } from 'lucide-react';
 
 const STAGE_ICONS = {
@@ -78,6 +82,7 @@ export default function ProcessingView({
   const analysis = job.analysis;
   const codeAnalysis = job.code_analysis;
   const architecture = job.architecture;
+  const knowledge = job.knowledge;
 
   return (
     <div className="max-w-4xl mx-auto py-8 px-4 sm:px-6">
@@ -635,6 +640,214 @@ export default function ProcessingView({
                   <li key={idx}>{cycle.join(' -> ')}</li>
                 ))}
               </ul>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Milestone 2.6: Unified Repository Knowledge Representation Card */}
+      {knowledge && (
+        <div className="mb-6 p-6 sm:p-7 rounded-2xl bg-white border border-slate-200/90 shadow-sm transition-all hover:shadow-md">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-5 border-b border-slate-100 mb-5">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-xl bg-teal-50 text-teal-600 flex items-center justify-center border border-teal-100">
+                <BookOpen className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-base font-bold text-slate-900">
+                  Repository Knowledge Representation
+                </h3>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  Consolidated schema v{knowledge.schema_version} • Grounded repository knowledge ready for AI understanding
+                </p>
+              </div>
+            </div>
+            <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-teal-50 text-teal-700 border border-teal-200 self-start sm:self-auto">
+              <ShieldCheck className="w-3.5 h-3.5" />
+              <span>Consolidated Knowledge</span>
+            </span>
+          </div>
+
+          {/* Project Overview / README Description */}
+          {knowledge.project_overview?.description && (
+            <div className="mb-5 p-3.5 rounded-xl bg-slate-50/80 border border-slate-200/60">
+              <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block mb-1">
+                Project Documentation Overview ({knowledge.project_overview.readme_path || 'README'})
+              </span>
+              <p className="text-xs text-slate-700 leading-relaxed italic">
+                "{knowledge.project_overview.description}"
+              </p>
+              {knowledge.project_overview.features && knowledge.project_overview.features.length > 0 && (
+                <div className="mt-2.5 pt-2 border-t border-slate-200/50 flex flex-wrap gap-1.5">
+                  {knowledge.project_overview.features.slice(0, 4).map((feat, idx) => (
+                    <span
+                      key={idx}
+                      className="px-2 py-0.5 rounded bg-white text-slate-600 border border-slate-200 text-[11px]"
+                    >
+                      ✓ {feat}
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Key Statistics Grid */}
+          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-6 gap-3 mb-6">
+            <div className="p-3 rounded-xl bg-slate-50 border border-slate-200/70">
+              <div className="flex items-center gap-1.5 text-xs text-slate-500 mb-1">
+                <FileCode className="w-3.5 h-3.5 text-teal-600" />
+                <span>Lines of Code</span>
+              </div>
+              <p className="text-lg font-bold text-slate-900 font-mono">
+                {knowledge.statistics.total_lines_of_code.toLocaleString()}
+              </p>
+              <span className="text-[10px] text-slate-400">parsed lines</span>
+            </div>
+
+            <div className="p-3 rounded-xl bg-slate-50 border border-slate-200/70">
+              <div className="flex items-center gap-1.5 text-xs text-slate-500 mb-1">
+                <Terminal className="w-3.5 h-3.5 text-teal-600" />
+                <span>Functions/Meth</span>
+              </div>
+              <p className="text-lg font-bold text-slate-900 font-mono">
+                {(knowledge.statistics.total_functions + knowledge.statistics.total_methods).toLocaleString()}
+              </p>
+              <span className="text-[10px] text-slate-400">total definitions</span>
+            </div>
+
+            <div className="p-3 rounded-xl bg-slate-50 border border-slate-200/70">
+              <div className="flex items-center gap-1.5 text-xs text-slate-500 mb-1">
+                <Layers className="w-3.5 h-3.5 text-teal-600" />
+                <span>Classes</span>
+              </div>
+              <p className="text-lg font-bold text-slate-900 font-mono">
+                {knowledge.statistics.total_classes.toLocaleString()}
+              </p>
+              <span className="text-[10px] text-slate-400">types / models</span>
+            </div>
+
+            <div className="p-3 rounded-xl bg-slate-50 border border-slate-200/70">
+              <div className="flex items-center gap-1.5 text-xs text-slate-500 mb-1">
+                <Share2 className="w-3.5 h-3.5 text-teal-600" />
+                <span>Internal Deps</span>
+              </div>
+              <p className="text-lg font-bold text-slate-900 font-mono">
+                {knowledge.statistics.total_internal_dependencies.toLocaleString()}
+              </p>
+              <span className="text-[10px] text-slate-400">file linkages</span>
+            </div>
+
+            <div className="p-3 rounded-xl bg-slate-50 border border-slate-200/70">
+              <div className="flex items-center gap-1.5 text-xs text-slate-500 mb-1">
+                <Star className="w-3.5 h-3.5 text-teal-600" />
+                <span>Important Files</span>
+              </div>
+              <p className="text-lg font-bold text-slate-900 font-mono">
+                {knowledge.important_files.length.toLocaleString()}
+              </p>
+              <span className="text-[10px] text-slate-400">ranked key files</span>
+            </div>
+
+            <div className="p-3 rounded-xl bg-slate-50 border border-slate-200/70">
+              <div className="flex items-center gap-1.5 text-xs text-slate-500 mb-1">
+                <Compass className="w-3.5 h-3.5 text-teal-600" />
+                <span>Evidence Records</span>
+              </div>
+              <p className="text-lg font-bold text-slate-900 font-mono">
+                {knowledge.source_evidence.length.toLocaleString()}
+              </p>
+              <span className="text-[10px] text-slate-400">trace items</span>
+            </div>
+          </div>
+
+          {/* Technology Stack Pills */}
+          <div className="mb-5 space-y-3">
+            <h4 className="text-xs font-semibold text-slate-700 uppercase tracking-wider">
+              Consolidated Technology Stack
+            </h4>
+            <div className="flex flex-wrap gap-2">
+              {/* Languages */}
+              {knowledge.technology_stack?.languages?.map((lang) => (
+                <span
+                  key={lang.name}
+                  className="px-2.5 py-1 rounded-md bg-slate-100 text-slate-800 border border-slate-200 text-xs font-medium font-mono"
+                >
+                  {lang.name}
+                </span>
+              ))}
+              {/* Frameworks */}
+              {knowledge.technology_stack?.frameworks?.map((fw) => (
+                <span
+                  key={fw.name}
+                  className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-teal-50 text-teal-800 border border-teal-200 text-xs font-medium font-mono"
+                >
+                  <span>{fw.name}</span>
+                  {fw.is_confirmed && (
+                    <span className="text-[9px] bg-teal-200 text-teal-900 px-1 py-0.5 rounded font-sans uppercase font-bold">Confirmed</span>
+                  )}
+                </span>
+              ))}
+              {/* Databases */}
+              {knowledge.technology_stack?.databases?.map((db) => (
+                <span
+                  key={db.name}
+                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md bg-emerald-50 text-emerald-800 border border-emerald-200 text-xs font-medium font-mono"
+                >
+                  <Database className="w-3 h-3 text-emerald-600" />
+                  <span>{db.name}</span>
+                </span>
+              ))}
+              {/* Tools & Deployment */}
+              {knowledge.technology_stack?.deployment_technologies?.map((dep) => (
+                <span
+                  key={dep.name}
+                  className="px-2.5 py-1 rounded-md bg-sky-50 text-sky-800 border border-sky-200 text-xs font-medium font-mono"
+                >
+                  {dep.name}
+                </span>
+              ))}
+            </div>
+          </div>
+
+          {/* Top Ranked Important Files */}
+          {knowledge.important_files && knowledge.important_files.length > 0 && (
+            <div className="mb-2">
+              <h4 className="text-xs font-semibold text-slate-700 uppercase tracking-wider mb-2.5">
+                Top Ranked Important Files ({knowledge.important_files.length})
+              </h4>
+              <div className="space-y-1.5 max-h-48 overflow-y-auto pr-1">
+                {knowledge.important_files.slice(0, 6).map((file, idx) => (
+                  <div
+                    key={file.relative_path}
+                    className="p-2 rounded-lg bg-slate-50 border border-slate-200/60 flex items-center justify-between text-xs font-mono"
+                  >
+                    <div className="flex items-center gap-2 truncate">
+                      <span className="text-slate-400 font-bold text-[10px]">#{idx + 1}</span>
+                      <span className="px-1.5 py-0.5 rounded text-[10px] uppercase font-bold bg-slate-200 text-slate-700">
+                        {file.category.replace(/_/g, ' ')}
+                      </span>
+                      <span className="text-slate-900 font-semibold truncate">{file.relative_path}</span>
+                      <span className="text-slate-400 text-[11px] truncate hidden sm:inline">({file.reason})</span>
+                    </div>
+                    <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-teal-50 text-teal-700 border border-teal-200">
+                      Score {file.score.toFixed(1)}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Warnings */}
+          {knowledge.warnings && knowledge.warnings.length > 0 && (
+            <div className="mt-4 p-3 rounded-lg bg-amber-50 border border-amber-200 text-amber-800 text-xs space-y-1">
+              {knowledge.warnings.map((w, idx) => (
+                <div key={idx} className="flex items-center gap-1.5">
+                  <AlertCircle className="w-3.5 h-3.5 text-amber-600 flex-shrink-0" />
+                  <span>{w}</span>
+                </div>
+              ))}
             </div>
           )}
         </div>

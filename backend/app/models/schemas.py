@@ -277,6 +277,114 @@ class ArchitectureAnalysisResult(BaseModel):
     analysis_status: StatusEnum = StatusEnum.COMPLETED
     warnings: List[str] = []
 
+# --- Milestone 2.6: Unified Repository Knowledge Representation Models ---
+
+class TechnologyItem(BaseModel):
+    name: str
+    category: str  # "language", "framework", "library", "database", "tool", "deployment"
+    version: Optional[str] = None
+    confidence: str = "high"  # "high", "medium", "low"
+    detection_source: str  # "manifest", "configuration", "language_detection", "code_import", "framework_instance"
+    is_confirmed: bool = True  # True for observed/active signals, False for inferred declarations
+
+class TechnologyStack(BaseModel):
+    languages: List[TechnologyItem] = []
+    frameworks: List[TechnologyItem] = []
+    libraries: List[TechnologyItem] = []
+    databases: List[TechnologyItem] = []
+    tools: List[TechnologyItem] = []
+    deployment_technologies: List[TechnologyItem] = []
+
+class RepositoryMetadataInfo(BaseModel):
+    name: str
+    owner: str
+    repository_url: str
+    clone_url: Optional[str] = None
+    clone_status: StatusEnum = StatusEnum.COMPLETED
+    size_mb: float = 0.0
+    file_count: int = 0
+    description: Optional[str] = None
+
+class ProjectOverviewInfo(BaseModel):
+    readme_available: bool = False
+    readme_path: Optional[str] = None
+    description: Optional[str] = None
+    features: List[str] = []
+    limitations: List[str] = []
+    documentation_warnings: List[str] = []
+
+class ImportantFileInfo(BaseModel):
+    relative_path: str
+    category: str  # "readme", "entry_point", "manifest", "configuration", "api_route", "service", "model", "database", "test"
+    score: float  # Numerical priority rank (higher = more central)
+    reason: str
+    evidence: str
+    confidence: str = "high"  # "high", "medium", "low"
+
+class SourceEvidenceRecord(BaseModel):
+    file_path: str
+    start_line: int
+    end_line: Optional[int] = None
+    evidence_type: str  # "import_statement", "function_call", "class_inheritance", "instantiation", "type_annotation", "main_guard", "configuration", "manifest_dependency", "documentation"
+    symbol_or_statement: str
+    confidence: str = "high"  # "high", "medium", "low"
+    analysis_stage: str  # "repo_structure", "code_parsing", "architecture_analysis", "documentation"
+    status: str = "statically_resolved"  # "observed", "statically_resolved", "inferred", "unresolved"
+
+class RepositoryStructureOverview(BaseModel):
+    total_directories: int = 0
+    total_files: int = 0
+    important_directories: List[str] = []
+    directory_tree: Optional[DirectoryTreeNode] = None
+
+class UnifiedStatistics(BaseModel):
+    total_files: int = 0
+    source_files: int = 0
+    filtered_files: int = 0
+    total_lines_of_code: int = 0
+    total_functions: int = 0
+    total_classes: int = 0
+    total_methods: int = 0
+    total_imports: int = 0
+    total_function_calls: int = 0
+    total_internal_dependencies: int = 0
+    total_external_dependencies: int = 0
+    circular_dependencies_count: int = 0
+
+class CodeStructureSummary(BaseModel):
+    parsed_files_count: int = 0
+    supported_languages: List[str] = []
+    files: List[ParsedFile] = []
+
+class ArchitectureSummary(BaseModel):
+    dependency_graph: DependencyGraph
+    call_graph: CallGraph
+    inheritance_relationships: List[InheritanceRelationship] = []
+    class_references: List[ClassReference] = []
+    components: List[ArchitecturalComponent] = []
+    component_counts: Dict[str, int] = {}
+
+class KnowledgeAnalysisMetadata(BaseModel):
+    analysis_status: StatusEnum = StatusEnum.COMPLETED
+    created_at: datetime
+    stages_completed: List[str] = []
+
+class RepositoryKnowledge(BaseModel):
+    schema_version: str = "1.0"
+    repository: RepositoryMetadataInfo
+    project_overview: ProjectOverviewInfo
+    technology_stack: TechnologyStack
+    repository_structure: RepositoryStructureOverview
+    statistics: UnifiedStatistics
+    dependency_information: DependencyGraph
+    code_structure: CodeStructureSummary
+    architecture: ArchitectureSummary
+    entry_points: List[EntryPointCandidate] = []
+    important_files: List[ImportantFileInfo] = []
+    source_evidence: List[SourceEvidenceRecord] = []
+    warnings: List[str] = []
+    analysis_metadata: KnowledgeAnalysisMetadata
+
 # --- Main Job Models ---
 
 class JobResponse(BaseModel):
@@ -296,5 +404,6 @@ class JobResponse(BaseModel):
     analysis: Optional[RepoAnalysisResult] = None
     code_analysis: Optional[ParsedRepository] = None
     architecture: Optional[ArchitectureAnalysisResult] = None
+    knowledge: Optional[RepositoryKnowledge] = None
     result: Optional[VideoResult] = None
     error: Optional[str] = None
