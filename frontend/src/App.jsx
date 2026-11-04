@@ -210,6 +210,7 @@ export default function App() {
             isSimulating={isSimulating}
             onViewResults={() => setCurrentView('result')}
             onCancel={handleReset}
+            onJobUpdated={(updatedJob) => setCurrentJob(updatedJob)}
           />
         )}
 

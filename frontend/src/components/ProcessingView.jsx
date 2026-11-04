@@ -1,4 +1,6 @@
-import React from 'react';
+import React, { useState } from 'react';
+import ProjectUnderstandingCard from './ProjectUnderstandingCard';
+import { generateProjectUnderstanding } from '../api/client';
 import { 
   GitBranch, 
   Search, 
@@ -52,8 +54,26 @@ export default function ProcessingView({
   onSimulateStep, 
   isSimulating, 
   onViewResults,
-  onCancel
+  onCancel,
+  onJobUpdated,
 }) {
+  const [isGeneratingUnderstanding, setIsGeneratingUnderstanding] = useState(false);
+  const [understandingError, setUnderstandingError] = useState(null);
+
+  const handleGenerateUnderstanding = async (refresh = false) => {
+    if (!job?.job_id) return;
+    setIsGeneratingUnderstanding(true);
+    setUnderstandingError(null);
+    const res = await generateProjectUnderstanding(job.job_id, null, refresh);
+    if (res.success) {
+      if (onJobUpdated) {
+        onJobUpdated({ ...job, project_understanding: res.data });
+      }
+    } else {
+      setUnderstandingError(res.error);
+    }
+    setIsGeneratingUnderstanding(false);
+  };
   if (!job) {
     return (
       <div className="max-w-3xl mx-auto py-16 text-center">
@@ -851,6 +871,16 @@ export default function ProcessingView({
             </div>
           )}
         </div>
+      )}
+
+      {/* Milestone 3.2 AI Project Understanding */}
+      {knowledge && (
+        <ProjectUnderstandingCard
+          understanding={job.project_understanding}
+          isLoading={isGeneratingUnderstanding || job.stages?.[3]?.status === 'in_progress'}
+          onGenerate={handleGenerateUnderstanding}
+          error={understandingError}
+        />
       )}
 
       {/* 9 Stages List */}

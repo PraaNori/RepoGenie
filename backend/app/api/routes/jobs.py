@@ -1,5 +1,6 @@
 import logging
 from datetime import datetime, timezone
+from typing import Optional
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, status
 from ...models.schemas import (
     ArchitectureAnalysisResult,
@@ -8,8 +9,14 @@ from ...models.schemas import (
     ParsedRepository,
     RepoAnalysisResult,
     RepositoryKnowledge,
+    StageEnum,
     StatusEnum,
     VideoResult,
+)
+from ...services.ai.exceptions import AIError
+from ...services.ai.project_understanding import (
+    ProjectUnderstanding,
+    project_understanding_analyzer,
 )
 from ...services.repo.analyzer import repo_analyzer_service
 from ...services.repo.architecture_analyzer import architecture_analyzer_service
@@ -399,6 +406,114 @@ def get_job_knowledge(job_id: str):
         )
     return internal.knowledge
 
+@router.get("/{job_id}/project-understanding", response_model=ProjectUnderstanding)
+def get_job_project_understanding(job_id: str):
+    """
+    Returns the cached AI-generated project understanding for a job.
+    Returns 404 if job not found or understanding not yet generated.
+    Returns 409 if prerequisite stages are still in progress.
+    """
+    internal = job_store.get_internal_job(job_id)
+    if not internal:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Job with ID '{job_id}' not found",
+        )
+
+    # Check prerequisite stages
+    if internal.stages[0].status in (StatusEnum.PENDING, StatusEnum.IN_PROGRESS):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Repository fetching is still in progress for job '{job_id}'.",
+        )
+    if internal.stages[1].status in (StatusEnum.PENDING, StatusEnum.IN_PROGRESS):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Repository analysis is still in progress for job '{job_id}'.",
+        )
+    if internal.stages[2].status in (StatusEnum.PENDING, StatusEnum.IN_PROGRESS):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Code understanding is still in progress for job '{job_id}'.",
+        )
+
+    if not internal.knowledge:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Repository knowledge must be completed before project understanding can be viewed.",
+        )
+
+    if not internal.project_understanding:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Project understanding has not yet been generated for job '{job_id}'. Call POST /jobs/{job_id}/project-understanding to generate it.",
+        )
+
+    return internal.project_understanding
+
+
+@router.post("/{job_id}/project-understanding", response_model=ProjectUnderstanding)
+async def generate_job_project_understanding(
+    job_id: str,
+    provider: Optional[str] = Query(None, description="Optional override provider (e.g. gemini, groq)"),
+    refresh: bool = Query(False, description="Whether to re-generate if already cached"),
+):
+    """
+    Generates or retrieves cached AI project-level understanding for a job using the configured LLM.
+    Advances Stage 4 (AI Summary Generation) to COMPLETED upon success.
+    """
+    internal = job_store.get_internal_job(job_id)
+    if not internal:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Job with ID '{job_id}' not found",
+        )
+
+    # Check prerequisite stages
+    if internal.stages[0].status != StatusEnum.COMPLETED:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Repository ingestion must be completed first (current status: {internal.stages[0].status.value}).",
+        )
+    if internal.stages[1].status != StatusEnum.COMPLETED:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Repository structure analysis must be completed first (current status: {internal.stages[1].status.value}).",
+        )
+    if internal.stages[2].status != StatusEnum.COMPLETED or not internal.knowledge:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Repository knowledge consolidation must be completed first (current status: {internal.stages[2].status.value}).",
+        )
+
+    # Return cached if already available and refresh not requested
+    if internal.project_understanding and not refresh:
+        return internal.project_understanding
+
+    # Update job stage to IN_PROGRESS
+    job_store.update_job_ai_summary_started(job_id)
+
+    try:
+        understanding = await project_understanding_analyzer.analyze_project(
+            job_id=job_id,
+            knowledge=internal.knowledge,
+            provider_name=provider,
+        )
+        job_store.update_job_ai_summary_success(job_id, understanding)
+        return understanding
+    except AIError as ai_err:
+        job_store.update_job_ai_summary_failed(job_id, str(ai_err))
+        raise HTTPException(
+            status_code=ai_err.status_code if ai_err.status_code and ai_err.status_code >= 400 else 500,
+            detail=f"AI project understanding failed: {ai_err.message}",
+        )
+    except Exception as exc:
+        job_store.update_job_ai_summary_failed(job_id, str(exc))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Unexpected error during project understanding: {exc}",
+        )
+
 @router.post("/{job_id}/simulate-step", response_model=JobResponse)
 def simulate_job_step(job_id: str):
     """
@@ -441,6 +556,9 @@ def simulate_job_step(job_id: str):
             current_stage.completed_at = now
             current_stage.detail = f"Completed {current_stage.name} successfully."
             internal_job.progress_percentage = int(((target_idx + 1) / len(internal_job.stages)) * 100)
+
+            if current_stage.name == StageEnum.AI_SUMMARY.value and internal_job.knowledge and not internal_job.project_understanding:
+                internal_job.project_understanding = project_understanding_analyzer.create_rule_based_fallback(internal_job.knowledge)
 
             # Check if there is a next stage
             if target_idx + 1 < len(internal_job.stages):

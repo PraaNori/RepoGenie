@@ -3,8 +3,13 @@ from pathlib import Path
 from typing import List, Optional
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+_env_path = Path(__file__).resolve().parent.parent.parent / ".env"
+
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=str(_env_path) if _env_path.exists() else ".env",
+        extra="ignore"
+    )
 
     APP_NAME: str = "RepoGenie API"
     APP_VERSION: str = "0.2.1"

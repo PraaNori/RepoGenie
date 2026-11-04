@@ -137,7 +137,7 @@ def test_gemini_provider_initialization():
 
 @pytest.mark.anyio
 async def test_gemini_provider_missing_key_error():
-    prov = GeminiProvider(api_key=None)
+    prov = GeminiProvider(api_key="")
     with pytest.raises(AIConfigurationError) as exc_info:
         await prov.generate_text("Hello")
     assert "Gemini API key is not configured" in str(exc_info.value)
@@ -244,7 +244,7 @@ def test_groq_provider_initialization():
 
 @pytest.mark.anyio
 async def test_groq_provider_missing_key_error():
-    prov = GroqProvider(api_key=None)
+    prov = GroqProvider(api_key="")
     with pytest.raises(AIConfigurationError) as exc_info:
         await prov.generate_text("Hello")
     assert "Groq API key is not configured" in str(exc_info.value)

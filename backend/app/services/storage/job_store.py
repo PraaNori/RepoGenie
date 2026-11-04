@@ -14,6 +14,7 @@ from ...models.schemas import (
     StatusEnum,
     VideoResult,
 )
+from ..ai.project_understanding.schemas import ProjectUnderstanding
 
 # Standard 9 pipeline stages
 PIPELINE_STAGES = [
@@ -47,6 +48,7 @@ class JobInternal(BaseModel):
     code_analysis: Optional[ParsedRepository] = None
     architecture: Optional[ArchitectureAnalysisResult] = None
     knowledge: Optional[RepositoryKnowledge] = None
+    project_understanding: Optional[ProjectUnderstanding] = None
     result: Optional[VideoResult] = None
     error: Optional[str] = None
 
@@ -70,6 +72,7 @@ class JobInternal(BaseModel):
             code_analysis=self.code_analysis,
             architecture=self.architecture,
             knowledge=self.knowledge,
+            project_understanding=self.project_understanding,
             result=self.result,
             error=self.error,
         )
@@ -326,6 +329,54 @@ class JobStore:
         job.stages[2].status = StatusEnum.FAILED
         job.stages[2].completed_at = now
         job.stages[2].detail = f"Code parsing failed: {error_message}"
+        job.updated_at = now
+        return job
+
+    def update_job_ai_summary_started(self, job_id: str) -> Optional[JobInternal]:
+        job = self._jobs.get(job_id)
+        if not job:
+            return None
+        now = datetime.now(timezone.utc)
+        job.stages[3].status = StatusEnum.IN_PROGRESS
+        job.stages[3].started_at = now
+        job.stages[3].detail = "Generating AI-powered project understanding"
+        job.current_stage = PIPELINE_STAGES[3]
+        job.progress_percentage = 38
+        job.updated_at = now
+        return job
+
+    def update_job_ai_summary_success(
+        self,
+        job_id: str,
+        understanding: ProjectUnderstanding,
+    ) -> Optional[JobInternal]:
+        job = self._jobs.get(job_id)
+        if not job:
+            return None
+        now = datetime.now(timezone.utc)
+        job.project_understanding = understanding
+        job.stages[3].status = StatusEnum.COMPLETED
+        job.stages[3].completed_at = now
+        job.stages[3].detail = (
+            f"Generated project understanding ({len(understanding.core_features)} features, "
+            f"{understanding.provider}/{understanding.model})"
+        )
+        job.progress_percentage = 44
+        # Set next stage ready (Stage 5: Script Generation)
+        job.current_stage = PIPELINE_STAGES[4]
+        job.stages[4].status = StatusEnum.PENDING
+        job.stages[4].detail = "Ready for educational script generation"
+        job.updated_at = now
+        return job
+
+    def update_job_ai_summary_failed(self, job_id: str, error_message: str) -> Optional[JobInternal]:
+        job = self._jobs.get(job_id)
+        if not job:
+            return None
+        now = datetime.now(timezone.utc)
+        job.stages[3].status = StatusEnum.FAILED
+        job.stages[3].completed_at = now
+        job.stages[3].detail = f"AI summary generation failed: {error_message}"
         job.updated_at = now
         return job
 
