@@ -1,10 +1,13 @@
 """
-Python Tree-sitter AST Control-Flow and Call-Site Analyzer.
+Python Tree-sitter AST Control-Flow, Call-Site, and Data Transformation Analyzer.
 
 Analyzes Tree-sitter AST parent/ancestor node hierarchies to evaluate:
 1. source_order_verified: Textual ordering of call sites within the exact same caller symbol and file.
 2. same_execution_path_verified: At least one statically valid control-flow path contains both calls in order.
-3. execution_guaranteed: The later call is guaranteed to execute after the earlier call.
+3. execution_guaranteed: The later call is guaranteed to execute after the earlier call along the normal,
+   non-exceptional static control-flow path (no intervening conditionals, loops, try blocks, or early exits).
+   Note: Dynamic runtime exceptions thrown inside callee functions are unobserved runtime phenomena outside
+   static AST guarantee scope.
 4. runtime_execution_verified: Always False (RepoGenie does not execute code).
 """
 
@@ -12,12 +15,18 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import List, Optional, Set, Tuple, Union
+from typing import Dict, List, Optional, Set, Tuple, Union
 import tree_sitter
 import tree_sitter_python as tspython
 
-from ....models.schemas import CallGraphEdge, FunctionCallInfo, ParsedFile
-from .schemas import CallSiteEvidence
+from ....models.schemas import (
+    CallGraphEdge,
+    FunctionCallInfo,
+    FunctionInfo,
+    MethodInfo,
+    ParsedFile,
+)
+from .schemas import CallSiteEvidence, DataFlow, DataTransformation, WorkflowStep
 
 logger = logging.getLogger(__name__)
 
@@ -328,14 +337,20 @@ class PythonASTControlFlowAnalyzer:
                 "Call occurs inside a loop; dynamic iteration count prevents guaranteed execution."
             )
 
-        # 4. Check for exception handlers enclosing either call
-        has_exception = any(n.type in ("except_clause", "finally_clause") for n in ancestors_a + ancestors_b)
-        if has_exception:
+        # 4. Check for try blocks or exception handlers enclosing either call
+        has_try_statement = any(n.type == "try_statement" for n in ancestors_a + ancestors_b)
+        has_exception_handler = any(n.type in ("except_clause", "finally_clause") for n in ancestors_a + ancestors_b)
+        if has_try_statement or has_exception_handler:
             result.is_in_try_block = True
             result.execution_guaranteed = False
-            result.unresolved_aspects.append(
-                "Call occurs inside an exception handler; execution depends on runtime exception occurrence."
-            )
+            if has_exception_handler:
+                result.unresolved_aspects.append(
+                    "Call occurs inside an exception handler; execution depends on runtime exception occurrence."
+                )
+            else:
+                result.unresolved_aspects.append(
+                    "Calls occur inside a try block; runtime exceptions can divert execution to an exception handler before reaching the later call."
+                )
 
         # 5. Check sequential continuation and early exits
         # Traverse all blocks from call_a up to lca to detect subsequent exits in the same block
@@ -399,7 +414,8 @@ class PythonASTControlFlowAnalyzer:
             conditional_exit_found
             or b_in_conditional
             or has_loop
-            or has_exception
+            or has_try_statement
+            or has_exception_handler
         ):
             result.execution_guaranteed = False
             if conditional_exit_found:
@@ -505,6 +521,336 @@ class PythonASTControlFlowAnalyzer:
             if self._has_any_exit(c):
                 return True
         return False
+
+    def _find_call_by_name(
+        self, root_node: tree_sitter.Node, full_name: str, short_name: str
+    ) -> Optional[tree_sitter.Node]:
+        """Recursively finds a call node matching full_name or short_name."""
+        matching_node = None
+
+        def _traverse(n: tree_sitter.Node):
+            nonlocal matching_node
+            if matching_node:
+                return
+            if n.type == "call":
+                func_child = n.child_by_field_name("function")
+                if func_child:
+                    c_text = func_child.text.decode("utf-8").strip()
+                    if (
+                        c_text == full_name
+                        or c_text == short_name
+                        or c_text.endswith(f".{short_name}")
+                        or (full_name and full_name.endswith(f".{c_text}"))
+                    ):
+                        matching_node = n
+                        return
+            for c in n.children:
+                _traverse(c)
+
+        _traverse(root_node)
+        return matching_node
+
+    def _get_function_parameter_names(self, fn_node: tree_sitter.Node) -> List[str]:
+        """Extracts formal parameter names from a function_definition node."""
+        params_node = fn_node.child_by_field_name("parameters")
+        if not params_node:
+            return []
+        names: List[str] = []
+        for child in params_node.children:
+            if child.type == "identifier":
+                names.append(child.text.decode("utf-8").strip())
+            elif child.type in ("typed_parameter", "default_parameter", "typed_default_parameter"):
+                id_child = child.child_by_field_name("name") or (child.children[0] if child.children else None)
+                if id_child and id_child.type == "identifier":
+                    names.append(id_child.text.decode("utf-8").strip())
+        return names
+
+    def _track_local_aliases(
+        self, fn_node: tree_sitter.Node, target_call_node: tree_sitter.Node, initial_aliases: Set[str]
+    ) -> Set[str]:
+        """
+        Scans assignments before target_call_node to track local variables
+        aliasing the input data item or parameters.
+        """
+        aliases = {a.lower() for a in initial_aliases}
+        call_row = target_call_node.start_point.row
+
+        def _scan(n: tree_sitter.Node):
+            if n.start_point.row >= call_row and n != target_call_node:
+                return
+            if n.type == "assignment":
+                left = n.child_by_field_name("left")
+                right = n.child_by_field_name("right")
+                if left and right and left.type == "identifier":
+                    var_name = left.text.decode("utf-8").strip().lower()
+                    right_text = right.text.decode("utf-8").strip().lower()
+                    if right_text in aliases or any(tok in right_text for tok in aliases):
+                        aliases.add(var_name)
+                    else:
+                        for c in right.children:
+                            if c.type == "identifier" and c.text.decode("utf-8").strip().lower() in aliases:
+                                aliases.add(var_name)
+                                break
+            for c in n.children:
+                _scan(c)
+
+        _scan(fn_node)
+        return aliases
+
+    def _check_direct_data_operations(self, fn_node: tree_sitter.Node, data_tokens: Set[str]) -> bool:
+        """
+        Checks if any data item identifier in fn_node undergoes an operation
+        (attribute access/method call, subscript, binary op, or transformation call).
+        """
+        found = False
+
+        def _scan(n: tree_sitter.Node):
+            nonlocal found
+            if found:
+                return
+            if n.type == "identifier":
+                name = n.text.decode("utf-8").strip().lower()
+                if name in data_tokens or any(tok in name for tok in data_tokens):
+                    p = n.parent
+                    if p:
+                        if p.type == "attribute" and p.child_by_field_name("object") == n:
+                            found = True
+                            return
+                        elif p.type == "subscript" and p.child_by_field_name("value") == n:
+                            found = True
+                            return
+                        elif p.type in ("binary_operator", "augmented_assignment"):
+                            found = True
+                            return
+                        elif p.type == "argument_list" and p.parent and p.parent.type == "call":
+                            call_fn = p.parent.child_by_field_name("function")
+                            call_name = call_fn.text.decode("utf-8").strip().lower() if call_fn else ""
+                            if call_name not in ("print", "isinstance", "len", "type", "debug"):
+                                found = True
+                                return
+            for c in n.children:
+                _scan(c)
+
+        _scan(fn_node)
+        return found
+
+    def verify_data_transformation_evidence(
+        self,
+        parsed_file: Optional[ParsedFile],
+        transformation: DataTransformation,
+        data_flow: DataFlow,
+        workflow_steps: List[WorkflowStep],
+        parsed_files_map: Dict[str, ParsedFile],
+    ) -> Tuple[bool, str, Optional[str], List[str]]:
+        """
+        Statically verifies whether concrete AST and data-flow evidence supports an
+        observed transformation claim.
+        """
+        t_comp = transformation.performed_by_component.replace("\\", "/").strip().lstrip("/")
+        t_sym = transformation.performed_by_symbol
+        t_name = transformation.transformation_name
+        data_item = (data_flow.data_item_name or "").strip()
+        data_tokens = {tok.lower() for tok in data_item.replace("_", " ").split() if len(tok) > 1}
+        data_tokens.add(data_item.lower())
+
+        pf_t = parsed_files_map.get(t_comp) or parsed_file
+        if not pf_t:
+            return (
+                False,
+                "unknown_or_unresolved",
+                None,
+                [f"Transformation '{t_name}': component '{t_comp}' does not exist in repository."],
+            )
+
+        # 1. Verify existence of the performed_by_symbol
+        target_fn: Optional[Union[FunctionInfo, MethodInfo]] = None
+        if t_sym:
+            sym_clean = t_sym.split(".")[-1]
+            for fn in getattr(pf_t, "functions", []):
+                if fn.name == t_sym or fn.name == sym_clean:
+                    target_fn = fn
+                    break
+            if not target_fn:
+                for m in getattr(pf_t, "methods", []):
+                    if m.name == t_sym or m.name == sym_clean or f"{m.parent_class}.{m.name}" == t_sym:
+                        target_fn = m
+                        break
+
+            if not target_fn:
+                return (
+                    False,
+                    "unknown_or_unresolved",
+                    None,
+                    [f"Transformation '{t_name}': symbol '{t_sym}' not found in component '{t_comp}'."],
+                )
+
+        # Cross-function transformation check
+        orig_comp = getattr(getattr(data_flow, "origin", None), "component_id", None) or getattr(data_flow, "origin_component", None)
+        dest_comp = getattr(getattr(data_flow, "destination", None), "component_id", None) or getattr(data_flow, "destination_component", None)
+        if orig_comp:
+            orig_comp = orig_comp.replace("\\", "/").strip().lstrip("/")
+        if dest_comp:
+            dest_comp = dest_comp.replace("\\", "/").strip().lstrip("/")
+
+        if orig_comp and dest_comp and orig_comp != dest_comp:
+            has_param_link = False
+            for s in workflow_steps:
+                ce = getattr(s, "call_evidence", None)
+                if ce and ce.caller_file == orig_comp and ce.callee_file == dest_comp:
+                    has_param_link = True
+                    break
+            if not has_param_link:
+                return (
+                    False,
+                    "inferred",
+                    None,
+                    [
+                        f"Cross-function transformation claim for '{t_sym}' lacks verified parameter/return flow linking '{orig_comp}' and '{dest_comp}'; demoted to inferred."
+                    ],
+                )
+
+        # 2. Check if t_sym is called by any step in the workflow
+        step_callers = []
+        for s in workflow_steps:
+            if s.component_id:
+                s_c = s.component_id.replace("\\", "/").strip().lstrip("/")
+                s_pf = parsed_files_map.get(s_c)
+                if s_pf and s.symbol_name:
+                    step_callers.append((s_c, s.symbol_name, s_pf))
+
+        is_step_symbol = any(
+            (sc == t_comp and (sn == t_sym or sn == getattr(target_fn, "name", None)))
+            for sc, sn, _ in step_callers
+        )
+
+        calling_step = None
+        if not is_step_symbol and t_sym:
+            sym_clean = t_sym.split(".")[-1]
+            for sc, sn, s_pf in step_callers:
+                for fc in getattr(s_pf, "function_calls", []):
+                    if (
+                        fc.call_name == t_sym
+                        or fc.call_name == sym_clean
+                        or fc.call_name.endswith(f".{sym_clean}")
+                    ):
+                        if (
+                            fc.enclosing_scope == sn
+                            or fc.enclosing_scope == sn.split(".")[-1]
+                            or fc.enclosing_scope is None
+                        ):
+                            calling_step = (sc, sn, s_pf)
+                            break
+                if calling_step:
+                    break
+
+            if not calling_step:
+                for sc, sn, s_pf in step_callers:
+                    caller_fn = next((f for f in getattr(s_pf, "functions", []) if f.name == sn), None)
+                    if not caller_fn:
+                        caller_fn = next((m for m in getattr(s_pf, "methods", []) if m.name == sn), None)
+                    if caller_fn and caller_fn.snippet:
+                        tree = self._parser.parse(caller_fn.snippet.encode("utf-8"))
+                        fn_node = self._find_caller_function(tree.root_node, sn) or tree.root_node
+                        found_call = self._find_call_by_name(fn_node, t_sym, sym_clean)
+                        if found_call:
+                            calling_step = (sc, sn, s_pf)
+                            break
+
+            if not calling_step:
+                return (
+                    False,
+                    "inferred",
+                    None,
+                    [
+                        f"Transformation function '{t_sym}' exists in '{t_comp}' but is never called in workflow steps; demoted from observed to inferred."
+                    ],
+                )
+
+        # 3. Argument Flow and Intermediate Variable Tracking
+        if calling_step:
+            sc, sn, s_pf = calling_step
+            caller_fn = next((f for f in getattr(s_pf, "functions", []) if f.name == sn), None)
+            if not caller_fn:
+                caller_fn = next((m for m in getattr(s_pf, "methods", []) if m.name == sn), None)
+
+            if caller_fn and caller_fn.snippet:
+                tree = self._parser.parse(caller_fn.snippet.encode("utf-8"))
+                fn_node = self._find_caller_function(tree.root_node, sn) or tree.root_node
+                sym_clean = t_sym.split(".")[-1] if t_sym else ""
+                call_node = self._find_call_by_name(fn_node, t_sym or "", sym_clean)
+
+                if call_node:
+                    aliases = set(data_tokens)
+                    params = self._get_function_parameter_names(fn_node)
+                    for p in params:
+                        if any(tok in p.lower() for tok in data_tokens) or p.lower() in ("data", "payload", "item", "val", "msg", "record", "raw_input"):
+                            aliases.add(p.lower())
+
+                    aliases_tracked = self._track_local_aliases(fn_node, call_node, aliases)
+
+                    args_match = False
+                    arg_list = call_node.child_by_field_name("arguments")
+                    if arg_list:
+                        for arg_child in arg_list.children:
+                            if arg_child.type in (",", "(", ")"):
+                                continue
+                            arg_text = arg_child.text.decode("utf-8").strip().lower()
+                            if arg_text in aliases_tracked or any(tok in arg_text for tok in data_tokens):
+                                args_match = True
+                                break
+
+                    if not args_match:
+                        return (
+                            False,
+                            "inferred",
+                            None,
+                            [
+                                f"Transformation call '{t_sym}' in '{sn}' does not receive or operate on data item '{data_item}'; demoted to inferred."
+                            ],
+                        )
+
+                    op_type = "aliased_call_argument_flow_verified" if len(aliases_tracked) > len(aliases) else "call_and_argument_flow_verified"
+                    return (
+                        True,
+                        "observed",
+                        op_type,
+                        [],
+                    )
+
+        # 4. Direct In-Function Transformation (when t_sym is the step function itself)
+        if is_step_symbol and target_fn and target_fn.snippet:
+            tree = self._parser.parse(target_fn.snippet.encode("utf-8"))
+            fn_node = self._find_caller_function(tree.root_node, target_fn.name) or tree.root_node
+            has_transform_op = self._check_direct_data_operations(fn_node, data_tokens)
+            if has_transform_op:
+                return (
+                    True,
+                    "observed",
+                    "direct_data_operation_verified",
+                    [],
+                )
+            else:
+                return (
+                    False,
+                    "inferred",
+                    None,
+                    [
+                        f"Symbol '{t_sym}' does not perform an observable transformation on data item '{data_item}'; demoted to inferred."
+                    ],
+                )
+
+        # 5. Cross-Function Transformation Claims without verified parameter/return link
+        if data_flow.origin_component != data_flow.destination_component:
+            return (
+                False,
+                "inferred",
+                None,
+                [
+                    f"Cross-function transformation claim for '{t_sym}' lacks verified parameter/return flow linking '{data_flow.origin_component}' and '{data_flow.destination_component}'; demoted to inferred."
+                ],
+            )
+
+        return (False, "inferred", None, [f"Transformation '{t_name}' lacks static AST evidence; demoted to inferred."])
 
 
 # Global analyzer singleton for Python AST control flow

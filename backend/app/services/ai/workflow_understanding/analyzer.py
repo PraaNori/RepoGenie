@@ -360,6 +360,9 @@ class WorkflowUnderstandingAnalyzer:
         limitations = list(evidence_package.truncation_reasons) + extra_limitations
         if evidence_package.budget_exceeded:
             limitations.append("Evidence budget ceiling reached; candidate call steps were truncated or omitted.")
+        limitations.append(
+            "Execution guarantees reflect static AST control flow along normal, non-exceptional paths; dynamic runtime exceptions and unhandled errors are not modeled."
+        )
         parsed_dict["analysis_limitations"] = limitations
 
         return parsed_dict
@@ -458,6 +461,9 @@ class WorkflowUnderstandingAnalyzer:
 
         warnings: List[str] = []
         limitations: List[str] = list(ev_pkg.truncation_reasons)
+        limitations.append(
+            "Execution guarantees reflect static AST control flow along normal, non-exceptional paths; dynamic runtime exceptions and unhandled errors are not modeled."
+        )
         if error_reason:
             warnings.append(f"AI provider fallback activated: {error_reason}")
             limitations.append(f"Deterministic fallback used due to: {error_reason}")

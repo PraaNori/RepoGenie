@@ -80,7 +80,15 @@ class WorkflowStep(BaseModel):
     call_relationship_verified: bool = False   # True ONLY if call_graph_edge_id is verified
     source_order_verified: bool = False        # True ONLY if calls share the same caller and Line(A) < Line(B)
     same_execution_path_verified: bool = False # True if at least one statically valid path contains both calls
-    execution_guaranteed: bool = False         # True ONLY if B is guaranteed to execute whenever A executes
+    execution_guaranteed: bool = Field(
+        default=False,
+        description=(
+            "True if the later call is statically guaranteed to execute after the earlier call "
+            "along the normal, non-exceptional control-flow path (i.e. no intervening branches, "
+            "loops, try/except blocks, or early returns/raises). Note: RepoGenie performs static AST "
+            "analysis and does not model or execute dynamic runtime exceptions raised inside callee functions."
+        ),
+    )
     runtime_execution_verified: bool = False   # ALWAYS False (RepoGenie does not execute code)
 
     call_evidence: Optional[CallSiteEvidence] = None
@@ -105,8 +113,14 @@ class DataTransformation(BaseModel):
     performed_by_component: str
     performed_by_symbol: Optional[str] = None
 
-    transformation_verified: bool = False      # True ONLY if verified by AST expression, assignment, or coercion
-    data_relationship_status: str = "inferred" # "observed", "inferred", "unknown_or_unresolved"
+    transformation_verified: bool = Field(
+        default=False,
+        description="True ONLY if verified by static AST evidence (call argument flow, intermediate variable tracking, or direct data operation).",
+    )
+    data_relationship_status: str = Field(
+        default="inferred",
+        description="'observed' only with static AST call/argument evidence; 'inferred' when unverified; 'unknown_or_unresolved' if component is absent.",
+    )
     observed_operation: Optional[str] = Field(None, max_length=150)
 
     input_format_or_type: str = Field(..., max_length=100)
@@ -161,7 +175,12 @@ class ApplicationWorkflow(BaseModel):
     call_relationships_fully_verified: bool = False
     source_order_verified: bool = False        # True only if all intra-caller transitions have source_order_verified
     same_execution_path_verified: bool = False # True only if all step transitions have same_execution_path_verified
-    execution_guaranteed: bool = False         # True only if all step transitions have execution_guaranteed
+    execution_guaranteed: bool = Field(
+        default=False,
+        description=(
+            "True only if all step transitions are guaranteed along their normal non-exceptional control-flow paths."
+        ),
+    )
     runtime_execution_verified: bool = False   # ALWAYS False
 
     unresolved_aspects: List[str] = Field(default_factory=list, max_length=5)

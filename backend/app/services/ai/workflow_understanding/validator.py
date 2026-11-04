@@ -297,8 +297,9 @@ class WorkflowValidator:
                             )
                         elif not cf_res.execution_guaranteed:
                             step.execution_guaranteed = False
+                            reason = "try blocks/exception handlers" if cf_res.is_in_try_block else "conditional branching, loops, or early returns"
                             wf_warnings.append(
-                                f"Workflow '{wf.name}' Step {step.step_number}: Execution is not guaranteed after Step {prev_step.step_number} due to conditional branching, loops, or early returns."
+                                f"Workflow '{wf.name}' Step {step.step_number}: Execution is not guaranteed after Step {prev_step.step_number} due to {reason}."
                             )
                     else:
                         step.source_order_verified = False
@@ -450,30 +451,34 @@ class WorkflowValidator:
                         wf_warnings.append(
                             f"Workflow '{wf.name}' DataFlow '{flow.data_item_name}' transformation '{t.transformation_name}': component '{t_comp}' does not exist in repository."
                         )
-                    elif t.transformation_verified:
-                        has_ast_symbol = any(
-                            (f.name == t.performed_by_symbol or f.name == (t.performed_by_symbol or "").split(".")[-1])
-                            for f in pf_t.functions
-                        ) if t.performed_by_symbol else bool(pf_t.functions)
-                        if not has_ast_symbol:
-                            t.transformation_verified = False
-                            t.data_relationship_status = "inferred"
-                            wf_warnings.append(
-                                f"Workflow '{wf.name}' DataFlow '{flow.data_item_name}' transformation '{t.transformation_name}': symbol '{t.performed_by_symbol}' not found in '{t_comp}'; demoted to inferred."
-                            )
+                    else:
+                        t_verified, status, op_desc, t_warnings = self.control_flow.verify_data_transformation_evidence(
+                            parsed_file=pf_t,
+                            transformation=t,
+                            data_flow=flow,
+                            workflow_steps=validated_steps,
+                            parsed_files_map=parsed_files_map,
+                        )
+                        t.transformation_verified = t_verified
+                        t.data_relationship_status = status
+                        if op_desc:
+                            t.observed_operation = op_desc
+                        for tw in t_warnings:
+                            wf_warnings.append(f"Workflow '{wf.name}': {tw}")
                     valid_transforms.append(t)
                 flow.transformations = valid_transforms
 
-                # Demote observed data flows without static parameter/return evidence
+                # Demote observed data flows without static parameter/return evidence or observed transformations
                 if flow.data_relationship_status == "observed":
+                    has_observed_transformation = any(t.transformation_verified and t.data_relationship_status == "observed" for t in flow.transformations)
                     has_call_traffic = any(
                         s.call_evidence and (s.call_evidence.caller_file == orig_f or s.call_evidence.callee_file == dest_f)
                         for s in validated_steps
                     )
-                    if not has_call_traffic:
+                    if not has_call_traffic and not has_observed_transformation:
                         flow.data_relationship_status = "inferred"
                         wf_warnings.append(
-                            f"Workflow '{wf.name}' DataFlow '{flow.data_item_name}': Data-flow relationship lacks verified call-parameter evidence; demoted from observed to inferred."
+                            f"Workflow '{wf.name}' DataFlow '{flow.data_item_name}': Data-flow relationship lacks verified call-parameter evidence or observed transformations; demoted from observed to inferred."
                         )
 
                 validated_flows.append(flow)

@@ -3782,6 +3782,646 @@ async def test_audit_analyzer_candidate_and_structural_limits():
     assert any("retained top 2" in lim for lim in result.analysis_limitations)
 
 
+# ===========================================================================
+# Milestone 3.4 Phase 3 Final Semantic Verification Tests
+# ===========================================================================
+
+def test_semantic_execution_guaranteed_sequential_calls_potential_callee_raise():
+    """
+    Sequential calls where the first may raise:
+    def process():
+        validate()
+        save()
+    Guaranteed along normal, non-exceptional path. Static analysis does not model callee exceptions.
+    """
+    from app.services.ai.workflow_understanding import python_ast_control_flow
+
+    code = """
+def process():
+    validate()
+    save()
+"""
+    res = python_ast_control_flow.analyze_transition(
+        source_code=code,
+        caller_file="app/service.py",
+        caller_symbol="process",
+        call_a_line=3,
+        call_b_line=4,
+        call_a_name="validate",
+        call_b_name="save",
+    )
+    assert res.source_order_verified is True
+    assert res.same_execution_path_verified is True
+    assert res.execution_guaranteed is True
+    assert res.runtime_execution_verified is False
+    assert res.is_in_try_block is False
+
+
+def test_semantic_execution_guaranteed_inside_try_block():
+    """
+    Sequential calls inside try block:
+    def process():
+        try:
+            validate()
+            save()
+        except Exception:
+            pass
+    Both calls share a valid path, but execution is NOT guaranteed because validate() can raise and jump to handler.
+    """
+    from app.services.ai.workflow_understanding import python_ast_control_flow
+
+    code = """
+def process():
+    try:
+        validate()
+        save()
+    except Exception:
+        pass
+"""
+    res = python_ast_control_flow.analyze_transition(
+        source_code=code,
+        caller_file="app/service.py",
+        caller_symbol="process",
+        call_a_line=4,
+        call_b_line=5,
+        call_a_name="validate",
+        call_b_name="save",
+    )
+    assert res.source_order_verified is True
+    assert res.same_execution_path_verified is True
+    assert res.execution_guaranteed is False
+    assert res.is_in_try_block is True
+    assert any("try block" in aspect for aspect in res.unresolved_aspects)
+
+
+def test_semantic_execution_guaranteed_disjoint_try_and_except():
+    """
+    Call A in try, Call B in except:
+    def process():
+        try:
+            validate()
+    except Exception:
+        save()
+    Mutually exclusive branches: same_execution_path_verified = False, execution_guaranteed = False.
+    """
+    from app.services.ai.workflow_understanding import python_ast_control_flow
+
+    code = """
+def process():
+    try:
+        validate()
+    except Exception:
+        save()
+"""
+    res = python_ast_control_flow.analyze_transition(
+        source_code=code,
+        caller_file="app/service.py",
+        caller_symbol="process",
+        call_a_line=4,
+        call_b_line=6,
+        call_a_name="validate",
+        call_b_name="save",
+    )
+    assert res.source_order_verified is True
+    assert res.same_execution_path_verified is False
+    assert res.execution_guaranteed is False
+    assert res.mutually_exclusive_branches is True
+    assert res.is_in_try_block is True
+
+
+def test_semantic_execution_guaranteed_explicit_early_raise_between_calls():
+    """
+    Explicit unconditional raise statement between calls:
+    def process():
+        validate()
+        raise RuntimeError("failed")
+        save()
+    Interrupts execution path: same_execution_path_verified = False, execution_guaranteed = False.
+    """
+    from app.services.ai.workflow_understanding import python_ast_control_flow
+
+    code = """
+def process():
+    validate()
+    raise RuntimeError("failed")
+    save()
+"""
+    res = python_ast_control_flow.analyze_transition(
+        source_code=code,
+        caller_file="app/service.py",
+        caller_symbol="process",
+        call_a_line=3,
+        call_b_line=5,
+        call_a_name="validate",
+        call_b_name="save",
+    )
+    assert res.source_order_verified is True
+    assert res.same_execution_path_verified is False
+    assert res.execution_guaranteed is False
+    assert any("return/raise" in aspect for aspect in res.unresolved_aspects)
+
+
+def test_semantic_execution_guaranteed_no_intervening_interruption():
+    """
+    Sequential calls with no intervening branching, loops, try blocks, or exits:
+    execution_guaranteed = True along normal path.
+    """
+    from app.services.ai.workflow_understanding import python_ast_control_flow
+
+    code = """
+def process():
+    step_one()
+    step_two()
+"""
+    res = python_ast_control_flow.analyze_transition(
+        source_code=code,
+        caller_file="app/service.py",
+        caller_symbol="process",
+        call_a_line=3,
+        call_b_line=4,
+        call_a_name="step_one",
+        call_b_name="step_two",
+    )
+    assert res.source_order_verified is True
+    assert res.same_execution_path_verified is True
+    assert res.execution_guaranteed is True
+
+
+def test_semantic_execution_guaranteed_mutually_exclusive_branches():
+    """
+    Calls in mutually exclusive if/else branches:
+    same_execution_path_verified = False, execution_guaranteed = False.
+    """
+    from app.services.ai.workflow_understanding import python_ast_control_flow
+
+    code = """
+def process(flag):
+    if flag:
+        call_a()
+    else:
+        call_b()
+"""
+    res = python_ast_control_flow.analyze_transition(
+        source_code=code,
+        caller_file="app/service.py",
+        caller_symbol="process",
+        call_a_line=4,
+        call_b_line=6,
+        call_a_name="call_a",
+        call_b_name="call_b",
+    )
+    assert res.source_order_verified is True
+    assert res.same_execution_path_verified is False
+    assert res.execution_guaranteed is False
+    assert res.mutually_exclusive_branches is True
+
+
+def test_semantic_transformation_function_exists_but_never_called():
+    """
+    A transformation function exists in the file, but is never called by the workflow:
+    def transform_data(data):
+        return data.upper()
+    def process(data):
+        result = data
+        save(result)
+    Symbol existence alone must NOT validate transformation; demoted to inferred.
+    """
+    from app.models.schemas import FunctionInfo, ParsedFile, SourceLocation
+    from app.services.ai.workflow_understanding import (
+        ApplicationWorkflow,
+        DataFlow,
+        DataTransformation,
+        RepositoryWorkflowUnderstanding,
+        WorkflowComponentReference,
+        WorkflowStep,
+        workflow_validator,
+    )
+
+    code = """
+def transform_data(data):
+    return data.upper()
+
+def process(data):
+    result = data
+    save(result)
+"""
+    knowledge = _create_mock_knowledge_for_phase3()
+    pf = ParsedFile(
+        file_path="app/transform.py",
+        language="Python",
+        status="success",
+        total_lines=10,
+        functions=[
+            FunctionInfo(name="transform_data", file_path="app/transform.py", location=SourceLocation(file_path="app/transform.py", start_line=2, end_line=3, start_column=0, end_column=0), snippet=code),
+            FunctionInfo(name="process", file_path="app/transform.py", location=SourceLocation(file_path="app/transform.py", start_line=5, end_line=7, start_column=0, end_column=0), snippet=code),
+        ],
+        function_calls=[],
+    )
+    knowledge.code_structure.files.append(pf)
+
+    step = WorkflowStep(
+        step_number=1,
+        title="Process Data",
+        component_id="app/transform.py",
+        symbol_name="process",
+        action_type="call",
+        description="Calls save",
+    )
+    trans = DataTransformation(
+        transformation_name="Uppercase Transform",
+        performed_by_component="app/transform.py",
+        performed_by_symbol="transform_data",
+        transformation_verified=True,  # Claimed as verified
+        data_relationship_status="observed",  # Claimed as observed
+        input_format_or_type="str",
+        output_format_or_type="str",
+        transformation_logic="Converts data to uppercase",
+    )
+    flow = DataFlow(
+        flow_id="df_uncalled",
+        workflow_id="wf_trans_uncalled",
+        data_item_name="data",
+        origin=WorkflowComponentReference(component_id="app/transform.py", name="process", role_in_workflow="source"),
+        destination=WorkflowComponentReference(component_id="app/transform.py", name="process", role_in_workflow="sink"),
+        data_relationship_status="observed",
+        transformations=[trans],
+    )
+    wf = ApplicationWorkflow(
+        workflow_id="wf_trans_uncalled",
+        name="Uncalled Transform Flow",
+        description="Flow",
+        trigger="run",
+        entry_point=WorkflowComponentReference(component_id="app/transform.py", name="process", role_in_workflow="entry"),
+        steps=[step],
+        data_flows=[flow],
+        final_outcome="Done",
+    )
+    understanding = RepositoryWorkflowUnderstanding(
+        repository_name="test/phase3_app",
+        system_architecture_type="modular_monolith",
+        workflow_summary="Summary",
+        workflows=[wf],
+    )
+
+    validated = workflow_validator.validate_workflow_understanding(understanding, knowledge)
+    v_trans = validated.workflows[0].data_flows[0].transformations[0]
+    assert v_trans.transformation_verified is False
+    assert v_trans.data_relationship_status == "inferred"
+    assert any("never called in workflow steps" in w for w in validated.validation_warnings)
+
+
+def test_semantic_transformation_called_but_unrelated_to_claimed_data():
+    """
+    Transformation function is called in workflow, but operates on unrelated argument:
+    def process(user_payload, debug_flag):
+        other = transform_data(debug_flag)
+        save(user_payload)
+    Claim that transform_data transforms user_payload must be demoted to inferred.
+    """
+    from app.models.schemas import FunctionCallInfo, FunctionInfo, ParsedFile, SourceLocation
+    from app.services.ai.workflow_understanding import (
+        ApplicationWorkflow,
+        DataFlow,
+        DataTransformation,
+        RepositoryWorkflowUnderstanding,
+        WorkflowComponentReference,
+        WorkflowStep,
+        workflow_validator,
+    )
+
+    code = """
+def transform_data(flag):
+    return flag.lower()
+
+def process(user_payload, debug_flag):
+    other = transform_data(debug_flag)
+    save(user_payload)
+"""
+    knowledge = _create_mock_knowledge_for_phase3()
+    pf = ParsedFile(
+        file_path="app/pipeline.py",
+        language="Python",
+        status="success",
+        total_lines=10,
+        functions=[
+            FunctionInfo(name="transform_data", file_path="app/pipeline.py", location=SourceLocation(file_path="app/pipeline.py", start_line=2, end_line=3, start_column=0, end_column=0), snippet=code),
+            FunctionInfo(name="process", file_path="app/pipeline.py", location=SourceLocation(file_path="app/pipeline.py", start_line=5, end_line=7, start_column=0, end_column=0), snippet=code),
+        ],
+        function_calls=[
+            FunctionCallInfo(call_name="transform_data", file_path="app/pipeline.py", line_number=6, enclosing_scope="process")
+        ],
+    )
+    knowledge.code_structure.files.append(pf)
+
+    step = WorkflowStep(
+        step_number=1,
+        title="Process Pipeline",
+        component_id="app/pipeline.py",
+        symbol_name="process",
+        action_type="call",
+        description="Calls transform_data with debug_flag",
+    )
+    trans = DataTransformation(
+        transformation_name="Transform User Payload",
+        performed_by_component="app/pipeline.py",
+        performed_by_symbol="transform_data",
+        transformation_verified=True,
+        data_relationship_status="observed",
+        input_format_or_type="dict",
+        output_format_or_type="dict",
+        transformation_logic="Transforms user payload",
+    )
+    flow = DataFlow(
+        flow_id="df_unrelated",
+        workflow_id="wf_trans_unrelated",
+        data_item_name="user_payload",
+        origin=WorkflowComponentReference(component_id="app/pipeline.py", name="process", role_in_workflow="source"),
+        destination=WorkflowComponentReference(component_id="app/pipeline.py", name="process", role_in_workflow="sink"),
+        data_relationship_status="observed",
+        transformations=[trans],
+    )
+    wf = ApplicationWorkflow(
+        workflow_id="wf_trans_unrelated",
+        name="Unrelated Transform Flow",
+        description="Flow",
+        trigger="run",
+        entry_point=WorkflowComponentReference(component_id="app/pipeline.py", name="process", role_in_workflow="entry"),
+        steps=[step],
+        data_flows=[flow],
+        final_outcome="Done",
+    )
+    understanding = RepositoryWorkflowUnderstanding(
+        repository_name="test/phase3_app",
+        system_architecture_type="modular_monolith",
+        workflow_summary="Summary",
+        workflows=[wf],
+    )
+
+    validated = workflow_validator.validate_workflow_understanding(understanding, knowledge)
+    v_trans = validated.workflows[0].data_flows[0].transformations[0]
+    assert v_trans.transformation_verified is False
+    assert v_trans.data_relationship_status == "inferred"
+    assert any("does not receive or operate on data item" in w for w in validated.validation_warnings)
+
+
+def test_semantic_transformation_call_and_argument_flow_statically_supported():
+    """
+    Transformation call and direct argument flow are statically supported:
+    def process(user_payload):
+        cleaned = transform_data(user_payload)
+        save(cleaned)
+    Verified as observed with call_and_argument_flow_verified.
+    """
+    from app.models.schemas import FunctionCallInfo, FunctionInfo, ParsedFile, SourceLocation
+    from app.services.ai.workflow_understanding import (
+        ApplicationWorkflow,
+        DataFlow,
+        DataTransformation,
+        RepositoryWorkflowUnderstanding,
+        WorkflowComponentReference,
+        WorkflowStep,
+        workflow_validator,
+    )
+
+    code = """
+def transform_data(payload):
+    return payload.strip()
+
+def process(user_payload):
+    cleaned = transform_data(user_payload)
+    save(cleaned)
+"""
+    knowledge = _create_mock_knowledge_for_phase3()
+    pf = ParsedFile(
+        file_path="app/cleaner.py",
+        language="Python",
+        status="success",
+        total_lines=10,
+        functions=[
+            FunctionInfo(name="transform_data", file_path="app/cleaner.py", location=SourceLocation(file_path="app/cleaner.py", start_line=2, end_line=3, start_column=0, end_column=0), snippet=code),
+            FunctionInfo(name="process", file_path="app/cleaner.py", location=SourceLocation(file_path="app/cleaner.py", start_line=5, end_line=7, start_column=0, end_column=0), snippet=code),
+        ],
+        function_calls=[
+            FunctionCallInfo(call_name="transform_data", file_path="app/cleaner.py", line_number=6, enclosing_scope="process")
+        ],
+    )
+    knowledge.code_structure.files.append(pf)
+
+    step = WorkflowStep(
+        step_number=1,
+        title="Clean Payload",
+        component_id="app/cleaner.py",
+        symbol_name="process",
+        action_type="call",
+        description="Calls transform_data with user_payload",
+    )
+    trans = DataTransformation(
+        transformation_name="Strip Payload",
+        performed_by_component="app/cleaner.py",
+        performed_by_symbol="transform_data",
+        transformation_verified=True,
+        data_relationship_status="observed",
+        input_format_or_type="str",
+        output_format_or_type="str",
+        transformation_logic="Strips whitespace",
+    )
+    flow = DataFlow(
+        flow_id="df_supported",
+        workflow_id="wf_trans_supported",
+        data_item_name="user_payload",
+        origin=WorkflowComponentReference(component_id="app/cleaner.py", name="process", role_in_workflow="source"),
+        destination=WorkflowComponentReference(component_id="app/cleaner.py", name="process", role_in_workflow="sink"),
+        data_relationship_status="observed",
+        transformations=[trans],
+    )
+    wf = ApplicationWorkflow(
+        workflow_id="wf_trans_supported",
+        name="Supported Transform Flow",
+        description="Flow",
+        trigger="run",
+        entry_point=WorkflowComponentReference(component_id="app/cleaner.py", name="process", role_in_workflow="entry"),
+        steps=[step],
+        data_flows=[flow],
+        final_outcome="Done",
+    )
+    understanding = RepositoryWorkflowUnderstanding(
+        repository_name="test/phase3_app",
+        system_architecture_type="modular_monolith",
+        workflow_summary="Summary",
+        workflows=[wf],
+    )
+
+    validated = workflow_validator.validate_workflow_understanding(understanding, knowledge)
+    v_trans = validated.workflows[0].data_flows[0].transformations[0]
+    assert v_trans.transformation_verified is True
+    assert v_trans.data_relationship_status == "observed"
+    assert v_trans.observed_operation == "call_and_argument_flow_verified"
+
+
+def test_semantic_transformation_through_intermediate_variable():
+    """
+    Data flows through an intermediate local variable before transformation call:
+    def process(raw_input):
+        temp = raw_input
+        payload = transform_data(temp)
+        save(payload)
+    Verified as observed with aliased_call_argument_flow_verified.
+    """
+    from app.models.schemas import FunctionCallInfo, FunctionInfo, ParsedFile, SourceLocation
+    from app.services.ai.workflow_understanding import (
+        ApplicationWorkflow,
+        DataFlow,
+        DataTransformation,
+        RepositoryWorkflowUnderstanding,
+        WorkflowComponentReference,
+        WorkflowStep,
+        workflow_validator,
+    )
+
+    code = """
+def transform_data(data):
+    return data.encode("utf-8")
+
+def process(raw_input):
+    temp = raw_input
+    payload = transform_data(temp)
+    save(payload)
+"""
+    knowledge = _create_mock_knowledge_for_phase3()
+    pf = ParsedFile(
+        file_path="app/encoder.py",
+        language="Python",
+        status="success",
+        total_lines=10,
+        functions=[
+            FunctionInfo(name="transform_data", file_path="app/encoder.py", location=SourceLocation(file_path="app/encoder.py", start_line=2, end_line=3, start_column=0, end_column=0), snippet=code),
+            FunctionInfo(name="process", file_path="app/encoder.py", location=SourceLocation(file_path="app/encoder.py", start_line=5, end_line=8, start_column=0, end_column=0), snippet=code),
+        ],
+        function_calls=[
+            FunctionCallInfo(call_name="transform_data", file_path="app/encoder.py", line_number=7, enclosing_scope="process")
+        ],
+    )
+    knowledge.code_structure.files.append(pf)
+
+    step = WorkflowStep(
+        step_number=1,
+        title="Encode Input",
+        component_id="app/encoder.py",
+        symbol_name="process",
+        action_type="call",
+        description="Assigns raw_input to temp and encodes",
+    )
+    trans = DataTransformation(
+        transformation_name="Encode UTF-8",
+        performed_by_component="app/encoder.py",
+        performed_by_symbol="transform_data",
+        transformation_verified=True,
+        data_relationship_status="observed",
+        input_format_or_type="str",
+        output_format_or_type="bytes",
+        transformation_logic="Encodes to UTF-8",
+    )
+    flow = DataFlow(
+        flow_id="df_alias",
+        workflow_id="wf_trans_alias",
+        data_item_name="raw_input",
+        origin=WorkflowComponentReference(component_id="app/encoder.py", name="process", role_in_workflow="source"),
+        destination=WorkflowComponentReference(component_id="app/encoder.py", name="process", role_in_workflow="sink"),
+        data_relationship_status="observed",
+        transformations=[trans],
+    )
+    wf = ApplicationWorkflow(
+        workflow_id="wf_trans_alias",
+        name="Aliased Transform Flow",
+        description="Flow",
+        trigger="run",
+        entry_point=WorkflowComponentReference(component_id="app/encoder.py", name="process", role_in_workflow="entry"),
+        steps=[step],
+        data_flows=[flow],
+        final_outcome="Done",
+    )
+    understanding = RepositoryWorkflowUnderstanding(
+        repository_name="test/phase3_app",
+        system_architecture_type="modular_monolith",
+        workflow_summary="Summary",
+        workflows=[wf],
+    )
+
+    validated = workflow_validator.validate_workflow_understanding(understanding, knowledge)
+    v_trans = validated.workflows[0].data_flows[0].transformations[0]
+    assert v_trans.transformation_verified is True
+    assert v_trans.data_relationship_status == "observed"
+    assert v_trans.observed_operation == "aliased_call_argument_flow_verified"
+
+
+def test_semantic_transformation_cross_function_without_parameter_evidence():
+    """
+    Cross-function transformation claim between different components without parameter flow evidence:
+    demoted from observed to inferred.
+    """
+    from app.services.ai.workflow_understanding import (
+        ApplicationWorkflow,
+        DataFlow,
+        DataTransformation,
+        RepositoryWorkflowUnderstanding,
+        WorkflowComponentReference,
+        WorkflowStep,
+        workflow_validator,
+    )
+
+    knowledge = _create_mock_knowledge_for_phase3()
+
+    step1 = WorkflowStep(
+        step_number=1,
+        title="Start App",
+        component_id="app/main.py",
+        symbol_name="start_app",
+        action_type="call",
+        description="Starts app",
+    )
+    trans = DataTransformation(
+        transformation_name="Storage Transformation",
+        performed_by_component="app/storage.py",
+        performed_by_symbol="write_db",
+        transformation_verified=True,
+        data_relationship_status="observed",
+        input_format_or_type="dict",
+        output_format_or_type="dict",
+        transformation_logic="Transforms data",
+    )
+    flow = DataFlow(
+        flow_id="df_cross",
+        workflow_id="wf_trans_cross_func",
+        data_item_name="request_data",
+        origin=WorkflowComponentReference(component_id="app/main.py", name="start_app", role_in_workflow="source"),
+        destination=WorkflowComponentReference(component_id="app/storage.py", name="write_db", role_in_workflow="sink"),
+        data_relationship_status="observed",
+        transformations=[trans],
+    )
+    wf = ApplicationWorkflow(
+        workflow_id="wf_trans_cross_func",
+        name="Cross Function Flow",
+        description="Flow",
+        trigger="run",
+        entry_point=WorkflowComponentReference(component_id="app/main.py", name="start_app", role_in_workflow="entry"),
+        steps=[step1],
+        data_flows=[flow],
+        final_outcome="Done",
+    )
+    understanding = RepositoryWorkflowUnderstanding(
+        repository_name="test/phase3_app",
+        system_architecture_type="modular_monolith",
+        workflow_summary="Summary",
+        workflows=[wf],
+    )
+
+    validated = workflow_validator.validate_workflow_understanding(understanding, knowledge)
+    v_trans = validated.workflows[0].data_flows[0].transformations[0]
+    assert v_trans.transformation_verified is False
+    assert v_trans.data_relationship_status == "inferred"
+    assert any("Cross-function transformation claim" in w for w in validated.validation_warnings)
+
+
 
 
 

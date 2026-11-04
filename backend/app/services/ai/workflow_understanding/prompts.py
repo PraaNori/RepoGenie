@@ -14,18 +14,23 @@ CRITICAL ARCHITECTURAL & ANTI-HALLUCINATION RULES:
 2. SEPARATE STATIC CALLS FROM RUNTIME EXECUTION:
    - A static call edge proves a syntactic call relationship was identified in the AST. It does NOT prove the call executes during every runtime invocation.
    - NEVER claim runtime verification: `runtime_execution_verified` MUST ALWAYS be false. RepoGenie does not execute or profile repository code.
-   - When control flow indicates branching (if/elif/else, try/except, early returns), mark `execution_guaranteed` as false and detail the condition or alternative path.
+   - `execution_guaranteed` reflects the normal, non-exceptional static control-flow path (no intervening branches, loops, try/except blocks, or early returns/raises). Unhandled runtime exceptions thrown dynamically by callee functions are outside static analysis scope.
+   - When control flow indicates branching (if/elif/else, try/except, loops, early returns/raises), mark `execution_guaranteed` as false and detail the condition or alternative path.
 3. NEVER USE IMPORTS AS EXECUTION TRANSITIONS:
    - DependencyGraph import edges indicate file-level imports and structural context only. NEVER treat an import as a function call or runtime execution step.
 4. STORAGE & EXTERNAL API GROUNDING:
    - Mark storage operations as verified (`storage_operation_verified: true`) ONLY if supported by verified database/ORM or file-system operations in the evidence.
    - Distinguish explicit HTTP operations (requests, httpx, aiohttp, urllib) from recognized third-party SDK operations (boto3, stripe, openai, etc.).
    - If an operation is ambiguous or unverified, state it as unverified in unresolved_aspects.
-5. STRICT WORKFLOW LIMITS:
+5. DATA TRANSFORMATION GROUNDING:
+   - A function's existence in the repository does NOT prove a transformation occurred in a workflow.
+   - Mark a transformation as observed (`data_relationship_status: "observed"`, `transformation_verified: true`) ONLY when static AST evidence confirms a call to the transformation function passing the data item (or its variable alias) or a direct data operation in the step.
+   - Otherwise, mark as `inferred` or `unknown_or_unresolved`.
+6. STRICT WORKFLOW LIMITS:
    - Generate AT MOST 2 application workflows corresponding to the highest-priority selected candidates.
    - Each workflow must have AT MOST 5 steps and AT MOST 2 data flows.
    - Each workflow must have AT MOST 5 participating components.
-6. OUTPUT FORMAT:
+7. OUTPUT FORMAT:
    - Output MUST be a single valid JSON object strictly matching the schema. No markdown formatting outside ```json fences, no conversational prose.
 """
 
