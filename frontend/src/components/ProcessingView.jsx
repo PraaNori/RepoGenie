@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import ProjectUnderstandingCard from './ProjectUnderstandingCard';
 import CodeUnderstandingCard from './CodeUnderstandingCard';
 import WorkflowUnderstandingCard from './WorkflowUnderstandingCard';
@@ -72,9 +72,10 @@ export default function ProcessingView({
   const [isGeneratingCodeUnderstanding, setIsGeneratingCodeUnderstanding] = useState(false);
   const [codeUnderstandingError, setCodeUnderstandingError] = useState(null);
 
-  const [workflowUnderstanding, setWorkflowUnderstanding] = useState(null);
+  const [workflowUnderstanding, setWorkflowUnderstanding] = useState(job?.workflow_understanding || null);
   const [isGeneratingWorkflow, setIsGeneratingWorkflow] = useState(false);
   const [workflowError, setWorkflowError] = useState(null);
+  const isFetchingWorkflowRef = useRef(false);
 
   useEffect(() => {
     // If the job has code understanding generated and we haven't loaded it yet, fetch it
@@ -96,15 +97,23 @@ export default function ProcessingView({
     if (job?.job_id && (job?.has_workflow_understanding || job?.workflow_understanding) && !workflowUnderstanding) {
       if (job.workflow_understanding) {
         setWorkflowUnderstanding(job.workflow_understanding);
-      } else {
-        getWorkflowUnderstanding(job.job_id).then((res) => {
-          if (res.success) {
-            setWorkflowUnderstanding(res.data);
-          }
-        });
+      } else if (!isFetchingWorkflowRef.current) {
+        isFetchingWorkflowRef.current = true;
+        getWorkflowUnderstanding(job.job_id)
+          .then((res) => {
+            if (res.success) {
+              setWorkflowUnderstanding(res.data);
+              if (onJobUpdated) {
+                onJobUpdated({ ...job, workflow_understanding: res.data });
+              }
+            }
+          })
+          .finally(() => {
+            isFetchingWorkflowRef.current = false;
+          });
       }
     }
-  }, [job?.job_id, job?.has_workflow_understanding, job?.workflow_understanding]);
+  }, [job?.job_id, job?.has_workflow_understanding, job?.workflow_understanding, workflowUnderstanding]);
 
   const handleGenerateUnderstanding = async (refresh = false) => {
     if (!job?.job_id) return;
@@ -138,19 +147,24 @@ export default function ProcessingView({
   };
 
   const handleGenerateWorkflow = async (refresh = false) => {
-    if (!job?.job_id) return;
+    if (!job?.job_id || isGeneratingWorkflow) return;
     setIsGeneratingWorkflow(true);
     setWorkflowError(null);
-    const res = await generateWorkflowUnderstanding(job.job_id, null, refresh);
-    if (res.success) {
-      setWorkflowUnderstanding(res.data);
-      if (onJobUpdated) {
-        onJobUpdated({ ...job, has_workflow_understanding: true });
+    try {
+      const res = await generateWorkflowUnderstanding(job.job_id, null, refresh);
+      if (res.success) {
+        setWorkflowUnderstanding(res.data);
+        if (onJobUpdated) {
+          onJobUpdated({ ...job, has_workflow_understanding: true, workflow_understanding: res.data });
+        }
+      } else {
+        setWorkflowError(res.error);
       }
-    } else {
-      setWorkflowError(res.error);
+    } catch (err) {
+      setWorkflowError(err.message || 'Error generating workflow understanding');
+    } finally {
+      setIsGeneratingWorkflow(false);
     }
-    setIsGeneratingWorkflow(false);
   };
   if (!job) {
     return (
@@ -183,6 +197,8 @@ export default function ProcessingView({
   const knowledge = job.knowledge;
   const isWorkflowPrereqReady = Boolean(
     !isFailed &&
+    job.ingestion_status === 'completed' &&
+    job.stages?.[1]?.status === 'completed' &&
     analysis &&
     codeAnalysis &&
     architecture?.call_graph &&

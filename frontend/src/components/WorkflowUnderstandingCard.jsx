@@ -99,8 +99,8 @@ export default function WorkflowUnderstandingCard({
     );
   }
 
-  // 2. Loading state
-  if (isLoading) {
+  // 2. Loading state (when no workflow understanding exists yet)
+  if (isLoading && !workflowUnderstanding) {
     return (
       <div className="bg-white rounded-2xl border border-violet-200 p-8 shadow-sm mb-6 text-center">
         <div className="w-12 h-12 rounded-xl bg-violet-100 text-violet-600 flex items-center justify-center mx-auto mb-4 animate-spin">
@@ -182,12 +182,17 @@ export default function WorkflowUnderstandingCard({
 
           {!readOnly && (
             <button
-              onClick={() => onGenerate && onGenerate(true)}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200 text-slate-600 hover:text-violet-700 hover:bg-violet-50 hover:border-violet-300 text-xs font-medium transition"
+              onClick={() => onGenerate && !isLoading && onGenerate(true)}
+              disabled={isLoading}
+              className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-medium transition ${
+                isLoading
+                  ? 'border-slate-200 bg-slate-100 text-slate-400 cursor-not-allowed'
+                  : 'border-slate-200 text-slate-600 hover:text-violet-700 hover:bg-violet-50 hover:border-violet-300'
+              }`}
               title="Regenerate Workflow Understanding (Force Refresh)"
             >
-              <RefreshCw className="w-3.5 h-3.5" />
-              <span>Regenerate</span>
+              <RefreshCw className={`w-3.5 h-3.5 ${isLoading ? 'animate-spin' : ''}`} />
+              <span>{isLoading ? 'Regenerating...' : 'Regenerate'}</span>
             </button>
           )}
         </div>

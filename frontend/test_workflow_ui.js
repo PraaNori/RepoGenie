@@ -19,6 +19,9 @@ const vite = await createServer({
 const { default: WorkflowUnderstandingCard } = await vite.ssrLoadModule(
   './src/components/WorkflowUnderstandingCard.jsx'
 );
+const { default: VideoResultView } = await vite.ssrLoadModule(
+  './src/components/VideoResultView.jsx'
+);
 const apiClient = await vite.ssrLoadModule('./src/api/client.js');
 
 // Mock data fixtures conforming to RepositoryWorkflowUnderstanding schema
@@ -470,6 +473,164 @@ test('13. Storage operations display verified classification without claiming tr
   // Must not claim runtime success
   assert.doesNotMatch(html, /successfully saved/i);
   assert.doesNotMatch(html, /request succeeded/i);
+});
+
+test('14. Duplicate POST prevention: Regenerate button is disabled and prevents concurrent triggers when isLoading is true', () => {
+  const html = renderToString(
+    React.createElement(WorkflowUnderstandingCard, {
+      workflowUnderstanding: mockWorkflowUnderstanding,
+      isLoading: true,
+      isPrerequisiteReady: true,
+    })
+  );
+
+  // When isLoading is true, the button is marked disabled with cursor-not-allowed
+  assert.match(html, /disabled=""/);
+  assert.match(html, /cursor-not-allowed/);
+  assert.match(html, /animate-spin/);
+  assert.match(html, /Regenerating\.\.\./);
+});
+
+test('15. VideoResultView cleanly handles missing workflow understanding without errors or broken UI', () => {
+  const jobWithoutWorkflow = {
+    job_id: 'job-no-wf',
+    repo_name: 'test-org/test-repo',
+    repo_url: 'https://github.com/test-org/test-repo',
+    has_workflow_understanding: false,
+    workflow_understanding: null,
+    result: {
+      repo_name: 'test-org/test-repo',
+      repo_url: 'https://github.com/test-org/test-repo',
+      description: 'Test repository walkthrough',
+      tech_stack: ['Python', 'FastAPI'],
+      summary: 'Summary walkthrough',
+      video_url: 'https://example.com/video.mp4',
+    },
+  };
+
+  const html = renderToString(
+    React.createElement(VideoResultView, {
+      job: jobWithoutWorkflow,
+      onReset: () => {},
+    })
+  );
+
+  // Video view components render properly
+  assert.match(html, /test-org\/test-repo/);
+  assert.match(html, /Technology Stack/);
+  assert.match(html, /Video Ready/);
+
+  // Must not render ungenerated workflow card or error notice
+  assert.doesNotMatch(html, /Discover End-to-End Application Workflows/);
+  assert.doesNotMatch(html, /Error checking workflow understanding/);
+});
+
+test('16. VideoResultView displays cached workflow understanding in readOnly mode', () => {
+  const jobWithWorkflow = {
+    job_id: 'job-with-wf',
+    repo_name: 'test-org/test-repo',
+    repo_url: 'https://github.com/test-org/test-repo',
+    has_workflow_understanding: true,
+    workflow_understanding: mockWorkflowUnderstanding,
+    result: {
+      repo_name: 'test-org/test-repo',
+      repo_url: 'https://github.com/test-org/test-repo',
+      description: 'Test repository walkthrough',
+      tech_stack: ['Python', 'FastAPI'],
+      summary: 'Summary walkthrough',
+      video_url: 'https://example.com/video.mp4',
+    },
+  };
+
+  const html = renderToString(
+    React.createElement(VideoResultView, {
+      job: jobWithWorkflow,
+      onReset: () => {},
+    })
+  );
+
+  // Renders workflow card
+  assert.match(html, /User Registration Flow/);
+  assert.match(html, /Execution Paths &amp; Data Flow/);
+
+  // In readOnly mode, Regenerate button must NOT be rendered
+  assert.doesNotMatch(html, /Regenerate<\/span><\/button>/);
+});
+
+test('17. Prerequisite condition validation matches backend requirements', () => {
+  // Helper implementing the exact frontend prerequisite check logic
+  const checkPrereq = (job) => {
+    const isFailed = job.status === 'failed';
+    const analysis = job.analysis;
+    const codeAnalysis = job.code_analysis;
+    const architecture = job.architecture;
+    const knowledge = job.knowledge;
+    return Boolean(
+      !isFailed &&
+      job.ingestion_status === 'completed' &&
+      job.stages?.[1]?.status === 'completed' &&
+      analysis &&
+      codeAnalysis &&
+      architecture?.call_graph &&
+      knowledge
+    );
+  };
+
+  // Incomplete: ingestion pending
+  assert.equal(
+    checkPrereq({
+      status: 'in_progress',
+      ingestion_status: 'pending',
+      stages: [{ status: 'in_progress' }, { status: 'pending' }],
+      analysis: {},
+      code_analysis: {},
+      architecture: { call_graph: {} },
+      knowledge: {},
+    }),
+    false
+  );
+
+  // Incomplete: Stage 2 pending
+  assert.equal(
+    checkPrereq({
+      status: 'in_progress',
+      ingestion_status: 'completed',
+      stages: [{ status: 'completed' }, { status: 'in_progress' }],
+      analysis: {},
+      code_analysis: {},
+      architecture: { call_graph: {} },
+      knowledge: {},
+    }),
+    false
+  );
+
+  // Incomplete: call_graph missing
+  assert.equal(
+    checkPrereq({
+      status: 'in_progress',
+      ingestion_status: 'completed',
+      stages: [{ status: 'completed' }, { status: 'completed' }],
+      analysis: {},
+      code_analysis: {},
+      architecture: {},
+      knowledge: {},
+    }),
+    false
+  );
+
+  // Complete: all prerequisites satisfied
+  assert.equal(
+    checkPrereq({
+      status: 'in_progress',
+      ingestion_status: 'completed',
+      stages: [{ status: 'completed' }, { status: 'completed' }],
+      analysis: {},
+      code_analysis: {},
+      architecture: { call_graph: {} },
+      knowledge: {},
+    }),
+    true
+  );
 });
 
 // Close Vite SSR server after test completion

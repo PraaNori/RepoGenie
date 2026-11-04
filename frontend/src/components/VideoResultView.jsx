@@ -21,18 +21,26 @@ export default function VideoResultView({ job, onReset }) {
   const [workflowUnderstanding, setWorkflowUnderstanding] = useState(job?.workflow_understanding || null);
 
   useEffect(() => {
+    let isMounted = true;
     if (job?.job_id && (job?.has_workflow_understanding || job?.workflow_understanding) && !workflowUnderstanding) {
       if (job.workflow_understanding) {
         setWorkflowUnderstanding(job.workflow_understanding);
       } else {
-        getWorkflowUnderstanding(job.job_id).then((res) => {
-          if (res.success) {
-            setWorkflowUnderstanding(res.data);
-          }
-        });
+        getWorkflowUnderstanding(job.job_id)
+          .then((res) => {
+            if (isMounted && res.success) {
+              setWorkflowUnderstanding(res.data);
+            }
+          })
+          .catch(() => {
+            // Silently ignore optional workflow fetch failure (e.g. 404) in result view
+          });
       }
     }
-  }, [job?.job_id, job?.has_workflow_understanding, job?.workflow_understanding]);
+    return () => {
+      isMounted = false;
+    };
+  }, [job?.job_id, job?.has_workflow_understanding, job?.workflow_understanding, workflowUnderstanding]);
 
   // Fallback data if viewing directly without active job
   const repoName = job?.repo_name || 'fastapi/fastapi';
@@ -165,7 +173,7 @@ export default function VideoResultView({ job, onReset }) {
       </div>
 
       {/* Discovered Application Workflows & Data Flows (Milestone 3.5.2) */}
-      {(workflowUnderstanding || job?.has_workflow_understanding) && (
+      {workflowUnderstanding && (
         <div className="mt-8 pt-6 border-t border-slate-200">
           <WorkflowUnderstandingCard
             workflowUnderstanding={workflowUnderstanding}
