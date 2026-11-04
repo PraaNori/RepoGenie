@@ -50,10 +50,10 @@ class Settings(BaseSettings):
     AI_PROVIDER: str = "gemini"
 
     GEMINI_API_KEY: Optional[str] = None
-    GEMINI_MODEL: str = "gemini-2.5-flash"
+    GEMINI_MODEL: str = "gemini-3.8-flash"
 
     GROQ_API_KEY: Optional[str] = None
-    GROQ_MODEL: str = "llama-3.3-70b-versatile"
+    GROQ_MODEL: str = "openai/gpt-oss-120b"
 
     AI_REQUEST_TIMEOUT: int = 60
     AI_MAX_RETRIES: int = 2

@@ -232,6 +232,9 @@ class GroqProvider(BaseLLMProvider):
                 operation="connectivity_probe",
             )
             lat = (time.perf_counter() - start) * 1000.0
+            if resp.token_usage:
+                from .token_tracker import token_tracker
+                token_tracker.record_usage(resp.token_usage)
             return ConnectivityCheckResult(
                 provider=self.provider_name,
                 model=self._model,
