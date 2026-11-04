@@ -162,7 +162,9 @@ class KnowledgeBuilderService:
 
             # State machine for section parsing
             current_section: Optional[str] = None
-            desc_lines: List[str] = []
+            intro_paragraphs: List[str] = []
+            current_para_lines: List[str] = []
+            intro_bullets: List[Tuple[int, str]] = []
             features: List[str] = []
             limitations: List[str] = []
             warnings: List[str] = []
@@ -193,6 +195,13 @@ class KnowledgeBuilderService:
                         current_section = None
                         continue
 
+                    # Flush current intro paragraph if any
+                    if current_para_lines:
+                        p_text = " ".join(current_para_lines).strip()
+                        if p_text:
+                            intro_paragraphs.append(p_text)
+                        current_para_lines = []
+
                     if FEATURE_HEADING_RE.match(clean_line):
                         current_section = "features"
                     elif LIMITATION_HEADING_RE.match(clean_line):
@@ -203,14 +212,35 @@ class KnowledgeBuilderService:
                         current_section = "other"
                     continue
 
-                # Top description extraction (paragraphs following first heading before second section)
-                if first_heading_seen and current_section is None and clean_line:
+                # Top description and intro bullet extraction (before secondary headings)
+                if first_heading_seen and current_section is None:
+                    # Check for intro bullet
+                    bullet_match = BULLET_RE.match(clean_line)
+                    if bullet_match:
+                        if current_para_lines:
+                            p_text = " ".join(current_para_lines).strip()
+                            if p_text:
+                                intro_paragraphs.append(p_text)
+                            current_para_lines = []
+                        btext = (bullet_match.group(1) or bullet_match.group(2) or "").strip()
+                        if btext:
+                            intro_bullets.append((line_idx, btext))
+                        continue
+
+                    if not clean_line:
+                        if current_para_lines:
+                            p_text = " ".join(current_para_lines).strip()
+                            if p_text:
+                                intro_paragraphs.append(p_text)
+                            current_para_lines = []
+                        continue
+
                     # Filter badges like [![Build]...] or HTML tags
                     if not clean_line.startswith("[![") and not clean_line.startswith("<") and not clean_line.startswith("[!"):
-                        if len(desc_lines) < 3 and len(" ".join(desc_lines)) < 400:
-                            desc_lines.append(clean_line)
+                        current_para_lines.append(clean_line)
+                    continue
 
-                # Bullet items in identified sections
+                # Bullet items in identified explicit sections
                 bullet_match = BULLET_RE.match(clean_line)
                 if bullet_match and current_section:
                     bullet_text = (bullet_match.group(1) or bullet_match.group(2) or "").strip()
@@ -234,8 +264,26 @@ class KnowledgeBuilderService:
                         elif current_section == "warnings" and len(warnings) < 5:
                             warnings.append(bullet_text)
 
-            if desc_lines:
-                overview.description = " ".join(desc_lines)
+            # Flush final paragraph
+            if current_para_lines:
+                p_text = " ".join(current_para_lines).strip()
+                if p_text:
+                    intro_paragraphs.append(p_text)
+
+            # Construct description from intro paragraphs up to 550 characters
+            desc_parts: List[str] = []
+            for p in intro_paragraphs:
+                if p.endswith(":") and len(p) < 40:
+                    continue  # skip bullet lead-ins like "Click in three points:"
+                if not desc_parts:
+                    desc_parts.append(p)
+                elif len(" ".join(desc_parts)) + len(p) + 1 <= 550:
+                    desc_parts.append(p)
+                else:
+                    break
+
+            if desc_parts:
+                overview.description = " ".join(desc_parts)
                 evidence_list.append(
                     SourceEvidenceRecord(
                         file_path=chosen_readme,
@@ -247,6 +295,23 @@ class KnowledgeBuilderService:
                         status="observed",
                     )
                 )
+
+            # If no explicit feature section was found, use intro bullet points if available
+            if not features and intro_bullets:
+                for line_idx, btext in intro_bullets[:10]:
+                    features.append(btext)
+                    if len(evidence_list) < self.max_evidence_records:
+                        evidence_list.append(
+                            SourceEvidenceRecord(
+                                file_path=chosen_readme,
+                                start_line=line_idx,
+                                evidence_type="documentation",
+                                symbol_or_statement=f"Feature (intro highlight): {btext[:100]}",
+                                confidence="high",
+                                analysis_stage="documentation",
+                                status="observed",
+                            )
+                        )
 
             overview.features = features
             overview.limitations = limitations
@@ -303,6 +368,7 @@ class KnowledgeBuilderService:
                 declared_dependencies[dep_clean] = dep.version_spec
 
         # 2. Frameworks
+        primary_manifest = analysis.dependency_files[0].file_path if analysis.dependency_files else "manifest"
         for framework_key, (disp_name, _lang) in FRAMEWORK_CATALOG.items():
             key_lower = framework_key.lower()
             in_deps = key_lower in declared_dependencies
@@ -323,6 +389,18 @@ class KnowledgeBuilderService:
                             is_confirmed=is_confirmed,
                         )
                     )
+                    if len(evidence_list) < self.max_evidence_records:
+                        evidence_list.append(
+                            SourceEvidenceRecord(
+                                file_path=primary_manifest if in_deps else "source_code",
+                                start_line=1,
+                                evidence_type="manifest_dependency" if in_deps else "code_import",
+                                symbol_or_statement=f"Framework: {disp_name}",
+                                confidence=confidence,
+                                analysis_stage="repo_structure" if in_deps else "code_understanding",
+                                status="observed",
+                            )
+                        )
 
         # Check framework app instances from entry points
         for ep in architecture.entry_points:
@@ -350,16 +428,29 @@ class KnowledgeBuilderService:
             if in_deps or in_imports:
                 if disp_name not in seen_names:
                     seen_names.add(disp_name)
+                    conf = "high" if (in_deps and in_imports) else "medium"
                     stack.databases.append(
                         TechnologyItem(
                             name=disp_name,
                             category=db_type,
                             version=declared_dependencies.get(key_lower),
-                            confidence="high" if (in_deps and in_imports) else "medium",
+                            confidence=conf,
                             detection_source="manifest" if in_deps else "code_import",
                             is_confirmed=in_imports or in_deps,
                         )
                     )
+                    if len(evidence_list) < self.max_evidence_records:
+                        evidence_list.append(
+                            SourceEvidenceRecord(
+                                file_path=primary_manifest if in_deps else "source_code",
+                                start_line=1,
+                                evidence_type="manifest_dependency" if in_deps else "code_import",
+                                symbol_or_statement=f"Database/ORM: {disp_name}",
+                                confidence=conf,
+                                analysis_stage="repo_structure" if in_deps else "code_understanding",
+                                status="observed",
+                            )
+                        )
 
         # 4. Tools (Test runners, linters, formatters)
         for tool_key, (disp_name, _category) in TOOL_CATALOG.items():
@@ -370,16 +461,29 @@ class KnowledgeBuilderService:
             if in_deps or in_imports:
                 if disp_name not in seen_names:
                     seen_names.add(disp_name)
+                    conf = "high" if in_deps else "medium"
                     stack.tools.append(
                         TechnologyItem(
                             name=disp_name,
                             category="tool",
                             version=declared_dependencies.get(key_lower),
-                            confidence="high" if in_deps else "medium",
+                            confidence=conf,
                             detection_source="manifest" if in_deps else "code_import",
                             is_confirmed=True,
                         )
                     )
+                    if len(evidence_list) < self.max_evidence_records:
+                        evidence_list.append(
+                            SourceEvidenceRecord(
+                                file_path=primary_manifest if in_deps else "source_code",
+                                start_line=1,
+                                evidence_type="manifest_dependency" if in_deps else "code_import",
+                                symbol_or_statement=f"Tool: {disp_name}",
+                                confidence=conf,
+                                analysis_stage="repo_structure" if in_deps else "code_understanding",
+                                status="observed",
+                            )
+                        )
 
         # 5. Libraries (remaining top dependencies from manifests)
         for dep_name, version in declared_dependencies.items():
@@ -406,7 +510,8 @@ class KnowledgeBuilderService:
                 )
 
         # 6. Deployment Technologies
-        if any(f.lower() in ("dockerfile", "docker-compose.yml", "docker-compose.yaml") or "docker/" in f.lower() for f in all_files):
+        docker_files = [f for f in all_files if f.lower() in ("dockerfile", "docker-compose.yml", "docker-compose.yaml") or "docker/" in f.lower()]
+        if docker_files:
             if "Docker" not in seen_names:
                 seen_names.add("Docker")
                 stack.deployment_technologies.append(
@@ -418,8 +523,21 @@ class KnowledgeBuilderService:
                         is_confirmed=True,
                     )
                 )
+                if len(evidence_list) < self.max_evidence_records:
+                    evidence_list.append(
+                        SourceEvidenceRecord(
+                            file_path=docker_files[0],
+                            start_line=1,
+                            evidence_type="configuration",
+                            symbol_or_statement="Deployment technology: Docker",
+                            confidence="high",
+                            analysis_stage="repo_structure",
+                            status="observed",
+                        )
+                    )
 
-        if any(".github/workflows/" in f or ".gitlab-ci.yml" in f for f in all_files):
+        ci_files = [f for f in all_files if ".github/workflows/" in f or ".gitlab-ci.yml" in f]
+        if ci_files:
             if "CI/CD" not in seen_names:
                 seen_names.add("CI/CD")
                 stack.deployment_technologies.append(
@@ -431,8 +549,21 @@ class KnowledgeBuilderService:
                         is_confirmed=True,
                     )
                 )
+                if len(evidence_list) < self.max_evidence_records:
+                    evidence_list.append(
+                        SourceEvidenceRecord(
+                            file_path=ci_files[0],
+                            start_line=1,
+                            evidence_type="configuration",
+                            symbol_or_statement="Deployment technology: GitHub Actions / CI",
+                            confidence="high",
+                            analysis_stage="repo_structure",
+                            status="observed",
+                        )
+                    )
 
-        if any("k8s/" in f or "kubernetes/" in f or f.endswith(".k8s.yaml") for f in all_files):
+        k8s_files = [f for f in all_files if "k8s/" in f or "kubernetes/" in f or f.endswith(".k8s.yaml")]
+        if k8s_files:
             if "Kubernetes" not in seen_names:
                 seen_names.add("Kubernetes")
                 stack.deployment_technologies.append(
@@ -444,6 +575,18 @@ class KnowledgeBuilderService:
                         is_confirmed=True,
                     )
                 )
+                if len(evidence_list) < self.max_evidence_records:
+                    evidence_list.append(
+                        SourceEvidenceRecord(
+                            file_path=k8s_files[0],
+                            start_line=1,
+                            evidence_type="configuration",
+                            symbol_or_statement="Deployment technology: Kubernetes",
+                            confidence="high",
+                            analysis_stage="repo_structure",
+                            status="observed",
+                        )
+                    )
 
         return stack, evidence_list
 
@@ -474,29 +617,50 @@ class KnowledgeBuilderService:
         for f in all_files:
             bname = posixpath.basename(f).lower()
             if bname in ("readme.md", "readme.rst", "readme.txt", "readme"):
+                is_root = "/" not in f and "\\" not in f
+                score = 10.0 if is_root else 6.5
+                reason = "Primary repository documentation and project overview" if is_root else f"Subdirectory documentation ({f})"
                 record(
-                    f, "readme", 10.0,
-                    "Primary repository documentation and project overview",
+                    f, "readme", score,
+                    reason,
                     f"Filename matches '{bname}'",
                     "high"
                 )
 
         # 2. Entry points
         for ep in architecture.entry_points:
-            score = 9.5 if ep.confidence == "high" else 8.0
-            record(
-                ep.file_path, "entry_point", score,
-                f"Application entry point candidate ({ep.entry_type})",
-                ep.symbol_or_command or ep.entry_type,
-                ep.confidence
-            )
+            if ep.entry_type == "example_entry_point":
+                record(
+                    ep.file_path, "example", 5.0,
+                    f"Example or demonstration script ({ep.symbol_or_command or ep.entry_type})",
+                    ep.symbol_or_command or ep.entry_type,
+                    ep.confidence,
+                )
+            elif ep.entry_type == "test_entry_point":
+                record(
+                    ep.file_path, "test", 4.0,
+                    f"Test entry script ({ep.symbol_or_command or ep.entry_type})",
+                    ep.symbol_or_command or ep.entry_type,
+                    ep.confidence,
+                )
+            else:
+                score = 9.5 if ep.confidence == "high" else 8.0
+                record(
+                    ep.file_path, "entry_point", score,
+                    f"Application entry point candidate ({ep.entry_type})",
+                    ep.symbol_or_command or ep.entry_type,
+                    ep.confidence,
+                )
 
         # 3. Dependency manifests
         for mf in analysis.dependency_files:
             bname = posixpath.basename(mf.file_path).lower()
+            is_root = "/" not in mf.file_path and "\\" not in mf.file_path
+            score = 9.2 if is_root else 8.8
+            reason = f"Primary package dependency manifest ({mf.ecosystem})" if is_root else f"Package dependency manifest ({mf.ecosystem})"
             record(
-                mf.file_path, "manifest", 9.0,
-                f"Package dependency manifest ({mf.ecosystem})",
+                mf.file_path, "manifest", score,
+                reason,
                 f"{mf.dependencies_count} declared dependencies",
                 "high"
             )
@@ -540,13 +704,17 @@ class KnowledgeBuilderService:
         doc_evidence: List[SourceEvidenceRecord],
         architecture: ArchitectureAnalysisResult,
         analysis: RepoAnalysisResult,
+        tech_evidence: Optional[List[SourceEvidenceRecord]] = None,
     ) -> List[SourceEvidenceRecord]:
         """
         Assembles all traceable source evidence records with deduplication.
         """
         records: List[SourceEvidenceRecord] = list(doc_evidence)
+        if tech_evidence:
+            records.extend(tech_evidence)
+
         seen_keys: Set[Tuple[str, int, str]] = {
-            (e.file_path, e.start_line, e.evidence_type) for e in doc_evidence
+            (e.file_path, e.start_line, e.evidence_type) for e in records
         }
 
         def add_rec(rec: SourceEvidenceRecord):
@@ -650,6 +818,13 @@ class KnowledgeBuilderService:
 
         # Extract all repository-relative files
         all_files: Set[str] = {pf.file_path for pf in parsed_repo.files}
+        if analysis.directory_tree:
+            def collect_tree_files(node: DirectoryTreeNode):
+                if node.type == "file":
+                    all_files.add(node.path)
+                for ch in (node.children or []):
+                    collect_tree_files(ch)
+            collect_tree_files(analysis.directory_tree)
 
         # 1. Repository Metadata
         repo_meta = RepositoryMetadataInfo(
@@ -672,7 +847,7 @@ class KnowledgeBuilderService:
 
         # 3. Technology Stack Consolidation
         logger.info("Consolidating technology stack for %s", repo_name)
-        tech_stack, _ = self.consolidate_technology_stack(
+        tech_stack, tech_evidence = self.consolidate_technology_stack(
             analysis=analysis,
             parsed_repo=parsed_repo,
             architecture=architecture,
@@ -693,6 +868,7 @@ class KnowledgeBuilderService:
             doc_evidence=doc_evidence,
             architecture=architecture,
             analysis=analysis,
+            tech_evidence=tech_evidence,
         )
 
         # 6. Repository Structure Overview

@@ -349,3 +349,119 @@ def test_get_knowledge_api_endpoint(sample_analysis, sample_parsed_repo, sample_
     assert "important_files" in data
     assert "source_evidence" in data
     assert "statistics" in data
+
+
+def test_readme_intro_paragraphs_and_bullets_extraction():
+    """
+    Tests README extraction on documentation that uses introductory paragraphs and
+    introductory bullet points (without an explicit ## Features heading) like pallets/click.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        readme_path = os.path.join(tmpdir, "README.md")
+        content = """# Awesome Tool
+
+Awesome Tool is a high-performance Python package for building data pipelines
+in a modular and expressive manner. It comes with zero external runtime
+dependencies and sensible defaults out of the box.
+
+It aims to make stream processing straightforward and resilient
+while preventing common resource allocation bottlenecks.
+
+Key highlights in brief:
+
+- Arbitrary chaining of asynchronous pipeline stages
+- Automatic backpressure negotiation
+- Native support for structured JSON logging
+
+## Documentation
+
+For full guides and reference manuals, visit the official site.
+"""
+        with open(readme_path, "w", encoding="utf-8") as f:
+            f.write(content)
+
+        overview, evidence = knowledge_builder_service.extract_readme_overview(
+            local_path=tmpdir,
+            all_files={"README.md"},
+        )
+
+        assert overview.readme_available is True
+        assert overview.readme_path == "README.md"
+        assert overview.description is not None
+        assert "high-performance Python package" in overview.description
+        assert "resource allocation bottlenecks." in overview.description
+        assert len(overview.features) == 3
+        assert "Arbitrary chaining of asynchronous pipeline stages" in overview.features
+        assert "Automatic backpressure negotiation" in overview.features
+        assert overview.limitations == []
+        assert overview.documentation_warnings == []
+        assert any(e.evidence_type == "documentation" for e in evidence)
+
+
+def test_entry_point_classification_and_important_files():
+    """
+    Tests that entry points in examples or tests are classified as example_entry_point / test_entry_point,
+    and are categorized properly in important_files.
+    """
+    example_ep = EntryPointCandidate(
+        file_path="examples/complex/complex/cli.py",
+        entry_type="example_entry_point",
+        symbol_or_command="cli.py",
+        confidence="low",
+    )
+    test_ep = EntryPointCandidate(
+        file_path="tests/test_cli.py",
+        entry_type="test_entry_point",
+        symbol_or_command="main()",
+        confidence="low",
+    )
+    app_ep = EntryPointCandidate(
+        file_path="src/main.py",
+        entry_type="primary_application_entry",
+        symbol_or_command="main.py",
+        confidence="high",
+    )
+
+    analysis = RepoAnalysisResult(
+        repository_name="sample/lib",
+        directory_tree=DirectoryTreeNode(name="lib", path="", type="directory", children=[]),
+        statistics=RepoStatistics(
+            total_files=5,
+            total_directories=1,
+            source_files=3,
+            filtered_files=2,
+            total_size_bytes=1024,
+            configuration_files=0,
+            dependency_manifests=1,
+            recognized_languages_count=1,
+        ),
+        dependency_files=[
+            ManifestInfo(file_path="pyproject.toml", ecosystem="PyPI", dependencies_count=1, dependencies=[])
+        ],
+        languages=[],
+        configuration_files=[],
+    )
+    arch = ArchitectureAnalysisResult(
+        job_id="test",
+        repository_name="sample/lib",
+        dependency_graph=dependency_resolver.build_dependency_graph([], set()),
+        call_graph=call_graph_builder.build_call_graph([], set()),
+        entry_points=[example_ep, test_ep, app_ep],
+    )
+
+    important = knowledge_builder_service.identify_important_files(
+        analysis=analysis,
+        architecture=arch,
+        all_files={"README.md", "pyproject.toml", "src/main.py", "examples/complex/complex/cli.py", "tests/test_cli.py"},
+    )
+
+    scores = {f.relative_path: (f.category, f.score) for f in important}
+    assert scores["src/main.py"][0] == "entry_point"
+    assert scores["src/main.py"][1] == 9.5
+    assert scores["examples/complex/complex/cli.py"][0] == "example"
+    assert scores["examples/complex/complex/cli.py"][1] == 5.0
+    assert scores["tests/test_cli.py"][0] == "test"
+    assert scores["tests/test_cli.py"][1] == 4.0
+    # pyproject in root scores 9.2, outranking examples
+    assert scores["pyproject.toml"][0] == "manifest"
+    assert scores["pyproject.toml"][1] == 9.2
