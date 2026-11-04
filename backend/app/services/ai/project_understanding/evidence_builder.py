@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 if TYPE_CHECKING:
     from ....models.schemas import RepositoryKnowledge
+from .evidence_resolver import find_actual_files_for_language
 
 logger = logging.getLogger(__name__)
 
@@ -54,8 +55,17 @@ class EvidenceBuilder:
         }
 
         # 3. Technology Stack
+        languages_info = []
+        for lang in knowledge.technology_stack.languages:
+            sample_files = find_actual_files_for_language(knowledge, lang.name, max_files=2)
+            lang_dict: Dict[str, Any] = {"name": lang.name}
+            if sample_files:
+                lang_dict["sample_files"] = sample_files
+            languages_info.append(lang_dict)
+
         tech_stack = {
             "languages": [lang.name for lang in knowledge.technology_stack.languages],
+            "language_evidence": languages_info,
             "frameworks": [
                 {
                     "name": fw.name,

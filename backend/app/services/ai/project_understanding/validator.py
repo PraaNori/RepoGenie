@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any, Dict, Optional, Set, Tuple
 if TYPE_CHECKING:
     from ....models.schemas import DirectoryTreeNode, RepositoryKnowledge
 from .schemas import EvidenceReference, ProjectUnderstanding
+from .evidence_resolver import get_language_extensions
 
 
 class EvidenceValidator:
@@ -204,6 +205,16 @@ class EvidenceValidator:
         if line_counts is None:
             line_counts = {}
 
+        # Check for synthetic wildcard paths
+        if "*" in ref.file_path or "?" in ref.file_path:
+            ref.is_valid = False
+            ref.path_verified = False
+            ref.line_range_verified = False
+            ref.status = "unverified"
+            ref.confidence = "low"
+            ref.detail = f"File '{ref.file_path}' does not exist in repository inventory."
+            return False
+
         norm_path = ref.file_path.replace("\\", "/").strip().lstrip("/")
         base_name = os.path.basename(norm_path)
 
@@ -327,12 +338,34 @@ class EvidenceValidator:
         # Validate Technology Stack
         for tech in understanding.technology_stack:
             valid_count = 0
+            is_language = (
+                getattr(tech, "category", "").lower() == "language"
+                or bool(get_language_extensions(tech.technology_name))
+            )
+            expected_exts = get_language_extensions(tech.technology_name) if is_language else ()
+
             for ev in tech.supporting_evidence:
                 if self.validate_reference(ev, known_files, line_counts, has_complete_inventory, local_path):
+                    # For language technologies citing code evidence, verify extension match
+                    if is_language and ev.evidence_type == "code" and expected_exts:
+                        ext = os.path.splitext(ev.file_path.lower())[1]
+                        if ext not in expected_exts:
+                            ev.is_valid = False
+                            ev.path_verified = False
+                            ev.status = "unverified"
+                            ev.confidence = "low"
+                            ev.detail = (
+                                f"File '{ev.file_path}' (extension '{ext}') does not match "
+                                f"expected extensions {expected_exts} for language '{tech.technology_name}'."
+                            )
+                            warnings.append(
+                                f"Technology '{tech.technology_name}': unverified evidence '{ev.file_path}' ({ev.detail})."
+                            )
+                            continue
                     valid_count += 1
                 else:
                     warnings.append(f"Technology '{tech.technology_name}': unverified evidence '{ev.file_path}' ({ev.detail}).")
-            if tech.supporting_evidence and valid_count == 0 and tech.status == "confirmed":
+            if (not tech.supporting_evidence or valid_count == 0) and tech.status == "confirmed":
                 tech.status = "inferred"
 
         understanding.validation_warnings = warnings

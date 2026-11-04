@@ -338,9 +338,18 @@ class KnowledgeBuilderService:
         seen_names: Set[str] = set()
 
         # 1. Programming Languages from static language statistics
+        from .analyzer import LANGUAGE_EXTENSION_MAP
         for lang_stat in analysis.languages:
             if lang_stat.name not in seen_names:
                 seen_names.add(lang_stat.name)
+                # Find representative real file for this language
+                rep_file = None
+                matching_exts = [e for e, l in LANGUAGE_EXTENSION_MAP.items() if l == lang_stat.name]
+                for f in all_files:
+                    if any(f.endswith(e) for e in matching_exts):
+                        rep_file = f
+                        break
+
                 stack.languages.append(
                     TechnologyItem(
                         name=lang_stat.name,
@@ -351,6 +360,18 @@ class KnowledgeBuilderService:
                         is_confirmed=True,
                     )
                 )
+                if rep_file and len(evidence_list) < self.max_evidence_records:
+                    evidence_list.append(
+                        SourceEvidenceRecord(
+                            file_path=rep_file,
+                            start_line=1,
+                            evidence_type="language_source",
+                            symbol_or_statement=f"Source file implementing {lang_stat.name}",
+                            confidence="high",
+                            analysis_stage="repo_structure",
+                            status="observed",
+                        )
+                    )
 
         # Build lookup of all imported symbols and modules across parsed code
         imported_modules: Set[str] = set()
@@ -367,8 +388,22 @@ class KnowledgeBuilderService:
                 dep_clean = dep.name.lower()
                 declared_dependencies[dep_clean] = dep.version_spec
 
+        # Helper to resolve actual evidence file for frameworks, databases, and tools
+        def resolve_tech_file(key: str, in_d: bool, in_imp: bool) -> Optional[str]:
+            if in_d and analysis.dependency_files:
+                for mf in analysis.dependency_files:
+                    if any(key == dep.name.lower() for dep in mf.dependencies):
+                        return mf.file_path
+                return analysis.dependency_files[0].file_path
+            if in_imp:
+                for pf in parsed_repo.files:
+                    if any(key in imp.module.lower() for imp in pf.imports):
+                        return pf.file_path
+            if analysis.dependency_files:
+                return analysis.dependency_files[0].file_path
+            return None
+
         # 2. Frameworks
-        primary_manifest = analysis.dependency_files[0].file_path if analysis.dependency_files else "manifest"
         for framework_key, (disp_name, _lang) in FRAMEWORK_CATALOG.items():
             key_lower = framework_key.lower()
             in_deps = key_lower in declared_dependencies
@@ -389,10 +424,11 @@ class KnowledgeBuilderService:
                             is_confirmed=is_confirmed,
                         )
                     )
-                    if len(evidence_list) < self.max_evidence_records:
+                    fw_file = resolve_tech_file(key_lower, in_deps, in_imports)
+                    if fw_file and fw_file in all_files and len(evidence_list) < self.max_evidence_records:
                         evidence_list.append(
                             SourceEvidenceRecord(
-                                file_path=primary_manifest if in_deps else "source_code",
+                                file_path=fw_file,
                                 start_line=1,
                                 evidence_type="manifest_dependency" if in_deps else "code_import",
                                 symbol_or_statement=f"Framework: {disp_name}",
@@ -439,10 +475,11 @@ class KnowledgeBuilderService:
                             is_confirmed=in_imports or in_deps,
                         )
                     )
-                    if len(evidence_list) < self.max_evidence_records:
+                    db_file = resolve_tech_file(key_lower, in_deps, in_imports)
+                    if db_file and db_file in all_files and len(evidence_list) < self.max_evidence_records:
                         evidence_list.append(
                             SourceEvidenceRecord(
-                                file_path=primary_manifest if in_deps else "source_code",
+                                file_path=db_file,
                                 start_line=1,
                                 evidence_type="manifest_dependency" if in_deps else "code_import",
                                 symbol_or_statement=f"Database/ORM: {disp_name}",

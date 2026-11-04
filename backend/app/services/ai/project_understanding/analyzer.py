@@ -14,6 +14,7 @@ from ..llm_manager import LLMManager
 from ..schemas import LLMGenerationOptions, LLMResponse
 from .evidence_builder import EvidenceBuilder, evidence_builder_service
 from .validator import evidence_validator
+from .evidence_resolver import resolve_technology_evidence
 from .prompts import (
     SYSTEM_PROMPT,
     build_project_understanding_user_prompt,
@@ -335,13 +336,16 @@ class ProjectUnderstandingAnalyzer:
         if isinstance(tech, dict):
             norm_tech = []
             for k, v in tech.items():
+                tech_name = str(v) if k in ("programming_language", "language") else f"{v}"
+                category = "Language" if "lang" in k.lower() else "Framework/Tool"
+                real_evidence = resolve_technology_evidence(tech_name, category, knowledge)
                 norm_tech.append({
-                    "technology_name": str(v) if k in ("programming_language", "language") else f"{v}",
-                    "category": "Language" if "lang" in k.lower() else "Framework/Tool",
+                    "technology_name": tech_name,
+                    "category": category,
                     "role_in_project": f"{k.replace('_', ' ').title()}: {v}",
                     "why_used": f"Used in project structure as {k}.",
-                    "supporting_evidence": [],
-                    "status": "confirmed",
+                    "supporting_evidence": [e.model_dump() for e in real_evidence],
+                    "status": "confirmed" if real_evidence else "inferred",
                 })
             parsed_dict["technology_stack"] = norm_tech
         elif not isinstance(tech, list) or not tech:
@@ -350,23 +354,48 @@ class ProjectUnderstandingAnalyzer:
             norm_tech = []
             for t in tech:
                 if isinstance(t, str):
+                    real_evidence = resolve_technology_evidence(t, "Technology", knowledge)
                     norm_tech.append({
                         "technology_name": t,
                         "category": "Technology",
                         "role_in_project": f"Core component: {t}",
                         "why_used": "Used in repository implementation.",
-                        "supporting_evidence": [],
-                        "status": "confirmed",
+                        "supporting_evidence": [e.model_dump() for e in real_evidence],
+                        "status": "confirmed" if real_evidence else "inferred",
                     })
                 elif isinstance(t, dict):
+                    t_name = str(t.get("technology_name", "")).strip()
+                    t_cat = str(t.get("category", "Technology")).strip()
                     if not t.get("role_in_project"):
                         t["role_in_project"] = f"Component in {knowledge.repository.name}"
                     if not t.get("why_used"):
                         t["why_used"] = "Used in repository implementation."
-                    if not t.get("status"):
-                        t["status"] = "confirmed"
-                    if "supporting_evidence" not in t or not isinstance(t["supporting_evidence"], list):
-                        t["supporting_evidence"] = []
+
+                    # Sanitize supporting_evidence: filter out synthetic wildcards and placeholders
+                    raw_ev = t.get("supporting_evidence")
+                    cleaned_ev = []
+                    if isinstance(raw_ev, list):
+                        for ev_item in raw_ev:
+                            if isinstance(ev_item, dict):
+                                fp = str(ev_item.get("file_path", "")).strip()
+                                # Reject wildcards and known non-file placeholders
+                                if "*" not in fp and "?" not in fp and fp.lower() not in (
+                                    "manifest", "source_code", "repository_analysis", "*.python", "*.javascript", "*.css"
+                                ):
+                                    cleaned_ev.append(ev_item)
+
+                    if not cleaned_ev:
+                        # Attempt to resolve genuine evidence from knowledge
+                        real_ev = resolve_technology_evidence(t_name, t_cat, knowledge)
+                        if real_ev:
+                            cleaned_ev = [e.model_dump() for e in real_ev]
+
+                    t["supporting_evidence"] = cleaned_ev
+                    if not cleaned_ev and t.get("status") == "confirmed":
+                        t["status"] = "inferred"
+                    elif not t.get("status"):
+                        t["status"] = "confirmed" if cleaned_ev else "inferred"
+
                     norm_tech.append(t)
             parsed_dict["technology_stack"] = norm_tech
 
@@ -439,40 +468,28 @@ class ProjectUnderstandingAnalyzer:
         # Tech stack items
         tech_items = []
         for lang in knowledge.technology_stack.languages:
+            evidence_refs = resolve_technology_evidence(lang.name, "Language", knowledge)
             tech_items.append(
                 TechnologyExplanationItem(
                     technology_name=lang.name,
                     category="Language",
                     role_in_project="Primary implementation language",
                     why_used=f"Core language used for implementation detected via {lang.detection_source}.",
-                    supporting_evidence=[
-                        EvidenceReference(
-                            file_path=f"*.{lang.name.lower()}",
-                            evidence_type="code",
-                            confidence="high",
-                            status="confirmed",
-                        )
-                    ],
-                    status="confirmed",
+                    supporting_evidence=evidence_refs,
+                    status="confirmed" if evidence_refs else "inferred",
                 )
             )
 
         for fw in knowledge.technology_stack.frameworks:
+            evidence_refs = resolve_technology_evidence(fw.name, fw.category or "Framework", knowledge)
             tech_items.append(
                 TechnologyExplanationItem(
                     technology_name=fw.name,
                     category=fw.category or "Framework",
                     role_in_project=f"Integrated {fw.category or 'framework'} component",
                     why_used="Provides architectural backbone and functional abstractions.",
-                    supporting_evidence=[
-                        EvidenceReference(
-                            file_path=fw.detection_source or "repository_analysis",
-                            evidence_type="manifest",
-                            confidence="high",
-                            status="confirmed" if fw.is_confirmed else "inferred",
-                        )
-                    ],
-                    status="confirmed" if fw.is_confirmed else "inferred",
+                    supporting_evidence=evidence_refs,
+                    status="confirmed" if (evidence_refs and fw.is_confirmed) else "inferred",
                 )
             )
 
