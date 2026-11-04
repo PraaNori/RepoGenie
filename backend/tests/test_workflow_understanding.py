@@ -596,3 +596,518 @@ def test_build_and_verify_call_site_edge_and_location_independence():
     )
     assert evidence_bad_edge.is_edge_verified is False  # Edge not found
     assert evidence_bad_edge.is_site_location_verified is True
+
+
+# ===========================================================================
+# 5. Candidate Discovery Tests
+# ===========================================================================
+
+def test_candidate_discovery_high_confidence_entry_point():
+    """Seeds candidate workflow from high-confidence EntryPointCandidate and traces CallGraph."""
+    from app.models.schemas import (
+        ArchitectureSummary,
+        CallGraph,
+        CallGraphEdge,
+        CodeStructureSummary,
+        EntryPointCandidate,
+        FunctionInfo,
+        ParsedFile,
+        RelationshipEvidence,
+        RepositoryKnowledge,
+        RepositoryMetadataInfo,
+        SourceLocation,
+        StatusEnum,
+    )
+    from app.services.ai.workflow_understanding import workflow_candidate_discoverer
+
+    pf_core = ParsedFile(
+        file_path="src/click/core.py",
+        language="Python",
+        status="success",
+        total_lines=200,
+        functions=[
+            FunctionInfo(
+                name="main",
+                file_path="src/click/core.py",
+                location=SourceLocation(file_path="src/click/core.py", start_line=10, end_line=50, start_column=0, end_column=20),
+            )
+        ],
+    )
+    mock_knowledge = RepositoryKnowledge(
+        schema_version="1.0",
+        repository=RepositoryMetadataInfo(name="pallets/click", owner="pallets", repository_url="https://github.com/pallets/click", clone_status=StatusEnum.COMPLETED),
+        project_overview={"readme_available": True},
+        technology_stack={"languages": []},
+        repository_structure={"total_directories": 1, "total_files": 2},
+        statistics={},
+        dependency_information={"nodes": [], "edges": []},
+        code_structure=CodeStructureSummary(parsed_files_count=1, supported_languages=["Python"], files=[pf_core]),
+        architecture=ArchitectureSummary(
+            dependency_graph={"nodes": [], "edges": []},
+            call_graph=CallGraph(
+                edges=[
+                    CallGraphEdge(
+                        caller="src/click/core.py:main",
+                        callee="src/click/parser.py:split_arg_string",
+                        call_name="split_arg_string",
+                        resolution_status="resolved_internal",
+                        evidence=RelationshipEvidence(file_path="src/click/core.py", line_number=25, confidence="high", evidence_type="function_call"),
+                    )
+                ]
+            ),
+        ),
+        entry_points=[
+            EntryPointCandidate(
+                file_path="src/click/core.py",
+                entry_type="python_main_guard",
+                symbol_or_command="main",
+                confidence="high",
+            )
+        ],
+        analysis_metadata={"created_at": "2026-11-05T00:00:00Z"},
+    )
+
+    result = workflow_candidate_discoverer.discover_candidates(mock_knowledge)
+    assert len(result.selected_ai_candidates) >= 1
+    top_cand = result.selected_ai_candidates[0]
+    assert top_cand.entry_file == "src/click/core.py"
+    assert top_cand.entry_symbol == "main"
+    assert len(top_cand.call_chain) == 1
+    assert top_cand.call_chain[0].callee_symbol == "split_arg_string"
+    assert "src/click/parser.py" in top_cand.participating_files
+
+
+def test_candidate_discovery_library_repository():
+    """Discovers library API workflows when no conventional application entry points exist."""
+    from app.models.schemas import (
+        ArchitectureSummary,
+        CallGraph,
+        CallGraphEdge,
+        CodeStructureSummary,
+        ImportantFileInfo,
+        ParsedFile,
+        RelationshipEvidence,
+        RepositoryKnowledge,
+        RepositoryMetadataInfo,
+        StatusEnum,
+    )
+    from app.services.ai.workflow_understanding import workflow_candidate_discoverer
+
+    mock_knowledge = RepositoryKnowledge(
+        schema_version="1.0",
+        repository=RepositoryMetadataInfo(name="sindresorhus/is", owner="sindresorhus", repository_url="https://github.com/sindresorhus/is", clone_status=StatusEnum.COMPLETED),
+        project_overview={"readme_available": True},
+        technology_stack={"languages": []},
+        repository_structure={"total_directories": 1, "total_files": 2},
+        statistics={},
+        dependency_information={"nodes": [], "edges": []},
+        code_structure=CodeStructureSummary(parsed_files_count=1, supported_languages=["TypeScript"], files=[]),
+        architecture=ArchitectureSummary(
+            dependency_graph={"nodes": [], "edges": []},
+            call_graph=CallGraph(
+                edges=[
+                    CallGraphEdge(
+                        caller="source/index.ts:is",
+                        callee="source/predicates.ts:isObject",
+                        call_name="isObject",
+                        resolution_status="resolved_internal",
+                        evidence=RelationshipEvidence(file_path="source/index.ts", line_number=15, confidence="high", evidence_type="function_call"),
+                    )
+                ]
+            ),
+        ),
+        entry_points=[],  # No entry points!
+        important_files=[
+            ImportantFileInfo(relative_path="source/index.ts", category="core", score=9.5, reason="Main entry", evidence="", confidence="high")
+        ],
+        analysis_metadata={"created_at": "2026-11-05T00:00:00Z"},
+    )
+
+    result = workflow_candidate_discoverer.discover_candidates(mock_knowledge)
+    assert len(result.selected_ai_candidates) >= 1
+    lib_cand = result.selected_ai_candidates[0]
+    assert lib_cand.is_library_flow is True
+    assert lib_cand.entry_file == "source/index.ts"
+
+
+def test_candidate_discovery_depth_limit_and_recursion_protection():
+    """Traversal stops at MAX_DEPTH (4) and detects recursive cycles without infinite loops."""
+    from app.models.schemas import (
+        ArchitectureSummary,
+        CallGraph,
+        CallGraphEdge,
+        CodeStructureSummary,
+        EntryPointCandidate,
+        FunctionInfo,
+        ParsedFile,
+        RelationshipEvidence,
+        RepositoryKnowledge,
+        RepositoryMetadataInfo,
+        SourceLocation,
+        StatusEnum,
+    )
+    from app.services.ai.workflow_understanding import workflow_candidate_discoverer
+
+    # Cyclic call graph: A -> B -> C -> A
+    edges = [
+        CallGraphEdge(caller="main.py:node_a", callee="main.py:node_b", call_name="node_b", resolution_status="resolved_internal", evidence=RelationshipEvidence(file_path="main.py", line_number=10, evidence_type="function_call")),
+        CallGraphEdge(caller="main.py:node_b", callee="main.py:node_c", call_name="node_c", resolution_status="resolved_internal", evidence=RelationshipEvidence(file_path="main.py", line_number=20, evidence_type="function_call")),
+        CallGraphEdge(caller="main.py:node_c", callee="main.py:node_d", call_name="node_d", resolution_status="resolved_internal", evidence=RelationshipEvidence(file_path="main.py", line_number=30, evidence_type="function_call")),
+        CallGraphEdge(caller="main.py:node_d", callee="main.py:node_e", call_name="node_e", resolution_status="resolved_internal", evidence=RelationshipEvidence(file_path="main.py", line_number=40, evidence_type="function_call")),
+        CallGraphEdge(caller="main.py:node_e", callee="main.py:node_a", call_name="node_a", resolution_status="resolved_internal", evidence=RelationshipEvidence(file_path="main.py", line_number=50, evidence_type="function_call")),  # Cycle!
+    ]
+
+    mock_knowledge = RepositoryKnowledge(
+        schema_version="1.0",
+        repository=RepositoryMetadataInfo(name="test/cycles", owner="test", repository_url="https://github.com/test/cycles", clone_status=StatusEnum.COMPLETED),
+        project_overview={"readme_available": True},
+        technology_stack={"languages": []},
+        repository_structure={"total_directories": 1, "total_files": 1},
+        statistics={},
+        dependency_information={"nodes": [], "edges": []},
+        code_structure=CodeStructureSummary(parsed_files_count=1, supported_languages=["Python"], files=[ParsedFile(file_path="main.py", language="Python", status="success", total_lines=100, functions=[FunctionInfo(name="node_a", file_path="main.py", location=SourceLocation(file_path="main.py", start_line=1, end_line=15, start_column=0, end_column=0))])]),
+        architecture=ArchitectureSummary(dependency_graph={"nodes": [], "edges": []}, call_graph=CallGraph(edges=edges)),
+        entry_points=[EntryPointCandidate(file_path="main.py", entry_type="python_main_guard", symbol_or_command="node_a", confidence="high")],
+        analysis_metadata={"created_at": "2026-11-05T00:00:00Z"},
+    )
+
+    result = workflow_candidate_discoverer.discover_candidates(mock_knowledge)
+    assert len(result.selected_ai_candidates) == 1
+    cand = result.selected_ai_candidates[0]
+    # Chain depth must not exceed 5 nodes
+    assert len(cand.call_chain) <= 5
+
+
+def test_candidate_discovery_limits_and_omission_reporting():
+    """Enforces max 2 AI candidates, max 2 structural chains, and reports omitted workflows."""
+    from app.models.schemas import (
+        ArchitectureSummary,
+        CallGraph,
+        CallGraphEdge,
+        CodeStructureSummary,
+        EntryPointCandidate,
+        FunctionInfo,
+        ParsedFile,
+        RelationshipEvidence,
+        RepositoryKnowledge,
+        RepositoryMetadataInfo,
+        SourceLocation,
+        StatusEnum,
+    )
+    from app.services.ai.workflow_understanding import workflow_candidate_discoverer
+
+    # Create 6 distinct entry points
+    entry_points = []
+    edges = []
+    parsed_files = []
+    for i in range(1, 7):
+        fn_name = f"cli_command_{i}"
+        entry_points.append(EntryPointCandidate(file_path=f"cmd_{i}.py", entry_type="python_main_guard", symbol_or_command=fn_name, confidence="high"))
+        edges.append(CallGraphEdge(caller=f"cmd_{i}.py:{fn_name}", callee=f"service.py:exec_{i}", call_name=f"exec_{i}", resolution_status="resolved_internal", evidence=RelationshipEvidence(file_path=f"cmd_{i}.py", line_number=10, evidence_type="function_call")))
+        parsed_files.append(
+            ParsedFile(
+                file_path=f"cmd_{i}.py",
+                language="Python",
+                status="success",
+                total_lines=50,
+                functions=[FunctionInfo(name=fn_name, file_path=f"cmd_{i}.py", location=SourceLocation(file_path=f"cmd_{i}.py", start_line=1, end_line=20, start_column=0, end_column=0))],
+            )
+        )
+
+    mock_knowledge = RepositoryKnowledge(
+        schema_version="1.0",
+        repository=RepositoryMetadataInfo(name="test/many", owner="test", repository_url="https://github.com/test/many", clone_status=StatusEnum.COMPLETED),
+        project_overview={"readme_available": True},
+        technology_stack={"languages": []},
+        repository_structure={"total_directories": 1, "total_files": 6},
+        statistics={},
+        dependency_information={"nodes": [], "edges": []},
+        code_structure=CodeStructureSummary(parsed_files_count=6, supported_languages=["Python"], files=parsed_files),
+        architecture=ArchitectureSummary(dependency_graph={"nodes": [], "edges": []}, call_graph=CallGraph(edges=edges)),
+        entry_points=entry_points,
+        analysis_metadata={"created_at": "2026-11-05T00:00:00Z"},
+    )
+
+    result = workflow_candidate_discoverer.discover_candidates(mock_knowledge)
+    assert len(result.selected_ai_candidates) == 2  # Max 2 AI
+    assert len(result.structural_call_chain_candidates) == 2  # Max 2 structural
+    assert len(result.omitted_candidate_workflows) == 2  # 6 total - 4 = 2 omitted
+    assert all("omitted due to workflow budget limit" in o for o in result.omitted_candidate_workflows)
+
+
+def test_candidate_discovery_deduplication_preserves_distinct_workflows():
+    """Two distinct workflows calling the same common utility function are NOT merged."""
+    from app.models.schemas import (
+        ArchitectureSummary,
+        CallGraph,
+        CallGraphEdge,
+        CodeStructureSummary,
+        EntryPointCandidate,
+        FunctionInfo,
+        ParsedFile,
+        RelationshipEvidence,
+        RepositoryKnowledge,
+        RepositoryMetadataInfo,
+        SourceLocation,
+        StatusEnum,
+    )
+    from app.services.ai.workflow_understanding import workflow_candidate_discoverer
+
+    edges = [
+        # Workflow 1: auth -> helper
+        CallGraphEdge(caller="auth.py:login", callee="util.py:log_action", call_name="log_action", resolution_status="resolved_internal", evidence=RelationshipEvidence(file_path="auth.py", line_number=10, evidence_type="function_call")),
+        # Workflow 2: payments -> helper
+        CallGraphEdge(caller="pay.py:checkout", callee="util.py:log_action", call_name="log_action", resolution_status="resolved_internal", evidence=RelationshipEvidence(file_path="pay.py", line_number=10, evidence_type="function_call")),
+    ]
+    pfs = [
+        ParsedFile(file_path="auth.py", language="Python", status="success", total_lines=50, functions=[FunctionInfo(name="login", file_path="auth.py", location=SourceLocation(file_path="auth.py", start_line=1, end_line=20, start_column=0, end_column=0))]),
+        ParsedFile(file_path="pay.py", language="Python", status="success", total_lines=50, functions=[FunctionInfo(name="checkout", file_path="pay.py", location=SourceLocation(file_path="pay.py", start_line=1, end_line=20, start_column=0, end_column=0))]),
+    ]
+    mock_knowledge = RepositoryKnowledge(
+        schema_version="1.0",
+        repository=RepositoryMetadataInfo(name="test/dedup", owner="test", repository_url="https://github.com/test/dedup", clone_status=StatusEnum.COMPLETED),
+        project_overview={"readme_available": True},
+        technology_stack={"languages": []},
+        repository_structure={"total_directories": 1, "total_files": 2},
+        statistics={},
+        dependency_information={"nodes": [], "edges": []},
+        code_structure=CodeStructureSummary(parsed_files_count=2, supported_languages=["Python"], files=pfs),
+        architecture=ArchitectureSummary(dependency_graph={"nodes": [], "edges": []}, call_graph=CallGraph(edges=edges)),
+        entry_points=[
+            EntryPointCandidate(file_path="auth.py", entry_type="python_main_guard", symbol_or_command="login", confidence="high"),
+            EntryPointCandidate(file_path="pay.py", entry_type="python_main_guard", symbol_or_command="checkout", confidence="high"),
+        ],
+        analysis_metadata={"created_at": "2026-11-05T00:00:00Z"},
+    )
+
+    result = workflow_candidate_discoverer.discover_candidates(mock_knowledge)
+    # Both distinct workflows must be preserved!
+    assert len(result.selected_ai_candidates) == 2
+    entry_symbols = {c.entry_symbol for c in result.selected_ai_candidates}
+    assert "login" in entry_symbols
+    assert "checkout" in entry_symbols
+
+
+# ===========================================================================
+# 6. Snippet Extraction Tests
+# ===========================================================================
+
+def test_snippet_extractor_complete_function_boundaries():
+    """Extracts complete function snippet within the 25-line limit with line numbers."""
+    from app.models.schemas import FunctionInfo, ParsedFile, SourceLocation
+    from app.services.ai.workflow_understanding import workflow_snippet_extractor
+
+    func = FunctionInfo(
+        name="calculate_tax",
+        file_path="billing.py",
+        location=SourceLocation(file_path="billing.py", start_line=10, end_line=15, start_column=0, end_column=0),
+        snippet="def calculate_tax(amount):\n    \"\"\"Calculates VAT.\"\"\"\n    rate = 0.2\n    return amount * rate",
+    )
+    pf = ParsedFile(file_path="billing.py", language="Python", status="success", total_lines=50, functions=[func])
+
+    snippet = workflow_snippet_extractor.extract_symbol_snippet(pf, "calculate_tax")
+    assert snippet.is_complete is True
+    assert snippet.line_start == 10
+    assert snippet.line_end == 15
+    assert snippet.docstring == "Calculates VAT."
+    assert "L10: def calculate_tax(amount):" in snippet.formatted_code
+    assert "L13:     return amount * rate" in snippet.formatted_code
+
+
+def test_snippet_extractor_oversized_symbol_truncation():
+    """Functions exceeding 25 lines retain signature and omit body to preserve boundary clarity."""
+    from app.models.schemas import FunctionInfo, ParsedFile, SourceLocation
+    from app.services.ai.workflow_understanding import workflow_snippet_extractor
+
+    oversized_lines = ["def process_huge_batch():"] + [f"    step_{i}()" for i in range(1, 40)]
+    func = FunctionInfo(
+        name="process_huge_batch",
+        file_path="batch.py",
+        location=SourceLocation(file_path="batch.py", start_line=1, end_line=41, start_column=0, end_column=0),
+        snippet="\n".join(oversized_lines),
+    )
+    pf = ParsedFile(file_path="batch.py", language="Python", status="success", total_lines=100, functions=[func])
+
+    snippet = workflow_snippet_extractor.extract_symbol_snippet(pf, "process_huge_batch")
+    assert snippet.is_complete is False
+    assert "exceeds 25-line limit" in snippet.exclusion_reason
+    assert "L1: def process_huge_batch():" in snippet.formatted_code
+
+
+def test_snippet_extractor_sensitive_file_exclusion():
+    """Secrets, .env, and credential files are strictly excluded from extraction."""
+    from app.models.schemas import FunctionInfo, ParsedFile, SourceLocation
+    from app.services.ai.workflow_understanding import workflow_snippet_extractor
+
+    pf_env = ParsedFile(
+        file_path=".env",
+        language="Configuration",
+        status="success",
+        total_lines=10,
+        functions=[FunctionInfo(name="get_key", file_path=".env", location=SourceLocation(file_path=".env", start_line=1, end_line=2, start_column=0, end_column=0))],
+    )
+    snippet_env = workflow_snippet_extractor.extract_symbol_snippet(pf_env, "get_key")
+    assert snippet_env.is_complete is False
+    assert "<SNIPPET REDACTED: SENSITIVE_CONFIGURATION_FILE>" in snippet_env.formatted_code
+
+    pf_secret = ParsedFile(
+        file_path="config/secret_keys.py",
+        language="Python",
+        status="success",
+        total_lines=10,
+        functions=[FunctionInfo(name="load_key", file_path="config/secret_keys.py", location=SourceLocation(file_path="config/secret_keys.py", start_line=1, end_line=2, start_column=0, end_column=0))],
+    )
+    snippet_secret = workflow_snippet_extractor.extract_symbol_snippet(pf_secret, "load_key")
+    assert snippet_secret.is_complete is False
+    assert "matches sensitive credential/secret file pattern" in snippet_secret.exclusion_reason
+
+
+def test_snippet_extractor_missing_file_or_symbol():
+    """Missing parsed files or symbols return clean unresolved snippet without crashing."""
+    from app.services.ai.workflow_understanding import workflow_snippet_extractor
+
+    res_none = workflow_snippet_extractor.extract_symbol_snippet(None, "foo")
+    assert res_none.is_complete is False
+    assert "PARSED_FILE_UNAVAILABLE" in res_none.formatted_code
+
+
+# ===========================================================================
+# 7. Operation-Based Storage & External API Tests
+# ===========================================================================
+
+def test_storage_verification_sql_select_read():
+    """SQL SELECT queries are classified as read-only operations."""
+    from app.services.ai.workflow_understanding import operation_verifier
+
+    code = """
+def fetch_user(cursor, user_id):
+    cursor.execute("SELECT id, name FROM users WHERE id = ?", (user_id,))
+    return cursor.fetchone()
+"""
+    res = operation_verifier.verify_storage_in_code(code, "repo.py")
+    assert res.storage_operation_verified is True
+    assert res.storage_operation_type == "read"
+    assert "read-only" in res.observed_operation
+
+
+def test_storage_verification_sql_insert_write():
+    """SQL INSERT queries are classified as write operations."""
+    from app.services.ai.workflow_understanding import operation_verifier
+
+    code = """
+def create_audit_log(cursor, msg):
+    cursor.execute("INSERT INTO logs (message) VALUES (?)", (msg,))
+"""
+    res = operation_verifier.verify_storage_in_code(code, "repo.py")
+    assert res.storage_operation_verified is True
+    assert res.storage_operation_type == "write"
+    assert "SQL write" in res.observed_operation
+
+
+def test_storage_verification_open_modes():
+    """Distinguishes open(..., 'w') write from open(..., 'r') read."""
+    from app.services.ai.workflow_understanding import operation_verifier
+
+    code_write = """
+def save_output(data):
+    with open("results.json", "w") as f:
+        f.write(data)
+"""
+    res_w = operation_verifier.verify_storage_in_code(code_write, "io.py")
+    assert res_w.storage_operation_verified is True
+    assert res_w.storage_operation_type == "write"
+
+    code_read = """
+def load_config():
+    with open("config.json", "r") as f:
+        return f.read()
+"""
+    res_r = operation_verifier.verify_storage_in_code(code_read, "io.py")
+    assert res_r.storage_operation_verified is True
+    assert res_r.storage_operation_type == "read"
+
+
+def test_storage_verification_bare_commit_not_a_write():
+    """A bare .commit() without preceding write evidence does not establish a write operation."""
+    from app.services.ai.workflow_understanding import operation_verifier
+
+    code = """
+def just_commit(session):
+    # Only calls commit without any preceding add, insert, or write
+    session.commit()
+"""
+    res = operation_verifier.verify_storage_in_code(code, "db.py")
+    assert res.storage_operation_verified is False
+    assert res.persistence_status == "storage_library_imported_no_write_observed"
+    assert "Bare .commit() observed without preceding" in res.persistence_detail
+
+
+def test_storage_verification_orm_operations():
+    """ORM .add() establishes write; .delete() establishes delete."""
+    from app.services.ai.workflow_understanding import operation_verifier
+
+    code_add = """
+def add_user(session, user):
+    session.add(user)
+    session.commit()
+"""
+    res_add = operation_verifier.verify_storage_in_code(code_add, "orm.py")
+    assert res_add.storage_operation_verified is True
+    assert res_add.storage_operation_type == "write"
+
+    code_del = """
+def remove_user(session, user):
+    session.delete(user)
+    session.commit()
+"""
+    res_del = operation_verifier.verify_storage_in_code(code_del, "orm.py")
+    assert res_del.storage_operation_verified is True
+    assert res_del.storage_operation_type == "delete"
+
+
+def test_external_api_verification_dict_get_rejected():
+    """Ordinary dict.get() lookups are strictly rejected from external API classification."""
+    from app.services.ai.workflow_understanding import operation_verifier
+
+    code = """
+def lookup_config(d, key):
+    val = d.get(key)
+    params = {}
+    return params.get("default")
+"""
+    res = operation_verifier.verify_external_api_in_code(code, "util.py")
+    assert res.external_api_operation_verified is False
+    assert res.external_api_status == "no_external_api_operation_detected"
+
+
+def test_external_api_verification_requests_get_verified():
+    """requests.get() is verified with receiver evidence."""
+    from app.services.ai.workflow_understanding import operation_verifier
+
+    code = """
+import requests
+
+def fetch_weather(city):
+    resp = requests.get("https://api.weather.com/v1?city=" + city)
+    return resp.json()
+"""
+    res = operation_verifier.verify_external_api_in_code(code, "weather.py")
+    assert res.external_api_operation_verified is True
+    assert res.external_api_operation_type == "http_request"
+    assert res.external_api_status == "external_api_operation_verified"
+    assert "requests.get()" in res.observed_operation
+
+
+def test_operation_verification_non_python_conservative():
+    """Non-Python languages receive conservative unresolved status."""
+    from app.services.ai.workflow_understanding import operation_verifier
+
+    code = "function fetchUser() { return db.query('SELECT 1'); }"
+    res_storage = operation_verifier.verify_storage_in_code(code, "db.js", language="JavaScript")
+    assert res_storage.storage_operation_verified is False
+    assert "deep AST storage verification is supported for Python in Milestone 3.4" in res_storage.persistence_detail
+
+    res_api = operation_verifier.verify_external_api_in_code(code, "api.go", language="Go")
+    assert res_api.external_api_operation_verified is False
+    assert "deep external API verification is supported for Python in Milestone 3.4" in res_api.external_api_detail
+
