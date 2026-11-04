@@ -52,7 +52,7 @@ class Settings(BaseSettings):
     MAX_SOURCE_EVIDENCE_RECORDS: int = 500  # Maximum trace evidence records retained
 
     # AI Configuration Foundation (Milestone 3.1)
-    AI_PROVIDER: str = "gemini"
+    AI_PROVIDER: str = "groq"
 
     GEMINI_API_KEY: Optional[str] = None
     GEMINI_MODEL: str = "gemini-3.8-flash"

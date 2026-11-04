@@ -15,14 +15,14 @@ from .base import BaseLanguageParser
 
 class CppParser(BaseLanguageParser):
     """
-    AST Parser for C++ using Tree-sitter.
+    AST Parser for C++ (and Arduino .ino) using Tree-sitter.
     Iterative AST traversal and byte-offset mapping.
     """
 
     def __init__(self):
         super().__init__(
             language_name="C++",
-            supported_extensions=[".cpp", ".cxx", ".cc", ".hpp", ".hxx", ".hh"],
+            supported_extensions=[".cpp", ".cxx", ".cc", ".hpp", ".hxx", ".hh", ".ino"],
         )
 
     def _init_language(self) -> Optional[tree_sitter.Language]:

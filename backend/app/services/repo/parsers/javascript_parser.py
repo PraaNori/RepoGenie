@@ -15,14 +15,14 @@ from .base import BaseLanguageParser
 
 class JavaScriptParser(BaseLanguageParser):
     """
-    AST Parser for JavaScript (and JSX) using Tree-sitter.
+    AST Parser for JavaScript (JSX, and Google Apps Script) using Tree-sitter.
     Extracts functions, arrow functions, classes, methods, inheritance, parameters,
     imports (ESM and CommonJS require), and function calls.
     """
 
     def __init__(self, language_name: str = "JavaScript", supported_extensions: Optional[List[str]] = None):
         if supported_extensions is None:
-            supported_extensions = [".js", ".jsx", ".mjs", ".cjs"]
+            supported_extensions = [".js", ".jsx", ".mjs", ".cjs", ".gs"]
         super().__init__(language_name=language_name, supported_extensions=supported_extensions)
 
     def _init_language(self) -> Optional[tree_sitter.Language]:

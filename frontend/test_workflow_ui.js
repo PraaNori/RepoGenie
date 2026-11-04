@@ -22,6 +22,9 @@ const { default: WorkflowUnderstandingCard } = await vite.ssrLoadModule(
 const { default: VideoResultView } = await vite.ssrLoadModule(
   './src/components/VideoResultView.jsx'
 );
+const { default: ProcessingView } = await vite.ssrLoadModule(
+  './src/components/ProcessingView.jsx'
+);
 const apiClient = await vite.ssrLoadModule('./src/api/client.js');
 
 // Mock data fixtures conforming to RepositoryWorkflowUnderstanding schema
@@ -744,6 +747,117 @@ test('20. VideoResultView 404 vs unexpected error classification in getWorkflowU
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test('21. ProcessingView renders "No Supported Source Files" badge and warning when total_parsed_files is 0', () => {
+  const jobWithZeroParsed = {
+    job_id: 'job-zero-ast',
+    repo_name: 'test/sql-only',
+    current_stage: 'Code Understanding',
+    stages: [
+      { name: 'Repository Fetching', status: 'completed' },
+      { name: 'Repository Analysis', status: 'completed' },
+      { name: 'Code Understanding', status: 'completed' },
+    ],
+    analysis: {
+      statistics: {
+        total_files: 5,
+        total_directories: 1,
+        source_files: 5,
+        filtered_files: 0,
+        total_size_bytes: 1000,
+        configuration_files: 0,
+        dependency_manifests: 0,
+        recognized_languages_count: 1,
+      },
+      languages: [
+        { name: 'SQL', file_count: 5, percentage: 100.0, is_parser_supported: false },
+      ],
+      dependency_files: [],
+      configuration_files: [],
+      warnings: [],
+    },
+    code_analysis: {
+      total_parsed_files: 0,
+      total_functions: 0,
+      total_classes: 0,
+      total_methods: 0,
+      total_imports: 0,
+      total_function_calls: 0,
+      supported_languages: [],
+      warnings: ['No source files matching supported Tree-sitter parsers were found in repository.'],
+    },
+  };
+
+  const html = renderToString(React.createElement(ProcessingView, { job: jobWithZeroParsed }));
+
+  // Badge must say "No Supported Source Files", NOT misleading "AST Extracted"
+  assert.match(html, /No Supported Source Files/);
+  assert.doesNotMatch(html, />AST Extracted</);
+  // Warning banner must be present
+  assert.match(html, /No Tree-sitter AST Parsers Available for Discovered Source/);
+  // Detected language badge must indicate no AST parser
+  assert.match(html, /no AST parser/);
+});
+
+test('22. ProcessingView renders "AST Extracted" badge when parsed files > 0 and distinguishes mixed languages', () => {
+  const jobWithParsed = {
+    job_id: 'job-mixed',
+    repo_name: 'sachinsingh2156/Anomaly-Detection-using-GCP',
+    current_stage: 'Code Understanding',
+    stages: [
+      { name: 'Repository Fetching', status: 'completed' },
+      { name: 'Repository Analysis', status: 'completed' },
+      { name: 'Code Understanding', status: 'completed' },
+    ],
+    analysis: {
+      statistics: {
+        total_files: 21,
+        total_directories: 5,
+        source_files: 8,
+        filtered_files: 13,
+        total_size_bytes: 5000,
+        configuration_files: 0,
+        dependency_manifests: 0,
+        recognized_languages_count: 3,
+      },
+      languages: [
+        { name: 'SQL', file_count: 5, percentage: 71.4, is_parser_supported: false },
+        { name: 'JavaScript', file_count: 1, percentage: 14.3, is_parser_supported: true },
+        { name: 'C++', file_count: 1, percentage: 14.3, is_parser_supported: true },
+      ],
+      dependency_files: [],
+      configuration_files: [],
+      warnings: [],
+    },
+    code_analysis: {
+      total_parsed_files: 2,
+      total_functions: 4,
+      total_classes: 0,
+      total_methods: 0,
+      total_imports: 0,
+      total_function_calls: 37,
+      supported_languages: ['C++', 'JavaScript'],
+      warnings: [],
+    },
+    architecture: {
+      dependency_graph: { total_internal_dependencies: 0, total_external_dependencies: 2 },
+      call_graph: { total_resolved_calls: 0 },
+      entry_points: [],
+      inheritance_relationships: [],
+      components: [{ file_path: 'apps_script/code.gs', category: 'unknown' }],
+    },
+  };
+
+  const html = renderToString(React.createElement(ProcessingView, { job: jobWithParsed }));
+
+  // Must render AST Extracted badge
+  assert.match(html, /AST Extracted/);
+  // Must render detected languages with percentages
+  assert.match(html, /71\.4/);
+  assert.match(html, /14\.3/);
+  // SQL has no AST parser tag, JS does not
+  assert.match(html, /no AST parser/);
 });
 
 // Close Vite SSR server after test completion

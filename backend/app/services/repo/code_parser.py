@@ -76,18 +76,10 @@ class CodeParserService:
         total_imports = 0
         total_function_calls = 0
 
-        # Collect eligible source files
+        # Collect eligible source files dynamically from registered Tree-sitter language parsers
+        from .parsers import EXTENSION_MAP
+        supported_exts = set(EXTENSION_MAP.keys())
         candidate_paths: List[str] = []
-        supported_exts = {
-            ".py", ".pyw",
-            ".js", ".jsx", ".mjs", ".cjs",
-            ".ts", ".tsx", ".mts", ".cts",
-            ".go",
-            ".rs",
-            ".java",
-            ".c", ".h",
-            ".cpp", ".cxx", ".cc", ".hpp", ".hxx", ".hh",
-        }
 
         if analysis and analysis.directory_tree:
             candidate_paths = self.collect_source_files_from_tree(
@@ -105,6 +97,9 @@ class CodeParserService:
                         full_p = os.path.join(root, f)
                         rel_p = os.path.relpath(full_p, repo_real_root)
                         candidate_paths.append(rel_p)
+
+        if not candidate_paths:
+            warnings.append("No source files matching supported Tree-sitter parsers were found in repository.")
 
         # Enforce max files limit
         if len(candidate_paths) > self.max_files_to_parse:

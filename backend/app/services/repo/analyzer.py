@@ -42,6 +42,7 @@ LANGUAGE_EXTENSION_MAP: Dict[str, str] = {
     ".mjs": "JavaScript",
     ".cjs": "JavaScript",
     ".jsx": "JavaScript",
+    ".gs": "JavaScript",
     # TypeScript
     ".ts": "TypeScript",
     ".tsx": "TypeScript",
@@ -59,6 +60,7 @@ LANGUAGE_EXTENSION_MAP: Dict[str, str] = {
     ".hpp": "C++",
     ".hh": "C++",
     ".hxx": "C++",
+    ".ino": "C++",
     # C#
     ".cs": "C#",
     # Go
@@ -94,6 +96,11 @@ LANGUAGE_EXTENSION_MAP: Dict[str, str] = {
     ".vue": "Vue",
     # Svelte
     ".svelte": "Svelte",
+}
+
+# Languages with full Tree-sitter AST parser support in RepoGenie
+PARSER_SUPPORTED_LANGUAGES: Set[str] = {
+    "Python", "JavaScript", "TypeScript", "Go", "Rust", "Java", "C", "C++"
 }
 
 # --- Directory Exclusions ---
@@ -136,6 +143,8 @@ EXCLUDED_EXTENSIONS: Set[str] = {
     ".png", ".jpg", ".jpeg", ".gif", ".ico", ".webp", ".svg", ".mp4", ".mp3",
     ".mov", ".avi", ".pdf", ".zip", ".tar", ".gz", ".tgz", ".7z", ".rar",
     ".bin", ".woff", ".woff2", ".ttf", ".eot",
+    # Documents & Office Data Files (non-code assets)
+    ".xlsx", ".xls", ".docx", ".doc", ".pptx", ".ppt",
     # Source Maps & Minified
     ".map",
 }
@@ -227,10 +236,24 @@ class RepoAnalyzerService:
         total_recognized_source = sum(language_counts[lang] for lang in recognized_languages)
 
         language_stats: List[LanguageStat] = []
+        parsed_lang_count = 0
+        unsupported_lang_count = 0
         for lang_name in sorted(recognized_languages, key=lambda l: language_counts[l], reverse=True):
             count = language_counts[lang_name]
             pct = round((count / total_recognized_source) * 100, 1) if total_recognized_source > 0 else 0.0
-            language_stats.append(LanguageStat(name=lang_name, file_count=count, percentage=pct))
+            is_supported = lang_name in PARSER_SUPPORTED_LANGUAGES
+            if is_supported:
+                parsed_lang_count += 1
+            else:
+                unsupported_lang_count += 1
+            language_stats.append(
+                LanguageStat(
+                    name=lang_name,
+                    file_count=count,
+                    percentage=pct,
+                    is_parser_supported=is_supported,
+                )
+            )
 
         stats = RepoStatistics(
             total_files=total_files,
@@ -241,6 +264,8 @@ class RepoAnalyzerService:
             configuration_files=len(configuration_files),
             dependency_manifests=len(dependency_manifests),
             recognized_languages_count=len(language_stats),
+            parsed_languages_count=parsed_lang_count,
+            unsupported_languages_count=unsupported_lang_count,
         )
 
         return RepoAnalysisResult(

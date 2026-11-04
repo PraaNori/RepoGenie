@@ -55,6 +55,7 @@ class LanguageStat(BaseModel):
     name: str
     file_count: int
     percentage: float  # e.g., 68.5
+    is_parser_supported: bool = True  # whether supported by tree-sitter AST parser
 
 class DependencyItem(BaseModel):
     name: str
@@ -90,6 +91,8 @@ class RepoStatistics(BaseModel):
     configuration_files: int
     dependency_manifests: int
     recognized_languages_count: int
+    parsed_languages_count: Optional[int] = None
+    unsupported_languages_count: Optional[int] = None
 
 class RepoAnalysisResult(BaseModel):
     repository_name: str

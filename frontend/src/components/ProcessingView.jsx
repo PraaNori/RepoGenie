@@ -351,9 +351,15 @@ export default function ProcessingView({
                 Static inspection of directory hierarchy, source files, and configuration files.
               </p>
             </div>
-            <span className="px-2.5 py-1 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200 text-xs font-semibold">
-              Analysis Verified
-            </span>
+            {analysis.statistics.source_files === 0 ? (
+              <span className="px-2.5 py-1 rounded-full bg-amber-50 text-amber-700 border border-amber-200 text-xs font-semibold">
+                No Source Files Found
+              </span>
+            ) : (
+              <span className="px-2.5 py-1 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200 text-xs font-semibold">
+                Analysis Verified
+              </span>
+            )}
           </div>
 
           {/* Statistics Grid */}
@@ -419,6 +425,14 @@ export default function ProcessingView({
                   <span className="font-semibold">{lang.name}</span>
                   <span className="text-indigo-500 font-mono text-[11px]">{lang.percentage}%</span>
                   <span className="text-[10px] text-indigo-400 font-mono">({lang.file_count})</span>
+                  {lang.is_parser_supported === false && (
+                    <span
+                      className="ml-1 text-[10px] px-1.5 py-0.5 rounded bg-amber-100 text-amber-800 border border-amber-200"
+                      title="Language detected via file extension; no Tree-sitter AST parser is active for this file type"
+                    >
+                      no AST parser
+                    </span>
+                  )}
                 </div>
               ))}
             </div>
@@ -481,10 +495,31 @@ export default function ProcessingView({
                 Syntactic extraction via Tree-sitter: functions, classes, methods, imports, and calls.
               </p>
             </div>
-            <span className="px-2.5 py-1 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200 text-xs font-semibold">
-              AST Extracted
-            </span>
+            {codeAnalysis.total_parsed_files === 0 ? (
+              <span className="px-2.5 py-1 rounded-full bg-amber-50 text-amber-700 border border-amber-200 text-xs font-semibold">
+                No Supported Source Files
+              </span>
+            ) : codeAnalysis.warnings && codeAnalysis.warnings.length > 0 ? (
+              <span className="px-2.5 py-1 rounded-full bg-indigo-50 text-indigo-700 border border-indigo-200 text-xs font-semibold">
+                AST Extracted (Partial)
+              </span>
+            ) : (
+              <span className="px-2.5 py-1 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200 text-xs font-semibold">
+                AST Extracted
+              </span>
+            )}
           </div>
+
+          {/* Warning banner when zero files matched active Tree-sitter parsers */}
+          {codeAnalysis.total_parsed_files === 0 && (
+            <div className="mb-5 p-3.5 rounded-xl bg-amber-50/80 border border-amber-200 text-amber-900 text-xs leading-relaxed flex items-start gap-2.5">
+              <AlertCircle className="w-4 h-4 text-amber-600 flex-shrink-0 mt-0.5" />
+              <div>
+                <p className="font-semibold text-amber-900">No Tree-sitter AST Parsers Available for Discovered Source</p>
+                <p className="mt-0.5 text-amber-700">None of the detected repository source files have active Tree-sitter AST parser support (e.g. SQL). Code syntax extraction and call graph construction were skipped.</p>
+              </div>
+            </div>
+          )}
 
           {/* Statistics Grid */}
           <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-6 gap-3 mb-6">
@@ -603,10 +638,17 @@ export default function ProcessingView({
                 </p>
               </div>
             </div>
-            <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-violet-50 text-violet-700 border border-violet-200 self-start sm:self-auto">
-              <Compass className="w-3.5 h-3.5" />
-              <span>Layer & Dependency Map</span>
-            </span>
+            {architecture.call_graph.total_resolved_calls === 0 && architecture.entry_points.length === 0 ? (
+              <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-slate-100 text-slate-700 border border-slate-200 self-start sm:self-auto">
+                <Compass className="w-3.5 h-3.5 text-slate-500" />
+                <span>Layer Map (No Calls)</span>
+              </span>
+            ) : (
+              <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-violet-50 text-violet-700 border border-violet-200 self-start sm:self-auto">
+                <Compass className="w-3.5 h-3.5" />
+                <span>Layer & Dependency Map</span>
+              </span>
+            )}
           </div>
 
           {/* Statistics Grid */}
@@ -650,7 +692,7 @@ export default function ProcessingView({
                 <span>Inheritance</span>
               </div>
               <p className="text-lg font-bold text-slate-900 font-mono">
-                {architecture.inheritance_relationships.length.toLocaleString()}
+                {(architecture.inheritance_relationships?.length || 0).toLocaleString()}
               </p>
               <span className="text-[10px] text-slate-400">class hierarchies</span>
             </div>
@@ -661,7 +703,7 @@ export default function ProcessingView({
                 <span>Entry Points</span>
               </div>
               <p className="text-lg font-bold text-slate-900 font-mono">
-                {architecture.entry_points.length.toLocaleString()}
+                {(architecture.entry_points?.length || 0).toLocaleString()}
               </p>
               <span className="text-[10px] text-slate-400">candidates</span>
             </div>
@@ -672,7 +714,7 @@ export default function ProcessingView({
                 <span>Components</span>
               </div>
               <p className="text-lg font-bold text-slate-900 font-mono">
-                {architecture.components.length.toLocaleString()}
+                {(architecture.components?.length || 0).toLocaleString()}
               </p>
               <span className="text-[10px] text-slate-400">classified files</span>
             </div>
