@@ -306,6 +306,36 @@ class WorkflowEvidenceBuilder:
                 norm_f = f.replace("\\", "/").strip().lstrip("/")
                 roles[norm_f] = code_roles.get(norm_f, f"Component defined at {norm_f}")
 
+            # Check total evidence budget
+            if total_evidence_chars + cand_chars > self.MAX_TOTAL_EVIDENCE_CHAR_BUDGET:
+                for step_ev in call_steps_evidence:
+                    if step_ev.caller_snippet and len(step_ev.caller_snippet.get("formatted_code", "")) > 100:
+                        step_ev.caller_snippet["formatted_code"] = step_ev.caller_snippet["formatted_code"].splitlines()[0] + "\n# ... [Snippet truncated for prompt budget]"
+                        step_ev.caller_snippet["is_complete"] = False
+                    if step_ev.callee_snippet and len(step_ev.callee_snippet.get("formatted_code", "")) > 100:
+                        step_ev.callee_snippet["formatted_code"] = step_ev.callee_snippet["formatted_code"].splitlines()[0] + "\n# ... [Snippet truncated for prompt budget]"
+                        step_ev.callee_snippet["is_complete"] = False
+                cand_chars = sum(
+                    len((s.caller_snippet or {}).get("formatted_code", "")) + len((s.callee_snippet or {}).get("formatted_code", ""))
+                    for s in call_steps_evidence
+                )
+
+                if total_evidence_chars + cand_chars > self.MAX_TOTAL_EVIDENCE_CHAR_BUDGET:
+                    omitted_cands.append(
+                        f"Candidate '{cand.name}' omitted to enforce total evidence package budget ({self.MAX_TOTAL_EVIDENCE_CHAR_BUDGET} chars)."
+                    )
+                    truncation_reasons.append(
+                        f"Candidate '{cand.name}' omitted to respect total evidence ceiling ({self.MAX_TOTAL_EVIDENCE_CHAR_BUDGET} chars)."
+                    )
+                    budget_exceeded = True
+                    continue
+                else:
+                    budget_exceeded = True
+                    truncation_reasons.append(
+                        f"Candidate '{cand.name}' snippets truncated to stay within total evidence ceiling ({self.MAX_TOTAL_EVIDENCE_CHAR_BUDGET} chars)."
+                    )
+                    cand_limitations.append("Candidate snippets truncated to stay within total prompt evidence budget.")
+
             built_candidates.append(
                 CandidateEvidenceItem(
                     candidate_id=cand.candidate_id,
@@ -325,9 +355,9 @@ class WorkflowEvidenceBuilder:
             )
             total_evidence_chars += cand_chars
 
-        # 3. Format deterministic structural call chains
+        # 3. Format deterministic structural call chains (max 2)
         structural_chains: List[StructuralCallChain] = []
-        for s_cand in structural_cands:
+        for s_cand in structural_cands[:2]:
             steps: List[WorkflowStep] = []
             for s_idx, node in enumerate(s_cand.call_chain):
                 steps.append(

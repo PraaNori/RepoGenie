@@ -516,12 +516,16 @@ def verify_call_site_location(
     call_name: str,
     target_line: int,
     caller_scope: Optional[str] = None,
+    target_column: Optional[int] = None,
 ) -> bool:
     """
     Verifies that a call expression with the given name actually exists
-    at target_line in parsed_file.function_calls.
+    at target_line (and target_column if specified) in parsed_file.function_calls or AST.
     """
-    scope_fn = caller_symbol_name = caller_scope.split(".")[-1] if caller_scope else None
+    scope_fn = caller_scope.split(".")[-1] if caller_scope else None
+
+    # 1. Check FunctionCallInfo list in parsed_file
+    call_info_matched = False
     for fc in getattr(parsed_file, "function_calls", []):
         if fc.line_number == target_line:
             # Check call name match (exact or suffix, e.g. 'ParamType.convert' vs 'convert')
@@ -536,8 +540,77 @@ def verify_call_site_location(
                     or fc.enclosing_scope == scope_fn
                     or fc.enclosing_scope is None
                 ):
-                    return True
-    return False
+                    fc_col = getattr(fc, "column_number", None)
+                    if target_column is not None and fc_col is not None:
+                        if target_column == fc_col or target_column == (fc_col + 1):
+                            return True
+                        else:
+                            continue
+                    elif target_column is None:
+                        return True
+                    else:
+                        call_info_matched = True
+                        break
+
+    # 2. If target_column is specified, verify column against AST node in caller function snippet if available
+    if target_column is not None:
+        target_fn = scope_fn or (caller_scope or "")
+        matched_snippet = None
+        start_line = 1
+        for f in getattr(parsed_file, "functions", []):
+            if f.name == target_fn or f.name == caller_scope:
+                matched_snippet = f.snippet
+                start_line = getattr(getattr(f, "location", None), "start_line", 1) or 1
+                break
+        if not matched_snippet:
+            for m in getattr(parsed_file, "methods", []):
+                if m.name == target_fn or f"{m.parent_class}.{m.name}" == caller_scope:
+                    matched_snippet = m.snippet
+                    start_line = getattr(getattr(m, "location", None), "start_line", 1) or 1
+                    break
+
+        if matched_snippet:
+            try:
+                tree = python_ast_control_flow._parser.parse(matched_snippet.encode("utf-8"))
+                fn_node = python_ast_control_flow._find_caller_function(tree.root_node, caller_scope or target_fn)
+                fn_row = fn_node.start_point.row if fn_node else 0
+                search_root = fn_node or tree.root_node
+
+                matching_call_node = None
+
+                def _find_matching_call(node):
+                    nonlocal matching_call_node
+                    if matching_call_node:
+                        return
+                    if node.type == "call":
+                        call_line = (node.start_point.row - fn_row) + start_line
+                        func_child = node.child_by_field_name("function")
+                        c_name = func_child.text.decode("utf-8") if func_child else ""
+                        if (call_line == target_line or (node.start_point.row + 1) == target_line) and (
+                            c_name == call_name
+                            or c_name.endswith(f".{call_name}")
+                            or call_name.endswith(f".{c_name}")
+                        ):
+                            matching_call_node = node
+                            return
+                    for child in node.children:
+                        _find_matching_call(child)
+
+                _find_matching_call(search_root)
+                if matching_call_node:
+                    col_0 = matching_call_node.start_point.column
+                    col_1 = col_0 + 1
+                    if target_column in (col_0, col_1):
+                        return True
+                    else:
+                        return False
+                elif call_info_matched:
+                    return target_column >= 0
+            except Exception as exc:
+                logger.debug("AST column verification fallback: %s", exc)
+                return call_info_matched
+
+    return call_info_matched
 
 
 def build_and_verify_call_site(
@@ -588,6 +661,7 @@ def build_and_verify_call_site(
             call_name=call_name,
             target_line=call_site_line,
             caller_scope=caller_symbol,
+            target_column=call_site_column,
         )
 
     return CallSiteEvidence(

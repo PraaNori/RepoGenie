@@ -140,16 +140,22 @@ class WorkflowUnderstandingAnalyzer:
             repo_root=repo_root,
         )
 
-        # 2. Check if any candidates exist
-        if not evidence_package.selected_candidates and not evidence_package.structural_call_chains:
+        # 2. Check if any selected AI candidates exist (empty candidate sets do not invoke LLM)
+        if not evidence_package.selected_candidates:
+            reason = (
+                "No entry-point or call-chain workflow candidates could be discovered."
+                if not evidence_package.structural_call_chains
+                else "No AI workflow candidates selected; deterministic fallback provided."
+            )
             logger.warning(
-                "Job %s: No workflow candidates discovered; returning deterministic empty fallback.",
+                "Job %s: %s Returning deterministic fallback without LLM invocation.",
                 job_id,
+                reason,
             )
             return self.create_deterministic_fallback(
                 knowledge=knowledge,
                 evidence_package=evidence_package,
-                error_reason="No entry-point or call-chain workflow candidates could be discovered.",
+                error_reason=reason,
             )
 
         # 3. Build Prompt and Measure Complete Token Envelope
@@ -227,6 +233,8 @@ class WorkflowUnderstandingAnalyzer:
                     response.token_usage.prompt_tokens += repair_resp.token_usage.prompt_tokens
                     response.token_usage.completion_tokens += repair_resp.token_usage.completion_tokens
                     response.token_usage.total_tokens += repair_resp.token_usage.total_tokens
+                elif repair_resp.token_usage and not response.token_usage:
+                    response.token_usage = repair_resp.token_usage
                 response.latency_ms += repair_resp.latency_ms
                 logger.info("JSON repair successfully resolved syntax error for job %s workflow understanding", job_id)
             except Exception as repair_exc:
@@ -292,9 +300,12 @@ class WorkflowUnderstandingAnalyzer:
 
         # Workflows list bounds & normalization
         raw_wfs = parsed_dict.get("workflows")
+        extra_limitations: List[str] = []
         if not isinstance(raw_wfs, list) or not raw_wfs:
             parsed_dict["workflows"] = [wf.model_dump() for wf in fallback.workflows]
         else:
+            if len(raw_wfs) > 2:
+                extra_limitations.append(f"AI response proposed {len(raw_wfs)} workflows; retained top 2 by priority.")
             norm_wfs: List[Dict[str, Any]] = []
             for wf in raw_wfs[:2]:  # Enforce max 2 workflows
                 if not isinstance(wf, dict):
@@ -346,7 +357,7 @@ class WorkflowUnderstandingAnalyzer:
         parsed_dict["is_incomplete"] = len(evidence_package.omitted_candidates) > 0
 
         # Analysis limitations
-        limitations = list(evidence_package.truncation_reasons)
+        limitations = list(evidence_package.truncation_reasons) + extra_limitations
         if evidence_package.budget_exceeded:
             limitations.append("Evidence budget ceiling reached; candidate call steps were truncated or omitted.")
         parsed_dict["analysis_limitations"] = limitations

@@ -189,81 +189,148 @@ class WorkflowValidator:
                     ce = step.call_evidence
                     caller_f = ce.caller_file.replace("\\", "/").strip().lstrip("/")
                     callee_f = ce.callee_file.replace("\\", "/").strip().lstrip("/")
-                    edge_id = CallSiteEvidence.format_edge_id(caller_f, ce.caller_symbol, callee_f, ce.callee_symbol)
 
-                    # Check against static call graph
-                    edge_matched = (
-                        edge_id in edge_id_set
+                    # Check caller file consistency with step
+                    if step_comp != caller_f and step_comp in known_files:
+                        wf_warnings.append(
+                            f"Workflow '{wf.name}' Step {step.step_number}: Step component '{step_comp}' does not match call evidence caller '{caller_f}'."
+                        )
+
+                    expected_edge_id = CallSiteEvidence.format_edge_id(caller_f, ce.caller_symbol, callee_f, ce.callee_symbol)
+
+                    # 1. Edge Identity & Graph Edge Verification
+                    edge_id_matches = (ce.call_graph_edge_id == expected_edge_id)
+                    if not edge_id_matches:
+                        wf_warnings.append(
+                            f"Workflow '{wf.name}' Step {step.step_number}: Claimed call_graph_edge_id '{ce.call_graph_edge_id}' does not match expected edge ID '{expected_edge_id}'."
+                        )
+
+                    edge_in_graph = (
+                        expected_edge_id in edge_id_set
                         or (caller_f, ce.caller_symbol, callee_f, ce.callee_symbol) in call_edge_map
                         or f"{ce.caller_symbol}->{ce.callee_symbol}" in edge_id_set
                     )
 
-                    # Guard against treating imports as execution transitions!
-                    if not edge_matched and (caller_f, callee_f) in import_edges:
+                    if not edge_in_graph and (caller_f, callee_f) in import_edges:
+                        # Rejection of import edge as call transition
                         wf_warnings.append(
                             f"Workflow '{wf.name}' Step {step.step_number}: Transition from '{caller_f}' to '{callee_f}' is only an import edge, NOT a function call edge."
                         )
                         step.call_relationship_verified = False
                         ce.is_edge_verified = False
                         step.confidence = "low"
-                    elif edge_matched:
+                    elif edge_in_graph and edge_id_matches:
                         ce.is_edge_verified = True
                         step.call_relationship_verified = True
                     else:
-                        # Edge not matched in CallGraph
-                        if step.call_relationship_verified:
-                            step.call_relationship_verified = False
-                            ce.is_edge_verified = False
-                            step.confidence = "medium"
-                            wf_warnings.append(
-                                f"Workflow '{wf.name}' Step {step.step_number}: CallGraph edge '{edge_id}' was not found in static call graph."
-                            )
+                        step.call_relationship_verified = False
+                        ce.is_edge_verified = False
+                        step.confidence = "medium"
+                        wf_warnings.append(
+                            f"Workflow '{wf.name}' Step {step.step_number}: CallGraph edge '{expected_edge_id}' was not found in static call graph."
+                        )
 
-                    # Check physical call-site location independently
-                    if pf_step and ce.call_site_line > 0:
-                        ce.is_site_location_verified = verify_call_site_location(
-                            parsed_file=pf_step,
+                    # 2. Independent Call Site Expression & Location Verification
+                    expected_site_id_col = CallSiteEvidence.format_site_id(
+                        caller_f, ce.caller_symbol, callee_f, ce.callee_symbol, ce.call_site_line, ce.call_site_column
+                    )
+                    expected_site_id_no_col = CallSiteEvidence.format_site_id(
+                        caller_f, ce.caller_symbol, callee_f, ce.callee_symbol, ce.call_site_line, None
+                    )
+
+                    site_id_matches = (ce.call_site_id in (expected_site_id_col, expected_site_id_no_col))
+                    if not site_id_matches:
+                        wf_warnings.append(
+                            f"Workflow '{wf.name}' Step {step.step_number}: Claimed call_site_id '{ce.call_site_id}' does not match caller/callee source location."
+                        )
+
+                    pf_caller = parsed_files_map.get(caller_f)
+                    site_location_ok = False
+                    if pf_caller and ce.call_site_line > 0:
+                        site_location_ok = verify_call_site_location(
+                            parsed_file=pf_caller,
                             call_name=ce.call_name,
                             target_line=ce.call_site_line,
                             caller_scope=ce.caller_symbol,
+                            target_column=ce.call_site_column,
                         )
+
+                    if site_location_ok and site_id_matches:
+                        ce.is_site_location_verified = True
                     else:
                         ce.is_site_location_verified = False
+                        wf_warnings.append(
+                            f"Workflow '{wf.name}' Step {step.step_number}: Call site expression '{ce.call_name}' could not be verified at line {ce.call_site_line} (col {ce.call_site_column}) in '{caller_f}'."
+                        )
 
                 # Validate Source Order & Control-Flow with Previous Step
                 if prev_step and prev_step.component_id == step.component_id and prev_step.symbol_name == step.symbol_name:
                     # Intra-caller consecutive steps
                     prev_line = prev_step.call_evidence.call_site_line if prev_step.call_evidence else 0
                     curr_line = step.call_evidence.call_site_line if step.call_evidence else 0
+                    prev_call_name = prev_step.call_evidence.call_name if prev_step.call_evidence else None
+                    curr_call_name = step.call_evidence.call_name if step.call_evidence else None
 
                     if prev_line > 0 and curr_line > 0:
-                        if prev_line >= curr_line:
-                            step.source_order_verified = False
+                        pf_caller = parsed_files_map.get(step_comp)
+                        cf_res = self.control_flow.analyze_caller_control_flow(
+                            parsed_file=pf_caller,
+                            caller_symbol=step.symbol_name or "",
+                            call_a_line=prev_line,
+                            call_b_line=curr_line,
+                            call_a_name=prev_call_name,
+                            call_b_name=curr_call_name,
+                        )
+                        step.source_order_verified = cf_res.source_order_verified
+                        step.same_execution_path_verified = cf_res.same_execution_path_verified
+                        step.execution_guaranteed = cf_res.execution_guaranteed
+
+                        if not cf_res.source_order_verified:
                             wf_warnings.append(
                                 f"Workflow '{wf.name}' Step {step.step_number}: Line order violated (line {curr_line} does not follow line {prev_line})."
                             )
-                        else:
-                            step.source_order_verified = True
+                        if cf_res.mutually_exclusive_branches or not cf_res.same_execution_path_verified:
+                            step.same_execution_path_verified = False
+                            step.execution_guaranteed = False
+                            wf_warnings.append(
+                                f"Workflow '{wf.name}' Step {step.step_number}: Step {prev_step.step_number} and Step {step.step_number} reside in mutually exclusive branches or disconnected paths."
+                            )
+                        elif not cf_res.execution_guaranteed:
+                            step.execution_guaranteed = False
+                            wf_warnings.append(
+                                f"Workflow '{wf.name}' Step {step.step_number}: Execution is not guaranteed after Step {prev_step.step_number} due to conditional branching, loops, or early returns."
+                            )
                     else:
                         step.source_order_verified = False
+                        step.execution_guaranteed = False
                 elif prev_step:
-                    # Cross-function or cross-file transition
-                    # Line numbers CANNOT be compared across different functions or files
+                    # Cross-function or cross-file transition: Line numbers CANNOT be compared!
                     step.source_order_verified = False
+                    step.execution_guaranteed = False
                 else:
                     # First step in workflow
                     step.source_order_verified = True
                     step.same_execution_path_verified = True
+                    step.execution_guaranteed = False
 
                 # Step Action-Type Corroboration (Storage & External API)
                 if step.action_type == "storage_io":
-                    # Check if caller or callee component actually performs storage operations
                     has_storage = False
-                    if pf_step:
+                    if pf_step and step.symbol_name:
                         for fn in pf_step.functions:
-                            if fn.snippet and self.operation_verifier.verify_storage_in_code(fn.snippet, step_comp).storage_operation_verified:
-                                has_storage = True
-                                break
+                            if (fn.name == step.symbol_name or fn.name == step.symbol_name.split(".")[-1]) and fn.snippet:
+                                if self.operation_verifier.verify_storage_in_code(fn.snippet, step_comp).storage_operation_verified:
+                                    has_storage = True
+                                    break
+                    if not has_storage and step.call_evidence:
+                        pf_callee = parsed_files_map.get(step.call_evidence.callee_file.replace("\\", "/").strip().lstrip("/"))
+                        callee_sym = step.call_evidence.callee_symbol
+                        if pf_callee and callee_sym:
+                            for fn in pf_callee.functions:
+                                if (fn.name == callee_sym or fn.name == callee_sym.split(".")[-1]) and fn.snippet:
+                                    if self.operation_verifier.verify_storage_in_code(fn.snippet, pf_callee.file_path).storage_operation_verified:
+                                        has_storage = True
+                                        break
                     if not has_storage:
                         step.action_type = "call"
                         step.unresolved_aspects.append("Storage I/O claim uncorroborated by static receiver analysis; downgraded to call.")
@@ -273,11 +340,21 @@ class WorkflowValidator:
 
                 elif step.action_type == "external_api":
                     has_api = False
-                    if pf_step:
+                    if pf_step and step.symbol_name:
                         for fn in pf_step.functions:
-                            if fn.snippet and self.operation_verifier.verify_external_api_in_code(fn.snippet, step_comp).external_api_operation_verified:
-                                has_api = True
-                                break
+                            if (fn.name == step.symbol_name or fn.name == step.symbol_name.split(".")[-1]) and fn.snippet:
+                                if self.operation_verifier.verify_external_api_in_code(fn.snippet, step_comp).external_api_operation_verified:
+                                    has_api = True
+                                    break
+                    if not has_api and step.call_evidence:
+                        pf_callee = parsed_files_map.get(step.call_evidence.callee_file.replace("\\", "/").strip().lstrip("/"))
+                        callee_sym = step.call_evidence.callee_symbol
+                        if pf_callee and callee_sym:
+                            for fn in pf_callee.functions:
+                                if (fn.name == callee_sym or fn.name == callee_sym.split(".")[-1]) and fn.snippet:
+                                    if self.operation_verifier.verify_external_api_in_code(fn.snippet, pf_callee.file_path).external_api_operation_verified:
+                                        has_api = True
+                                        break
                     if not has_api:
                         step.action_type = "call"
                         step.unresolved_aspects.append("External API claim uncorroborated by static HTTP/SDK analysis; downgraded to call.")
@@ -295,18 +372,29 @@ class WorkflowValidator:
                 dest_f = flow.destination.component_id.replace("\\", "/").strip().lstrip("/")
 
                 pf_dest = parsed_files_map.get(dest_f)
+                pf_orig = parsed_files_map.get(orig_f)
 
                 # Storage operation corroboration
                 if flow.storage_operation_verified or flow.storage_operation_type != "none":
-                    dest_storage_verified = False
-                    if pf_dest:
-                        for fn in pf_dest.functions:
-                            if fn.snippet:
-                                s_res = self.operation_verifier.verify_storage_in_code(fn.snippet, dest_f)
-                                if s_res.storage_operation_verified:
-                                    dest_storage_verified = True
-                                    break
-                    if not dest_storage_verified:
+                    dest_storage_res = None
+                    for pf_cand in (pf_dest, pf_orig):
+                        if pf_cand:
+                            for fn in pf_cand.functions:
+                                if fn.snippet:
+                                    s_res = self.operation_verifier.verify_storage_in_code(fn.snippet, pf_cand.file_path)
+                                    if s_res.storage_operation_verified:
+                                        dest_storage_res = s_res
+                                        break
+                            if dest_storage_res:
+                                break
+
+                    if dest_storage_res:
+                        flow.storage_operation_verified = True
+                        flow.storage_operation_type = dest_storage_res.storage_operation_type
+                        # Sanitize persistence_status so static writes are not described as confirmed runtime transactions
+                        if any(term in (flow.persistence_status or "").lower() for term in ("success", "confirmed", "persisted_successfully", "committed")):
+                            flow.persistence_status = "static_storage_operation_detected"
+                    else:
                         flow.storage_operation_verified = False
                         flow.storage_operation_type = "none"
                         flow.persistence_status = "unverified_storage_claim"
@@ -316,20 +404,76 @@ class WorkflowValidator:
 
                 # External API corroboration
                 if flow.external_api_operation_verified or flow.external_api_operation_type != "none":
-                    dest_api_verified = False
-                    if pf_dest:
-                        for fn in pf_dest.functions:
-                            if fn.snippet:
-                                a_res = self.operation_verifier.verify_external_api_in_code(fn.snippet, dest_f)
-                                if a_res.external_api_operation_verified:
-                                    dest_api_verified = True
-                                    break
-                    if not dest_api_verified:
+                    dest_api_res = None
+                    for pf_cand in (pf_dest, pf_orig):
+                        if pf_cand:
+                            for fn in pf_cand.functions:
+                                if fn.snippet:
+                                    a_res = self.operation_verifier.verify_external_api_in_code(fn.snippet, pf_cand.file_path)
+                                    if a_res.external_api_operation_verified:
+                                        dest_api_res = a_res
+                                        break
+                            if dest_api_res:
+                                break
+
+                    if dest_api_res:
+                        flow.external_api_operation_verified = True
+                        # Ensure third-party SDK calls remain external_sdk_call, not http_request
+                        if dest_api_res.external_api_operation_type == "external_sdk_call":
+                            if flow.external_api_operation_type != "external_sdk_call":
+                                wf_warnings.append(
+                                    f"Workflow '{wf.name}' DataFlow '{flow.data_item_name}': Third-party SDK call corrected from '{flow.external_api_operation_type}' to 'external_sdk_call'."
+                                )
+                            flow.external_api_operation_type = "external_sdk_call"
+                        else:
+                            flow.external_api_operation_type = dest_api_res.external_api_operation_type
+
+                        # Sanitize network-success claims
+                        if any(term in (flow.external_api_status or "").lower() for term in ("success", "200_ok", "received_response", "succeeded")):
+                            flow.external_api_status = "static_external_api_operation_detected"
+                    else:
                         flow.external_api_operation_verified = False
                         flow.external_api_operation_type = "none"
                         flow.external_api_status = "unverified_external_api_claim"
                         wf_warnings.append(
                             f"Workflow '{wf.name}' DataFlow '{flow.data_item_name}': External API claim uncorroborated in destination '{dest_f}'."
+                        )
+
+                # Data transformations validation
+                valid_transforms = []
+                for t in flow.transformations[:2]:
+                    t_comp = t.performed_by_component.replace("\\", "/").strip().lstrip("/")
+                    pf_t = parsed_files_map.get(t_comp)
+                    if t_comp not in known_files or not pf_t:
+                        t.transformation_verified = False
+                        t.data_relationship_status = "unknown_or_unresolved"
+                        wf_warnings.append(
+                            f"Workflow '{wf.name}' DataFlow '{flow.data_item_name}' transformation '{t.transformation_name}': component '{t_comp}' does not exist in repository."
+                        )
+                    elif t.transformation_verified:
+                        has_ast_symbol = any(
+                            (f.name == t.performed_by_symbol or f.name == (t.performed_by_symbol or "").split(".")[-1])
+                            for f in pf_t.functions
+                        ) if t.performed_by_symbol else bool(pf_t.functions)
+                        if not has_ast_symbol:
+                            t.transformation_verified = False
+                            t.data_relationship_status = "inferred"
+                            wf_warnings.append(
+                                f"Workflow '{wf.name}' DataFlow '{flow.data_item_name}' transformation '{t.transformation_name}': symbol '{t.performed_by_symbol}' not found in '{t_comp}'; demoted to inferred."
+                            )
+                    valid_transforms.append(t)
+                flow.transformations = valid_transforms
+
+                # Demote observed data flows without static parameter/return evidence
+                if flow.data_relationship_status == "observed":
+                    has_call_traffic = any(
+                        s.call_evidence and (s.call_evidence.caller_file == orig_f or s.call_evidence.callee_file == dest_f)
+                        for s in validated_steps
+                    )
+                    if not has_call_traffic:
+                        flow.data_relationship_status = "inferred"
+                        wf_warnings.append(
+                            f"Workflow '{wf.name}' DataFlow '{flow.data_item_name}': Data-flow relationship lacks verified call-parameter evidence; demoted from observed to inferred."
                         )
 
                 validated_flows.append(flow)

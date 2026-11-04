@@ -159,6 +159,7 @@ class FunctionCallInfo(BaseModel):
     enclosing_scope: Optional[str] = None
     file_path: str
     line_number: int
+    column_number: Optional[int] = None
 
 class ParsedFile(BaseModel):
     file_path: str
