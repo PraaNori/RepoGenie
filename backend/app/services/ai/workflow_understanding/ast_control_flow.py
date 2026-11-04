@@ -31,6 +31,10 @@ class ControlFlowAnalysisResult:
     runtime_execution_verified: bool = False  # ALWAYS False
     is_same_caller: bool = False
     unresolved_aspects: List[str] = field(default_factory=list)
+    is_in_conditional: bool = False
+    is_in_loop: bool = False
+    is_in_try_block: bool = False
+    mutually_exclusive_branches: bool = False
 
 
 class PythonASTControlFlowAnalyzer:
@@ -133,6 +137,72 @@ class PythonASTControlFlowAnalyzer:
         self._evaluate_ast_control_flow(fn_node, call_a_node, call_b_node, result)
         return result
 
+    def analyze_caller_control_flow(
+        self,
+        parsed_file: Optional[ParsedFile],
+        caller_symbol: str,
+        call_a_line: int,
+        call_b_line: int,
+        call_a_name: Optional[str] = None,
+        call_b_name: Optional[str] = None,
+    ) -> ControlFlowAnalysisResult:
+        """
+        Analyzes control flow between two call sites within the same caller scope
+        using the caller's AST snippet if available, or line ordering fallback.
+        """
+        result = ControlFlowAnalysisResult()
+        result.is_same_caller = True
+
+        if not parsed_file:
+            result.source_order_verified = (call_a_line < call_b_line) if (call_a_line and call_b_line) else False
+            result.same_execution_path_verified = result.source_order_verified
+            result.execution_guaranteed = False
+            result.unresolved_aspects.append("No parsed file available for caller AST control flow.")
+            return result
+
+        # Find matching function/method/class in parsed_file
+        target_fn = caller_symbol.split(".")[-1]
+        matched_snippet: Optional[str] = None
+        start_line: int = 1
+
+        for f in parsed_file.functions:
+            if f.name == target_fn or f.name == caller_symbol:
+                matched_snippet = f.snippet
+                start_line = f.location.start_line
+                break
+        if not matched_snippet:
+            for m in parsed_file.methods:
+                if m.name == target_fn or f"{m.parent_class}.{m.name}" == caller_symbol:
+                    matched_snippet = m.snippet
+                    start_line = m.location.start_line
+                    break
+
+        if matched_snippet:
+            # Pad snippet so 1-indexed line numbers match parsed_file lines
+            padding = "\n" * max(0, start_line - 1)
+            padded_code = padding + matched_snippet
+            try:
+                res = self.analyze_transition(
+                    source_code=padded_code,
+                    caller_file=parsed_file.file_path,
+                    caller_symbol=caller_symbol,
+                    call_a_line=call_a_line,
+                    call_b_line=call_b_line,
+                    call_a_name=call_a_name,
+                    call_b_name=call_b_name,
+                )
+                if res.is_same_caller:
+                    return res
+            except Exception as exc:
+                logger.debug("AST transition analysis fallback on error: %s", exc)
+
+        # Fallback to line numbers if AST snippet not parseable
+        result.source_order_verified = (call_a_line < call_b_line) if (call_a_line and call_b_line) else False
+        result.same_execution_path_verified = result.source_order_verified
+        result.execution_guaranteed = False
+        result.unresolved_aspects.append("Caller AST snippet unavailable; evaluated using source line order.")
+        return result
+
     def _find_caller_function(
         self, root: tree_sitter.Node, caller_symbol: str
     ) -> Optional[tree_sitter.Node]:
@@ -229,6 +299,8 @@ class PythonASTControlFlowAnalyzer:
             if self._are_disjoint_conditional_branches(lca, child_a_under_lca, child_b_under_lca):
                 result.same_execution_path_verified = False
                 result.execution_guaranteed = False
+                result.mutually_exclusive_branches = True
+                result.is_in_conditional = True
                 result.unresolved_aspects.append(
                     "Call A and Call B reside in mutually exclusive conditional branches (if/elif/else)."
                 )
@@ -239,6 +311,8 @@ class PythonASTControlFlowAnalyzer:
             if self._are_disjoint_try_branches(lca, child_a_under_lca, child_b_under_lca):
                 result.same_execution_path_verified = False
                 result.execution_guaranteed = False
+                result.mutually_exclusive_branches = True
+                result.is_in_try_block = True
                 result.unresolved_aspects.append(
                     "Call A and Call B reside in mutually exclusive try/except blocks."
                 )
@@ -247,6 +321,7 @@ class PythonASTControlFlowAnalyzer:
         # 3. Check for loops enclosing either call
         has_loop = any(n.type in ("for_statement", "while_statement") for n in ancestors_a + ancestors_b)
         if has_loop:
+            result.is_in_loop = True
             result.same_execution_path_verified = True
             result.execution_guaranteed = False
             result.unresolved_aspects.append(
@@ -256,6 +331,7 @@ class PythonASTControlFlowAnalyzer:
         # 4. Check for exception handlers enclosing either call
         has_exception = any(n.type in ("except_clause", "finally_clause") for n in ancestors_a + ancestors_b)
         if has_exception:
+            result.is_in_try_block = True
             result.execution_guaranteed = False
             result.unresolved_aspects.append(
                 "Call occurs inside an exception handler; execution depends on runtime exception occurrence."
@@ -305,12 +381,19 @@ class PythonASTControlFlowAnalyzer:
         # Path reachability: If no unconditional exits block it, a valid path exists
         result.same_execution_path_verified = True
 
-        # Check if Call B is enclosed in a conditional below LCA
+        # Check if Call B or Call A is enclosed in a conditional
         b_in_conditional = any(
             n.type in ("if_statement", "elif_clause", "else_clause")
             for n in ancestors_b
             if n != lca
         )
+        a_in_conditional = any(
+            n.type in ("if_statement", "elif_clause", "else_clause")
+            for n in ancestors_a
+            if n != lca
+        )
+        if b_in_conditional or a_in_conditional or lca.type in ("if_statement", "elif_clause", "else_clause"):
+            result.is_in_conditional = True
 
         if (
             conditional_exit_found

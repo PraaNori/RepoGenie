@@ -1803,4 +1803,867 @@ def test_candidate_discovery_budget_exhaustion_multi_tier_omissions():
     assert "architectural API components omitted without exploration" in omitted_text
 
 
+# ===========================================================================
+# 8. Phase 3: Evidence Builder, Prompts, Validator, and Analyzer Tests
+# ===========================================================================
+
+def _create_mock_knowledge_for_phase3():
+    from app.models.schemas import (
+        ArchitectureSummary,
+        ArchitecturalComponent,
+        CallGraph,
+        CallGraphEdge,
+        CodeStructureSummary,
+        DependencyEdge,
+        DependencyGraph,
+        EntryPointCandidate,
+        FunctionCallInfo,
+        FunctionInfo,
+        ImportInfo,
+        RelationshipEvidence,
+        RepositoryKnowledge,
+        RepositoryMetadataInfo,
+        SourceLocation,
+        StatusEnum,
+    )
+
+    code_main = """
+from app.service import process_request
+
+def start_app():
+    process_request("payload")
+"""
+    code_service = """
+import sqlite3
+from app.storage import write_db
+
+def process_request(data):
+    save_record(data)
+"""
+    code_save = """def save_record(data):
+    import sqlite3
+    conn = sqlite3.connect("test.db")
+    cur = conn.cursor()
+    cur.execute("INSERT INTO items VALUES (?)", (data,))
+    write_db(data)"""
+    code_storage = """
+def write_db(data):
+    pass
+"""
+
+    pfs = [
+        ParsedFile(
+            file_path="app/main.py",
+            language="Python",
+            status="success",
+            total_lines=10,
+            functions=[
+                FunctionInfo(
+                    name="start_app",
+                    file_path="app/main.py",
+                    location=SourceLocation(file_path="app/main.py", start_line=4, end_line=5, start_column=0, end_column=0),
+                    snippet=code_main,
+                )
+            ],
+            function_calls=[
+                FunctionCallInfo(call_name="process_request", file_path="app/main.py", line_number=5, enclosing_scope="start_app")
+            ],
+        ),
+        ParsedFile(
+            file_path="app/service.py",
+            language="Python",
+            status="success",
+            total_lines=20,
+            functions=[
+                FunctionInfo(
+                    name="process_request",
+                    file_path="app/service.py",
+                    location=SourceLocation(file_path="app/service.py", start_line=5, end_line=6, start_column=0, end_column=0),
+                    snippet=code_service,
+                ),
+                FunctionInfo(
+                    name="save_record",
+                    file_path="app/service.py",
+                    location=SourceLocation(file_path="app/service.py", start_line=8, end_line=14, start_column=0, end_column=0),
+                    snippet=code_save,
+                ),
+            ],
+            imports=[
+                ImportInfo(module="sqlite3", file_path="app/service.py", line_number=2)
+            ],
+            function_calls=[
+                FunctionCallInfo(call_name="save_record", file_path="app/service.py", line_number=6, enclosing_scope="process_request"),
+                FunctionCallInfo(call_name="write_db", file_path="app/service.py", line_number=14, enclosing_scope="save_record"),
+            ],
+        ),
+        ParsedFile(
+            file_path="app/storage.py",
+            language="Python",
+            status="success",
+            total_lines=10,
+            functions=[
+                FunctionInfo(
+                    name="write_db",
+                    file_path="app/storage.py",
+                    location=SourceLocation(file_path="app/storage.py", start_line=2, end_line=3, start_column=0, end_column=0),
+                    snippet=code_storage,
+                )
+            ],
+            function_calls=[],
+        ),
+        ParsedFile(
+            file_path="app/config.py",
+            language="Python",
+            status="success",
+            total_lines=5,
+            functions=[],
+            function_calls=[],
+        ),
+    ]
+
+    edges = [
+        CallGraphEdge(
+            caller="app/main.py:start_app",
+            callee="app/service.py:process_request",
+            call_name="process_request",
+            resolution_status="resolved_internal",
+            evidence=RelationshipEvidence(file_path="app/main.py", line_number=5, evidence_type="function_call"),
+        ),
+        CallGraphEdge(
+            caller="app/service.py:process_request",
+            callee="app/service.py:save_record",
+            call_name="save_record",
+            resolution_status="resolved_internal",
+            evidence=RelationshipEvidence(file_path="app/service.py", line_number=6, evidence_type="function_call"),
+        ),
+        CallGraphEdge(
+            caller="app/service.py:save_record",
+            callee="app/storage.py:write_db",
+            call_name="write_db",
+            resolution_status="resolved_internal",
+            evidence=RelationshipEvidence(file_path="app/service.py", line_number=14, evidence_type="function_call"),
+        ),
+    ]
+
+    dep_edges = [
+        DependencyEdge(
+            source="app/main.py",
+            target="app/service.py",
+            is_internal=True,
+            resolution_status="resolved_internal",
+            evidence=RelationshipEvidence(file_path="app/main.py", line_number=2, evidence_type="import_statement"),
+        ),
+        DependencyEdge(
+            source="app/service.py",
+            target="app/storage.py",
+            is_internal=True,
+            resolution_status="resolved_internal",
+            evidence=RelationshipEvidence(file_path="app/service.py", line_number=3, evidence_type="import_statement"),
+        ),
+        # Pure import edge with NO call edge!
+        DependencyEdge(
+            source="app/main.py",
+            target="app/config.py",
+            is_internal=True,
+            resolution_status="resolved_internal",
+            evidence=RelationshipEvidence(file_path="app/main.py", line_number=1, evidence_type="import_statement"),
+        ),
+    ]
+
+    return RepositoryKnowledge(
+        schema_version="1.0",
+        repository=RepositoryMetadataInfo(name="test/phase3_app", owner="test", repository_url="https://github.com/test/phase3_app", clone_status=StatusEnum.COMPLETED),
+        project_overview={"description": "Test phase 3 app"},
+        technology_stack={"languages": []},
+        repository_structure={"total_directories": 2, "total_files": 4},
+        statistics={},
+        dependency_information=DependencyGraph(nodes=[], edges=dep_edges),
+        code_structure=CodeStructureSummary(parsed_files_count=len(pfs), supported_languages=["Python"], files=pfs),
+        architecture=ArchitectureSummary(
+            dependency_graph=DependencyGraph(nodes=[], edges=dep_edges),
+            call_graph=CallGraph(edges=edges),
+            components=[
+                ArchitecturalComponent(file_path="app/main.py", category="entry_point", confidence="high", evidence=["main"]),
+                ArchitecturalComponent(file_path="app/service.py", category="service", confidence="high", evidence=["service"]),
+                ArchitecturalComponent(file_path="app/storage.py", category="database", confidence="high", evidence=["db"]),
+            ],
+        ),
+        entry_points=[
+            EntryPointCandidate(file_path="app/main.py", entry_type="python_main_guard", symbol_or_command="start_app", confidence="high")
+        ],
+        important_files=[],
+        analysis_metadata={"created_at": "2026-11-05T00:00:00Z"},
+    )
+
+
+def test_evidence_builder_builds_bounded_package():
+    """Evidence builder constructs structured candidate evidence with snippets and operation verifications."""
+    from app.services.ai.workflow_understanding import workflow_evidence_builder
+
+    knowledge = _create_mock_knowledge_for_phase3()
+    pkg = workflow_evidence_builder.build_evidence_package(knowledge)
+
+    assert pkg.repository_name == "test/phase3_app"
+    assert len(pkg.selected_candidates) >= 1
+    cand = pkg.selected_candidates[0]
+    assert cand.entry_file == "app/main.py"
+    assert cand.entry_symbol == "start_app"
+    assert len(cand.call_steps) >= 1
+
+    # Verify storage verification was attached to callee snippet for save_record
+    save_record_step = next((s for s in cand.call_steps if s.callee_symbol == "save_record"), None)
+    assert save_record_step is not None
+    assert save_record_step.storage_verification is not None
+    assert save_record_step.storage_verification["storage_operation_verified"] is True
+    assert save_record_step.storage_verification["storage_operation_type"] == "write"
+
+    assert pkg.budget_exceeded is False
+
+
+def test_evidence_builder_candidate_budget_truncation():
+    """Evidence builder enforces per-candidate character budget by truncating snippet bodies."""
+    from app.services.ai.workflow_understanding.evidence_builder import WorkflowEvidenceBuilder
+
+    knowledge = _create_mock_knowledge_for_phase3()
+    builder = WorkflowEvidenceBuilder()
+    builder.MAX_CANDIDATE_CHAR_BUDGET = 200  # Intentionally tiny budget
+
+    pkg = builder.build_evidence_package(knowledge)
+    assert pkg.budget_exceeded is True
+    assert len(pkg.truncation_reasons) > 0
+    # Confirm truncation marker in candidate limitations
+    cand = pkg.selected_candidates[0]
+    assert any("truncated to preserve prompt character budget" in lim for lim in cand.limitations_and_unresolved)
+
+
+def test_prompts_system_and_user_prompts():
+    """Prompts include strict anti-hallucination rules and accurate JSON schema."""
+    from app.services.ai.workflow_understanding import (
+        SYSTEM_PROMPT,
+        build_workflow_repair_prompt,
+        build_workflow_user_prompt,
+        workflow_evidence_builder,
+    )
+
+    # System prompt assertions
+    assert "runtime_execution_verified" in SYSTEM_PROMPT
+    assert "MUST ALWAYS be false" in SYSTEM_PROMPT
+    assert "NEVER USE IMPORTS AS EXECUTION TRANSITIONS" in SYSTEM_PROMPT
+    assert "GROUNDED EVIDENCE ONLY" in SYSTEM_PROMPT
+
+    knowledge = _create_mock_knowledge_for_phase3()
+    pkg = workflow_evidence_builder.build_evidence_package(knowledge)
+    user_prompt = build_workflow_user_prompt(pkg)
+
+    assert "GROUNDED WORKFLOW EVIDENCE:" in user_prompt
+    assert "test/phase3_app" in user_prompt
+    assert "REQUIRED OUTPUT JSON SCHEMA:" in user_prompt
+
+    repair_prompt = build_workflow_repair_prompt("{malformed", "Unexpected end of JSON")
+    assert "Unexpected end of JSON" in repair_prompt
+    assert "{malformed" in repair_prompt
+
+
+def test_workflow_validator_enforces_runtime_execution_verified_invariant():
+    """Validator strictly enforces runtime_execution_verified = False on all steps and workflows."""
+    from app.services.ai.workflow_understanding import (
+        ApplicationWorkflow,
+        RepositoryWorkflowUnderstanding,
+        WorkflowComponentReference,
+        WorkflowStep,
+        workflow_validator,
+    )
+
+    knowledge = _create_mock_knowledge_for_phase3()
+
+    step = WorkflowStep(
+        step_number=1,
+        title="Start application",
+        component_id="app/main.py",
+        symbol_name="start_app",
+        action_type="call",
+        description="Entry execution",
+        runtime_execution_verified=False,
+    )
+    wf = ApplicationWorkflow(
+        workflow_id="wf_1",
+        name="Main App Flow",
+        description="Flow",
+        trigger="run",
+        entry_point=WorkflowComponentReference(component_id="app/main.py", name="start_app", role_in_workflow="entry"),
+        steps=[step],
+        final_outcome="Done",
+        runtime_execution_verified=False,
+    )
+
+    understanding = RepositoryWorkflowUnderstanding(
+        repository_name="test/phase3_app",
+        system_architecture_type="modular_monolith",
+        workflow_summary="Summary",
+        workflows=[wf],
+    )
+
+    validated = workflow_validator.validate_workflow_understanding(understanding, knowledge)
+    assert validated.workflows[0].runtime_execution_verified is False
+    assert validated.workflows[0].steps[0].runtime_execution_verified is False
+
+
+def test_workflow_validator_rejects_import_edges_as_execution_transitions():
+    """Validator demotes call relationships backed only by import edges (not CallGraph edges)."""
+    from app.services.ai.workflow_understanding import (
+        ApplicationWorkflow,
+        CallSiteEvidence,
+        RepositoryWorkflowUnderstanding,
+        WorkflowComponentReference,
+        WorkflowStep,
+        workflow_validator,
+    )
+
+    knowledge = _create_mock_knowledge_for_phase3()
+
+    # Step claiming transition from main.py to config.py (exists in imports, but NOT in call graph!)
+    edge_id = CallSiteEvidence.format_edge_id("app/main.py", "start_app", "app/config.py", "load_config")
+    site_id = CallSiteEvidence.format_site_id("app/main.py", "start_app", "app/config.py", "load_config", 1)
+
+    step = WorkflowStep(
+        step_number=1,
+        title="Load config",
+        component_id="app/main.py",
+        symbol_name="start_app",
+        action_type="call",
+        description="Attempts to claim import as call execution",
+        call_relationship_verified=True,  # LLM erroneously claimed True
+        call_evidence=CallSiteEvidence(
+            caller_file="app/main.py",
+            caller_symbol="start_app",
+            callee_file="app/config.py",
+            callee_symbol="load_config",
+            call_name="load_config",
+            call_site_line=1,
+            call_graph_edge_id=edge_id,
+            call_site_id=site_id,
+            is_edge_verified=True,
+        ),
+    )
+    wf = ApplicationWorkflow(
+        workflow_id="wf_import",
+        name="Import Flow",
+        description="Flow claiming import",
+        trigger="run",
+        entry_point=WorkflowComponentReference(component_id="app/main.py", name="start_app", role_in_workflow="entry"),
+        steps=[step],
+        final_outcome="Done",
+    )
+    understanding = RepositoryWorkflowUnderstanding(
+        repository_name="test/phase3_app",
+        system_architecture_type="modular_monolith",
+        workflow_summary="Summary",
+        workflows=[wf],
+    )
+
+    validated = workflow_validator.validate_workflow_understanding(understanding, knowledge)
+    val_step = validated.workflows[0].steps[0]
+    assert val_step.call_relationship_verified is False
+    assert val_step.call_evidence.is_edge_verified is False
+    assert val_step.confidence == "low"
+    assert any("is only an import edge, NOT a function call edge" in w for w in validated.validation_warnings)
+
+
+def test_workflow_validator_matches_valid_call_graph_edges():
+    """Validator verifies authentic CallGraph edges and preserves verified status."""
+    from app.services.ai.workflow_understanding import (
+        ApplicationWorkflow,
+        CallSiteEvidence,
+        RepositoryWorkflowUnderstanding,
+        WorkflowComponentReference,
+        WorkflowStep,
+        workflow_validator,
+    )
+
+    knowledge = _create_mock_knowledge_for_phase3()
+
+    edge_id = CallSiteEvidence.format_edge_id("app/main.py", "start_app", "app/service.py", "process_request")
+    site_id = CallSiteEvidence.format_site_id("app/main.py", "start_app", "app/service.py", "process_request", 5)
+
+    step = WorkflowStep(
+        step_number=1,
+        title="Process Request",
+        component_id="app/main.py",
+        symbol_name="start_app",
+        action_type="call",
+        description="Call process_request",
+        call_relationship_verified=True,
+        call_evidence=CallSiteEvidence(
+            caller_file="app/main.py",
+            caller_symbol="start_app",
+            callee_file="app/service.py",
+            callee_symbol="process_request",
+            call_name="process_request",
+            call_site_line=5,
+            call_graph_edge_id=edge_id,
+            call_site_id=site_id,
+            is_edge_verified=True,
+        ),
+    )
+    wf = ApplicationWorkflow(
+        workflow_id="wf_valid",
+        name="Valid Call Flow",
+        description="Flow with valid edge",
+        trigger="run",
+        entry_point=WorkflowComponentReference(component_id="app/main.py", name="start_app", role_in_workflow="entry"),
+        steps=[step],
+        final_outcome="Done",
+    )
+    understanding = RepositoryWorkflowUnderstanding(
+        repository_name="test/phase3_app",
+        system_architecture_type="modular_monolith",
+        workflow_summary="Summary",
+        workflows=[wf],
+    )
+
+    validated = workflow_validator.validate_workflow_understanding(understanding, knowledge)
+    val_step = validated.workflows[0].steps[0]
+    assert val_step.call_relationship_verified is True
+    assert val_step.call_evidence.is_edge_verified is True
+
+
+def test_workflow_validator_rejects_fabricated_component_files():
+    """Validator logs warnings for fabricated or non-existent component file references."""
+    from app.services.ai.workflow_understanding import (
+        ApplicationWorkflow,
+        RepositoryWorkflowUnderstanding,
+        WorkflowComponentReference,
+        WorkflowStep,
+        workflow_validator,
+    )
+
+    knowledge = _create_mock_knowledge_for_phase3()
+
+    wf = ApplicationWorkflow(
+        workflow_id="wf_fake",
+        name="Fake Component Flow",
+        description="Flow",
+        trigger="run",
+        entry_point=WorkflowComponentReference(component_id="nonexistent/fake_entry.py", name="fake", role_in_workflow="entry"),
+        participating_components=[
+            WorkflowComponentReference(component_id="nonexistent/ghost.py", name="ghost", role_in_workflow="worker")
+        ],
+        steps=[
+            WorkflowStep(
+                step_number=1,
+                title="Ghost step",
+                component_id="nonexistent/ghost.py",
+                action_type="call",
+                description="desc",
+            )
+        ],
+        final_outcome="Done",
+    )
+    understanding = RepositoryWorkflowUnderstanding(
+        repository_name="test/phase3_app",
+        system_architecture_type="modular_monolith",
+        workflow_summary="Summary",
+        workflows=[wf],
+    )
+
+    validated = workflow_validator.validate_workflow_understanding(understanding, knowledge)
+    assert any("Entry point file 'nonexistent/fake_entry.py' does not exist" in w for w in validated.validation_warnings)
+    assert any("Participating component file 'nonexistent/ghost.py' does not exist" in w for w in validated.validation_warnings)
+
+
+def test_workflow_validator_downgrades_unsubstantiated_storage_and_api_claims():
+    """Validator demotes uncorroborated storage and external API claims in data flows and steps."""
+    from app.services.ai.workflow_understanding import (
+        ApplicationWorkflow,
+        DataFlow,
+        RepositoryWorkflowUnderstanding,
+        WorkflowComponentReference,
+        WorkflowStep,
+        workflow_validator,
+    )
+
+    knowledge = _create_mock_knowledge_for_phase3()
+
+    flow = DataFlow(
+        flow_id="f1",
+        workflow_id="wf_storage",
+        data_item_name="UserData",
+        origin=WorkflowComponentReference(component_id="app/main.py", name="main", role_in_workflow="origin"),
+        destination=WorkflowComponentReference(component_id="app/main.py", name="main", role_in_workflow="dest"),
+        storage_operation_verified=True,
+        storage_operation_type="write",
+        external_api_operation_verified=True,
+        external_api_operation_type="http_request",
+    )
+    step = WorkflowStep(
+        step_number=1,
+        title="Uncorroborated IO",
+        component_id="app/main.py",
+        action_type="storage_io",  # main.py does not do storage!
+        description="Claimed storage",
+    )
+    wf = ApplicationWorkflow(
+        workflow_id="wf_storage",
+        name="Storage Flow",
+        description="Flow",
+        trigger="run",
+        entry_point=WorkflowComponentReference(component_id="app/main.py", name="main", role_in_workflow="entry"),
+        steps=[step],
+        data_flows=[flow],
+        final_outcome="Done",
+    )
+    understanding = RepositoryWorkflowUnderstanding(
+        repository_name="test/phase3_app",
+        system_architecture_type="modular_monolith",
+        workflow_summary="Summary",
+        workflows=[wf],
+    )
+
+    validated = workflow_validator.validate_workflow_understanding(understanding, knowledge)
+    val_flow = validated.workflows[0].data_flows[0]
+    assert val_flow.storage_operation_verified is False
+    assert val_flow.storage_operation_type == "none"
+    assert val_flow.persistence_status == "unverified_storage_claim"
+    assert val_flow.external_api_operation_verified is False
+    assert val_flow.external_api_operation_type == "none"
+
+    val_step = validated.workflows[0].steps[0]
+    assert val_step.action_type == "call"  # Downgraded from storage_io
+    assert any("Claimed storage_io action uncorroborated" in w for w in validated.validation_warnings)
+
+
+def test_workflow_validator_validates_intra_caller_source_order():
+    """Validator verifies source order for steps sharing the same caller function."""
+    from app.services.ai.workflow_understanding import (
+        ApplicationWorkflow,
+        CallSiteEvidence,
+        RepositoryWorkflowUnderstanding,
+        WorkflowComponentReference,
+        WorkflowStep,
+        workflow_validator,
+    )
+
+    knowledge = _create_mock_knowledge_for_phase3()
+
+    step1 = WorkflowStep(
+        step_number=1,
+        title="Call 1",
+        component_id="app/service.py",
+        symbol_name="process_request",
+        action_type="call",
+        description="First call",
+        source_order_verified=True,
+        call_evidence=CallSiteEvidence(
+            caller_file="app/service.py",
+            caller_symbol="process_request",
+            callee_file="app/service.py",
+            callee_symbol="save_record",
+            call_name="save_record",
+            call_site_line=12,  # Line 12
+            call_graph_edge_id="app/service.py:process_request->app/service.py:save_record",
+            call_site_id="app/service.py:process_request->app/service.py:save_record@12:0",
+        ),
+    )
+    step2 = WorkflowStep(
+        step_number=2,
+        title="Call 2",
+        component_id="app/service.py",
+        symbol_name="process_request",
+        action_type="call",
+        description="Second call earlier in file (inverted!)",
+        source_order_verified=True,  # Erroneous claim
+        call_evidence=CallSiteEvidence(
+            caller_file="app/service.py",
+            caller_symbol="process_request",
+            callee_file="app/storage.py",
+            callee_symbol="write_db",
+            call_name="write_db",
+            call_site_line=6,  # Line 6 < Line 12!
+            call_graph_edge_id="app/service.py:process_request->app/storage.py:write_db",
+            call_site_id="app/service.py:process_request->app/storage.py:write_db@6:0",
+        ),
+    )
+    wf = ApplicationWorkflow(
+        workflow_id="wf_order",
+        name="Order Flow",
+        description="Flow",
+        trigger="run",
+        entry_point=WorkflowComponentReference(component_id="app/service.py", name="process_request", role_in_workflow="entry"),
+        steps=[step1, step2],
+        final_outcome="Done",
+    )
+    understanding = RepositoryWorkflowUnderstanding(
+        repository_name="test/phase3_app",
+        system_architecture_type="modular_monolith",
+        workflow_summary="Summary",
+        workflows=[wf],
+    )
+
+    validated = workflow_validator.validate_workflow_understanding(understanding, knowledge)
+    assert validated.workflows[0].steps[1].source_order_verified is False
+    assert any("Line order violated" in w for w in validated.validation_warnings)
+
+
+@pytest.mark.anyio
+async def test_analyzer_successful_generation_with_mock_llm():
+    """Analyzer successfully produces verified RepositoryWorkflowUnderstanding with mock LLM."""
+    import json
+    from unittest.mock import AsyncMock
+    from app.services.ai.llm_manager import LLMManager
+    from app.services.ai.schemas import LLMResponse, TokenUsageRecord
+    from app.services.ai.workflow_understanding import WorkflowUnderstandingAnalyzer
+
+    knowledge = _create_mock_knowledge_for_phase3()
+
+    mock_llm_json = {
+        "schema_version": "1.0",
+        "repository_name": "test/phase3_app",
+        "system_architecture_type": "modular_monolith",
+        "workflow_summary": "Test application starts at main and dispatches to service.",
+        "workflows": [
+            {
+                "workflow_id": "cand_1",
+                "name": "Application Startup and Processing",
+                "category": "user_request",
+                "description": "Workflow processing incoming request.",
+                "trigger": "CLI invocation of start_app",
+                "entry_point": {
+                    "component_id": "app/main.py",
+                    "name": "start_app",
+                    "role_in_workflow": "Entry point coordinator",
+                },
+                "participating_components": [
+                    {"component_id": "app/main.py", "name": "main", "role_in_workflow": "entry"},
+                    {"component_id": "app/service.py", "name": "service", "role_in_workflow": "service"},
+                ],
+                "steps": [
+                    {
+                        "step_number": 1,
+                        "title": "Start Application",
+                        "component_id": "app/main.py",
+                        "symbol_name": "start_app",
+                        "action_type": "call",
+                        "description": "Calls process_request",
+                        "call_relationship_verified": True,
+                        "source_order_verified": True,
+                        "same_execution_path_verified": True,
+                        "execution_guaranteed": True,
+                        "runtime_execution_verified": False,
+                        "call_evidence": {
+                            "caller_file": "app/main.py",
+                            "caller_symbol": "start_app",
+                            "callee_file": "app/service.py",
+                            "callee_symbol": "process_request",
+                            "call_name": "process_request",
+                            "call_site_line": 5,
+                            "call_graph_edge_id": "app/main.py:start_app->app/service.py:process_request",
+                            "call_site_id": "app/main.py:start_app->app/service.py:process_request@5:0",
+                            "is_edge_verified": True,
+                            "is_site_location_verified": True,
+                        },
+                        "confidence": "high",
+                    }
+                ],
+                "data_flows": [],
+                "final_outcome": "Request processed successfully.",
+                "call_relationships_fully_verified": True,
+                "source_order_verified": True,
+                "same_execution_path_verified": True,
+                "execution_guaranteed": True,
+                "runtime_execution_verified": False,
+                "confidence": "high",
+            }
+        ],
+    }
+
+    mock_llm = AsyncMock(spec=LLMManager)
+    mock_llm.generate.return_value = LLMResponse(
+        text=f"```json\n{json.dumps(mock_llm_json)}\n```",
+        provider="mock_gemini",
+        model="gemini-2.5-pro",
+        token_usage=TokenUsageRecord(provider="mock_gemini", model="gemini-2.5-pro", prompt_tokens=400, completion_tokens=250, total_tokens=650),
+        latency_ms=120.0,
+    )
+
+    analyzer = WorkflowUnderstandingAnalyzer(llm_manager=mock_llm)
+    result = await analyzer.analyze_workflows(job_id="job_test", knowledge=knowledge)
+
+    assert result.is_fallback is False
+    assert result.provider == "mock_gemini"
+    assert result.model == "gemini-2.5-pro"
+    assert len(result.workflows) == 1
+    assert result.workflows[0].name == "Application Startup and Processing"
+    assert result.workflows[0].steps[0].call_relationship_verified is True
+    assert result.workflows[0].steps[0].runtime_execution_verified is False
+    assert result.token_usage.total_tokens == 650
+
+
+@pytest.mark.anyio
+async def test_analyzer_one_shot_json_repair_success():
+    """Analyzer attempts exactly 1 JSON repair query when initial response has syntax errors."""
+    import json
+    from unittest.mock import AsyncMock
+    from app.services.ai.llm_manager import LLMManager
+    from app.services.ai.schemas import LLMResponse, TokenUsageRecord
+    from app.services.ai.workflow_understanding import WorkflowUnderstandingAnalyzer
+
+    knowledge = _create_mock_knowledge_for_phase3()
+
+    valid_dict = {
+        "schema_version": "1.0",
+        "repository_name": "test/phase3_app",
+        "system_architecture_type": "modular_monolith",
+        "workflow_summary": "Repaired workflow summary.",
+        "workflows": [
+            {
+                "workflow_id": "cand_repaired",
+                "name": "Repaired Workflow",
+                "category": "user_request",
+                "description": "Repaired description.",
+                "trigger": "start_app",
+                "entry_point": {"component_id": "app/main.py", "name": "start_app", "role_in_workflow": "entry"},
+                "participating_components": [],
+                "steps": [
+                    {
+                        "step_number": 1,
+                        "title": "Start",
+                        "component_id": "app/main.py",
+                        "symbol_name": "start_app",
+                        "action_type": "call",
+                        "description": "Start step",
+                        "runtime_execution_verified": False,
+                    }
+                ],
+                "data_flows": [],
+                "final_outcome": "Finished",
+            }
+        ],
+    }
+
+    mock_llm = AsyncMock(spec=LLMManager)
+    # First call returns malformed JSON; second call (repair) returns valid JSON
+    mock_llm.generate.side_effect = [
+        LLMResponse(
+            text="{ 'broken_json': true, unquoted_key: ",
+            provider="mock_gemini",
+            model="gemini-2.5-pro",
+            token_usage=TokenUsageRecord(provider="mock_gemini", model="gemini-2.5-pro", prompt_tokens=400, completion_tokens=50, total_tokens=450),
+            latency_ms=100.0,
+        ),
+        LLMResponse(
+            text=json.dumps(valid_dict),
+            provider="mock_gemini",
+            model="gemini-2.5-pro",
+            token_usage=TokenUsageRecord(provider="mock_gemini", model="gemini-2.5-pro", prompt_tokens=200, completion_tokens=150, total_tokens=350),
+            latency_ms=80.0,
+        ),
+    ]
+
+    analyzer = WorkflowUnderstandingAnalyzer(llm_manager=mock_llm)
+    result = await analyzer.analyze_workflows(job_id="job_repair", knowledge=knowledge)
+
+    assert result.is_fallback is False
+    assert len(result.workflows) == 1
+    assert result.workflows[0].name == "Repaired Workflow"
+    assert mock_llm.generate.call_count == 2
+    # Combined token usage
+    assert result.token_usage.total_tokens == 800
+
+
+@pytest.mark.anyio
+async def test_analyzer_fallback_on_unrepairable_json():
+    """Analyzer falls back to deterministic AST workflows when JSON cannot be repaired."""
+    from unittest.mock import AsyncMock
+    from app.services.ai.llm_manager import LLMManager
+    from app.services.ai.schemas import LLMResponse
+    from app.services.ai.workflow_understanding import WorkflowUnderstandingAnalyzer
+
+    knowledge = _create_mock_knowledge_for_phase3()
+
+    mock_llm = AsyncMock(spec=LLMManager)
+    mock_llm.generate.side_effect = [
+        LLMResponse(text="Totally unparseable prose response", provider="mock", model="m", latency_ms=50.0),
+        LLMResponse(text="Still completely unparseable prose response", provider="mock", model="m", latency_ms=50.0),
+    ]
+
+    analyzer = WorkflowUnderstandingAnalyzer(llm_manager=mock_llm)
+    result = await analyzer.analyze_workflows(job_id="job_unrepairable", knowledge=knowledge)
+
+    assert result.is_fallback is True
+    assert result.provider == "deterministic_fallback"
+    assert result.model == "ast_rule_based"
+    assert len(result.workflows) >= 1
+    assert result.workflows[0].is_deterministic is True
+    assert any("LLM output unparseable and repair failed" in lim for lim in result.analysis_limitations)
+
+
+@pytest.mark.anyio
+async def test_analyzer_fallback_on_ai_provider_error():
+    """Analyzer falls back cleanly when LLM manager raises AIRateLimitError."""
+    from unittest.mock import AsyncMock
+    from app.services.ai.exceptions import AIRateLimitError
+    from app.services.ai.llm_manager import LLMManager
+    from app.services.ai.workflow_understanding import WorkflowUnderstandingAnalyzer
+
+    knowledge = _create_mock_knowledge_for_phase3()
+
+    mock_llm = AsyncMock(spec=LLMManager)
+    mock_llm.generate.side_effect = AIRateLimitError("Rate limit exceeded", provider="gemini")
+
+    analyzer = WorkflowUnderstandingAnalyzer(llm_manager=mock_llm)
+    result = await analyzer.analyze_workflows(job_id="job_error", knowledge=knowledge)
+
+    assert result.is_fallback is True
+    assert result.provider == "deterministic_fallback"
+    assert result.model == "ast_rule_based"
+    assert len(result.workflows) >= 1
+    assert any("AI generation unavailable" in w for w in result.validation_warnings)
+
+
+@pytest.mark.anyio
+async def test_analyzer_empty_candidate_fallback():
+    """Analyzer returns an empty deterministic fallback when no candidates can be discovered."""
+    from unittest.mock import AsyncMock
+    from app.models.schemas import (
+        ArchitectureSummary,
+        CallGraph,
+        CodeStructureSummary,
+        DependencyGraph,
+        RepositoryKnowledge,
+        RepositoryMetadataInfo,
+        StatusEnum,
+    )
+    from app.services.ai.llm_manager import LLMManager
+    from app.services.ai.workflow_understanding import WorkflowUnderstandingAnalyzer
+
+    empty_knowledge = RepositoryKnowledge(
+        schema_version="1.0",
+        repository=RepositoryMetadataInfo(name="test/empty", owner="test", repository_url="https://github.com/test/empty", clone_status=StatusEnum.COMPLETED),
+        project_overview={},
+        technology_stack={"languages": []},
+        repository_structure={"total_directories": 0, "total_files": 0},
+        statistics={},
+        dependency_information=DependencyGraph(nodes=[], edges=[]),
+        code_structure=CodeStructureSummary(parsed_files_count=0, supported_languages=[], files=[]),
+        architecture=ArchitectureSummary(
+            dependency_graph=DependencyGraph(nodes=[], edges=[]),
+            call_graph=CallGraph(edges=[]),
+            components=[],
+        ),
+        entry_points=[],
+        important_files=[],
+        analysis_metadata={"created_at": "2026-11-05T00:00:00Z"},
+    )
+
+    mock_llm = AsyncMock(spec=LLMManager)
+    analyzer = WorkflowUnderstandingAnalyzer(llm_manager=mock_llm)
+    result = await analyzer.analyze_workflows(job_id="job_empty", knowledge=empty_knowledge)
+
+    assert result.is_fallback is True
+    assert len(result.workflows) == 0
+    assert mock_llm.generate.call_count == 0  # Did not attempt LLM call
+    assert any("No entry-point or call-chain workflow candidates" in lim for lim in result.analysis_limitations)
+
+
+
 

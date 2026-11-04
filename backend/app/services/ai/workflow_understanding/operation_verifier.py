@@ -200,7 +200,12 @@ class OperationVerifier:
                 persistence_detail=f"Language '{language}': deep AST storage verification is supported for Python in Milestone 3.4.",
             )
 
-        tree = self._parser.parse(source_code.encode("utf-8"))
+        clean_code = (
+            re.sub(r"^\s*\d+\s*\|\s?", "", source_code, flags=re.MULTILINE)
+            if re.search(r"^\s*\d+\s*\|", source_code, re.MULTILINE)
+            else source_code
+        )
+        tree = self._parser.parse(clean_code.encode("utf-8"))
         modules, aliases = self._extract_imports(tree.root_node, file_imports)
         calls = self._collect_calls(tree.root_node)
 
@@ -425,7 +430,12 @@ class OperationVerifier:
                 external_api_detail=f"Language '{language}': deep external API verification is supported for Python in Milestone 3.4.",
             )
 
-        tree = self._parser.parse(source_code.encode("utf-8"))
+        clean_code = (
+            re.sub(r"^\s*\d+\s*\|\s?", "", source_code, flags=re.MULTILINE)
+            if re.search(r"^\s*\d+\s*\|", source_code, re.MULTILINE)
+            else source_code
+        )
+        tree = self._parser.parse(clean_code.encode("utf-8"))
         modules, aliases = self._extract_imports(tree.root_node, file_imports)
         calls = self._collect_calls(tree.root_node)
 

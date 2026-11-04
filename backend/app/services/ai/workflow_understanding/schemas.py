@@ -209,3 +209,11 @@ class RepositoryWorkflowUnderstanding(BaseModel):
     latency_ms: float = 0.0
     token_usage: Optional[TokenUsageRecord] = None
     validation_warnings: List[str] = Field(default_factory=list)
+    analysis_limitations: List[str] = Field(default_factory=list)
+    static_analysis_caveats: List[str] = Field(
+        default_factory=lambda: [
+            "Workflow execution paths are inferred statically from AST call graphs; runtime execution is never verified.",
+            "Static call relationships do not guarantee execution during any specific runtime invocation.",
+            "Database and external API operations represent static source expressions, not confirmed transaction persistence.",
+        ]
+    )
