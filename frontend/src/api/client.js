@@ -249,3 +249,56 @@ export async function generateProjectUnderstanding(jobId, provider = null, refre
     };
   }
 }
+
+export async function getCodeUnderstanding(jobId) {
+  try {
+    const response = await fetch(`${API_BASE_URL}/api/v1/jobs/${jobId}/code-understanding`, {
+      method: 'GET',
+      headers: {
+        'Accept': 'application/json',
+      },
+    });
+
+    const data = await response.json();
+
+    if (!response.ok) {
+      throw new Error(data.detail || `Failed to fetch code understanding (${response.status})`);
+    }
+
+    return { success: true, data };
+  } catch (error) {
+    return {
+      success: false,
+      error: error.message || 'Error checking code understanding',
+    };
+  }
+}
+
+export async function generateCodeUnderstanding(jobId, provider = null, refresh = false) {
+  try {
+    const params = new URLSearchParams();
+    if (provider) params.append('provider', provider);
+    if (refresh) params.append('refresh', 'true');
+    const queryString = params.toString() ? `?${params.toString()}` : '';
+
+    const response = await fetch(`${API_BASE_URL}/api/v1/jobs/${jobId}/code-understanding${queryString}`, {
+      method: 'POST',
+      headers: {
+        'Accept': 'application/json',
+      },
+    });
+
+    const data = await response.json();
+
+    if (!response.ok) {
+      throw new Error(data.detail || `Failed to generate code understanding (${response.status})`);
+    }
+
+    return { success: true, data };
+  } catch (error) {
+    return {
+      success: false,
+      error: error.message || 'Error generating code understanding',
+    };
+  }
+}

@@ -1,6 +1,11 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import ProjectUnderstandingCard from './ProjectUnderstandingCard';
-import { generateProjectUnderstanding } from '../api/client';
+import CodeUnderstandingCard from './CodeUnderstandingCard';
+import {
+  generateProjectUnderstanding,
+  getCodeUnderstanding,
+  generateCodeUnderstanding,
+} from '../api/client';
 import { 
   GitBranch, 
   Search, 
@@ -60,6 +65,25 @@ export default function ProcessingView({
   const [isGeneratingUnderstanding, setIsGeneratingUnderstanding] = useState(false);
   const [understandingError, setUnderstandingError] = useState(null);
 
+  const [codeUnderstanding, setCodeUnderstanding] = useState(null);
+  const [isGeneratingCodeUnderstanding, setIsGeneratingCodeUnderstanding] = useState(false);
+  const [codeUnderstandingError, setCodeUnderstandingError] = useState(null);
+
+  useEffect(() => {
+    // If the job has code understanding generated and we haven't loaded it yet, fetch it
+    if (job?.job_id && (job?.has_code_understanding || job?.code_understanding) && !codeUnderstanding) {
+      if (job.code_understanding) {
+        setCodeUnderstanding(job.code_understanding);
+      } else {
+        getCodeUnderstanding(job.job_id).then((res) => {
+          if (res.success) {
+            setCodeUnderstanding(res.data);
+          }
+        });
+      }
+    }
+  }, [job?.job_id, job?.has_code_understanding, job?.code_understanding]);
+
   const handleGenerateUnderstanding = async (refresh = false) => {
     if (!job?.job_id) return;
     setIsGeneratingUnderstanding(true);
@@ -73,6 +97,22 @@ export default function ProcessingView({
       setUnderstandingError(res.error);
     }
     setIsGeneratingUnderstanding(false);
+  };
+
+  const handleGenerateCodeUnderstanding = async (refresh = false) => {
+    if (!job?.job_id) return;
+    setIsGeneratingCodeUnderstanding(true);
+    setCodeUnderstandingError(null);
+    const res = await generateCodeUnderstanding(job.job_id, null, refresh);
+    if (res.success) {
+      setCodeUnderstanding(res.data);
+      if (onJobUpdated) {
+        onJobUpdated({ ...job, has_code_understanding: true });
+      }
+    } else {
+      setCodeUnderstandingError(res.error);
+    }
+    setIsGeneratingCodeUnderstanding(false);
   };
   if (!job) {
     return (
@@ -880,6 +920,16 @@ export default function ProcessingView({
           isLoading={isGeneratingUnderstanding || job.stages?.[3]?.status === 'in_progress'}
           onGenerate={handleGenerateUnderstanding}
           error={understandingError}
+        />
+      )}
+
+      {/* Milestone 3.3 AI Code-Level Understanding */}
+      {knowledge && (
+        <CodeUnderstandingCard
+          codeUnderstanding={codeUnderstanding}
+          isLoading={isGeneratingCodeUnderstanding}
+          onGenerate={handleGenerateCodeUnderstanding}
+          error={codeUnderstandingError}
         />
       )}
 

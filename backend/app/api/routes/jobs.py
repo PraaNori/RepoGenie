@@ -18,6 +18,10 @@ from ...services.ai.project_understanding import (
     ProjectUnderstanding,
     project_understanding_analyzer,
 )
+from ...services.ai.code_understanding import (
+    RepositoryCodeUnderstanding,
+    code_understanding_analyzer,
+)
 from ...services.repo.analyzer import repo_analyzer_service
 from ...services.repo.architecture_analyzer import architecture_analyzer_service
 from ...services.repo.code_parser import code_parser_service
@@ -533,6 +537,96 @@ async def generate_job_project_understanding(
                 detail=f"Unexpected error during project understanding: {exc}",
             )
 
+@router.post("/{job_id}/code-understanding", response_model=RepositoryCodeUnderstanding)
+async def generate_job_code_understanding(
+    job_id: str,
+    provider: Optional[str] = Query(None, description="AI provider to use (gemini or groq)"),
+    refresh: bool = Query(False, description="Force re-generation even if code understanding already exists"),
+):
+    """
+    Generates or retrieves cached component-level and code-level understanding for a job.
+    Does not reset Stage 4 completion status or alter Stage 5.
+    """
+    internal = job_store.get_internal_job(job_id)
+    if not internal:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Job with ID '{job_id}' not found",
+        )
+
+    # Check prerequisite stages: ingestion, structure analysis, and code parsing / knowledge consolidation
+    if internal.stages[0].status != StatusEnum.COMPLETED:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Repository ingestion must be completed first (current status: {internal.stages[0].status.value}).",
+        )
+    if internal.stages[1].status != StatusEnum.COMPLETED:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Repository structure analysis must be completed first (current status: {internal.stages[1].status.value}).",
+        )
+    if internal.stages[2].status != StatusEnum.COMPLETED or not internal.knowledge:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Repository knowledge consolidation must be completed first (current status: {internal.stages[2].status.value}).",
+        )
+
+    # Acquire dedicated per-job lock to serialize concurrent requests for the same job atomically
+    job_lock = await job_store.get_job_lock(job_id)
+    async with job_lock:
+        internal = job_store.get_internal_job(job_id)
+        if not internal or not internal.knowledge:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Job with ID '{job_id}' not found",
+            )
+
+        # Return cached if already available and refresh not requested
+        if internal.code_understanding and not refresh:
+            return internal.code_understanding
+
+        try:
+            understanding = await code_understanding_analyzer.analyze_codebase(
+                job_id=job_id,
+                knowledge=internal.knowledge,
+                project_understanding=internal.project_understanding,
+                provider_name=provider,
+                local_path=internal.local_path,
+            )
+            job_store.update_job_code_understanding_success(job_id, understanding)
+            return understanding
+        except AIError as ai_err:
+            raise HTTPException(
+                status_code=ai_err.status_code if ai_err.status_code and ai_err.status_code >= 400 else 500,
+                detail=f"AI code understanding failed: {ai_err.message}",
+            )
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Unexpected error during code understanding: {exc}",
+            )
+
+@router.get("/{job_id}/code-understanding", response_model=RepositoryCodeUnderstanding)
+def get_job_code_understanding(job_id: str):
+    """
+    Retrieves cached component-level and code-level understanding for a job.
+    Returns 404 if not yet generated.
+    """
+    internal = job_store.get_internal_job(job_id)
+    if not internal:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Job with ID '{job_id}' not found",
+        )
+
+    if not internal.code_understanding:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Code understanding has not yet been generated for job '{job_id}'. Call POST /api/v1/jobs/{job_id}/code-understanding to generate.",
+        )
+
+    return internal.code_understanding
+
 @router.post("/{job_id}/simulate-step", response_model=JobResponse)
 def simulate_job_step(job_id: str):
     """
@@ -576,8 +670,17 @@ def simulate_job_step(job_id: str):
             current_stage.detail = f"Completed {current_stage.name} successfully."
             internal_job.progress_percentage = int(((target_idx + 1) / len(internal_job.stages)) * 100)
 
-            if current_stage.name == StageEnum.AI_SUMMARY.value and internal_job.knowledge and not internal_job.project_understanding:
-                internal_job.project_understanding = project_understanding_analyzer.create_rule_based_fallback(internal_job.knowledge)
+            if current_stage.name == StageEnum.AI_SUMMARY.value and internal_job.knowledge:
+                if not internal_job.project_understanding:
+                    internal_job.project_understanding = project_understanding_analyzer.create_rule_based_fallback(
+                        internal_job.knowledge, local_path=internal_job.local_path
+                    )
+                if not internal_job.code_understanding:
+                    internal_job.code_understanding = code_understanding_analyzer.create_rule_based_fallback(
+                        internal_job.knowledge,
+                        project_understanding=internal_job.project_understanding,
+                        local_path=internal_job.local_path,
+                    )
 
             # Check if there is a next stage
             if target_idx + 1 < len(internal_job.stages):

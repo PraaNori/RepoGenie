@@ -16,6 +16,7 @@ from ...models.schemas import (
     VideoResult,
 )
 from ..ai.project_understanding.schemas import ProjectUnderstanding
+from ..ai.code_understanding.schemas import RepositoryCodeUnderstanding
 
 # Standard 9 pipeline stages
 PIPELINE_STAGES = [
@@ -50,6 +51,7 @@ class JobInternal(BaseModel):
     architecture: Optional[ArchitectureAnalysisResult] = None
     knowledge: Optional[RepositoryKnowledge] = None
     project_understanding: Optional[ProjectUnderstanding] = None
+    code_understanding: Optional[RepositoryCodeUnderstanding] = None
     result: Optional[VideoResult] = None
     error: Optional[str] = None
 
@@ -74,6 +76,7 @@ class JobInternal(BaseModel):
             architecture=self.architecture,
             knowledge=self.knowledge,
             project_understanding=self.project_understanding,
+            has_code_understanding=bool(self.code_understanding is not None),
             result=self.result,
             error=self.error,
         )
@@ -379,6 +382,19 @@ class JobStore:
         job.current_stage = PIPELINE_STAGES[4]
         job.stages[4].status = StatusEnum.PENDING
         job.stages[4].detail = "Ready for educational script generation"
+        job.updated_at = now
+        return job
+
+    def update_job_code_understanding_success(
+        self,
+        job_id: str,
+        code_understanding: RepositoryCodeUnderstanding,
+    ) -> Optional[JobInternal]:
+        job = self._jobs.get(job_id)
+        if not job:
+            return None
+        now = datetime.now(timezone.utc)
+        job.code_understanding = code_understanding
         job.updated_at = now
         return job
 

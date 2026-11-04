@@ -408,5 +408,6 @@ class JobResponse(BaseModel):
     architecture: Optional[ArchitectureAnalysisResult] = None
     knowledge: Optional[RepositoryKnowledge] = None
     project_understanding: Optional[ProjectUnderstanding] = None
+    has_code_understanding: bool = False
     result: Optional[VideoResult] = None
     error: Optional[str] = None
