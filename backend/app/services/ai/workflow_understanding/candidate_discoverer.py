@@ -113,11 +113,16 @@ class WorkflowCandidateDiscoverer:
         for ep in entry_points:
             if traversal_stats["edges_examined"] >= self.MAX_EDGES_EXAMINED_PER_RUN:
                 omitted_reasons.append(
-                    f"Candidate exploration budget reached ({self.MAX_EDGES_EXAMINED_PER_RUN} edges examined); remaining entry points omitted."
+                    f"Candidate exploration budget reached ({self.MAX_EDGES_EXAMINED_PER_RUN} edges examined); remaining entry points omitted without full evaluation."
                 )
                 break
             seeds = self._extract_seeds_from_entry_point(ep, parsed_files_map)
             for file_path, symbol_name, trigger in seeds:
+                if traversal_stats["edges_examined"] >= self.MAX_EDGES_EXAMINED_PER_RUN:
+                    omitted_reasons.append(
+                        f"Candidate exploration budget reached ({self.MAX_EDGES_EXAMINED_PER_RUN} edges examined); remaining entry point seeds omitted without full evaluation."
+                    )
+                    break
                 key = (file_path, symbol_name)
                 if key in seen_entry_keys:
                     continue
@@ -137,17 +142,28 @@ class WorkflowCandidateDiscoverer:
 
         # Seed Tier 2: API Routes from Architectural Components
         arch_components = getattr(getattr(knowledge, "architecture", None), "components", []) or []
-        for comp in arch_components:
-            if traversal_stats["edges_examined"] >= self.MAX_EDGES_EXAMINED_PER_RUN:
+        api_components = [c for c in arch_components if getattr(c, "category", "") in ("api_route", "entry_point")]
+        if traversal_stats["edges_examined"] >= self.MAX_EDGES_EXAMINED_PER_RUN:
+            if api_components:
                 omitted_reasons.append(
-                    f"Candidate exploration budget reached ({self.MAX_EDGES_EXAMINED_PER_RUN} edges examined); remaining API components omitted."
+                    f"Candidate exploration budget reached ({self.MAX_EDGES_EXAMINED_PER_RUN} edges examined); {len(api_components)} architectural API components omitted without exploration."
                 )
-                break
-            if getattr(comp, "category", "") in ("api_route", "entry_point"):
+        else:
+            for comp in api_components:
+                if traversal_stats["edges_examined"] >= self.MAX_EDGES_EXAMINED_PER_RUN:
+                    omitted_reasons.append(
+                        f"Candidate exploration budget reached ({self.MAX_EDGES_EXAMINED_PER_RUN} edges examined); remaining API components omitted without exploration."
+                    )
+                    break
                 norm_path = comp.file_path.replace("\\", "/").strip().lstrip("/")
                 if norm_path in parsed_files_map:
                     pf = parsed_files_map[norm_path]
                     for fn in pf.functions[:2]:  # Sample top public route handlers
+                        if traversal_stats["edges_examined"] >= self.MAX_EDGES_EXAMINED_PER_RUN:
+                            omitted_reasons.append(
+                                f"Candidate exploration budget reached ({self.MAX_EDGES_EXAMINED_PER_RUN} edges examined); remaining API route seeds omitted without exploration."
+                            )
+                            break
                         if fn.name.startswith("_"):
                             continue
                         key = (norm_path, fn.name)
@@ -168,12 +184,18 @@ class WorkflowCandidateDiscoverer:
                             raw_candidates.append(cand)
 
         # Seed Tier 3: Library Repositories (High out-degree symbols in important files)
-        if len(raw_candidates) < (self.MAX_AI_CANDIDATES + self.MAX_STRUCTURAL_CHAINS):
+        if traversal_stats["edges_examined"] >= self.MAX_EDGES_EXAMINED_PER_RUN:
+            library_seeds = self._extract_library_seeds(knowledge, edge_index, seen_entry_keys)
+            if library_seeds:
+                omitted_reasons.append(
+                    f"Candidate exploration budget reached ({self.MAX_EDGES_EXAMINED_PER_RUN} edges examined); {len(library_seeds)} library seeds omitted without exploration."
+                )
+        elif len(raw_candidates) < (self.MAX_AI_CANDIDATES + self.MAX_STRUCTURAL_CHAINS):
             library_seeds = self._extract_library_seeds(knowledge, edge_index, seen_entry_keys)
             for file_path, symbol_name, trigger in library_seeds:
                 if traversal_stats["edges_examined"] >= self.MAX_EDGES_EXAMINED_PER_RUN:
                     omitted_reasons.append(
-                        f"Candidate exploration budget reached ({self.MAX_EDGES_EXAMINED_PER_RUN} edges examined); remaining library symbols omitted."
+                        f"Candidate exploration budget reached ({self.MAX_EDGES_EXAMINED_PER_RUN} edges examined); remaining library symbols omitted without exploration."
                     )
                     break
                 key = (file_path, symbol_name)

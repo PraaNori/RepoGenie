@@ -137,24 +137,33 @@ class WorkflowSnippetExtractor:
         """Extracts a bounded snippet for a function, method, or class symbol."""
         norm_path = (parsed_file.file_path if parsed_file else "").replace("\\", "/").strip().lstrip("/")
 
-        # 1. Check path traversal guard
-        if ".." in norm_path or (local_path and ".." in local_path) or norm_path.startswith("/"):
-            clean = os.path.normpath(norm_path)
-            if clean.startswith("..") or "/../" in norm_path or norm_path.startswith("/") or clean.startswith("/"):
-                return ExtractedWorkflowSnippet(
-                    name=symbol_name,
-                    symbol_type="unknown",
-                    file_path=norm_path,
-                    line_start=1,
-                    line_end=1,
-                    formatted_code="<SNIPPET REDACTED: PATH_TRAVERSAL_DETECTED>",
-                    is_complete=False,
-                    exclusion_reason=f"File path '{norm_path}' attempts path traversal outside repository boundaries.",
-                )
-            if repo_root and local_path:
-                abs_repo = os.path.abspath(repo_root)
-                abs_file = os.path.abspath(local_path)
-                if os.path.commonpath([abs_repo, abs_file]) != abs_repo:
+        # 1. Lexical Path Traversal Guard
+        clean_norm = os.path.normpath(norm_path) if norm_path else ""
+        if (
+            ".." in norm_path
+            or (local_path and ".." in local_path)
+            or norm_path.startswith("/")
+            or clean_norm.startswith("..")
+            or "/../" in norm_path
+        ):
+            return ExtractedWorkflowSnippet(
+                name=symbol_name,
+                symbol_type="unknown",
+                file_path=norm_path,
+                line_start=1,
+                line_end=1,
+                formatted_code="<SNIPPET REDACTED: PATH_TRAVERSAL_DETECTED>",
+                is_complete=False,
+                exclusion_reason=f"File path '{norm_path}' attempts path traversal outside repository boundaries.",
+            )
+
+        # 2. Canonical Symlink and Directory Containment Guard
+        target_path = local_path if local_path else (os.path.join(repo_root, norm_path) if repo_root and norm_path else None)
+        if repo_root and target_path:
+            real_root = os.path.realpath(repo_root)
+            real_target = os.path.realpath(target_path)
+            try:
+                if os.path.commonpath([real_root, real_target]) != real_root:
                     return ExtractedWorkflowSnippet(
                         name=symbol_name,
                         symbol_type="unknown",
@@ -163,10 +172,34 @@ class WorkflowSnippetExtractor:
                         line_end=1,
                         formatted_code="<SNIPPET REDACTED: PATH_TRAVERSAL_DETECTED>",
                         is_complete=False,
-                        exclusion_reason=f"Path '{local_path}' escapes repository root '{repo_root}'.",
+                        exclusion_reason=f"Target path or symlink '{norm_path}' resolves outside canonical repository root.",
                     )
+            except ValueError:
+                return ExtractedWorkflowSnippet(
+                    name=symbol_name,
+                    symbol_type="unknown",
+                    file_path=norm_path,
+                    line_start=1,
+                    line_end=1,
+                    formatted_code="<SNIPPET REDACTED: PATH_TRAVERSAL_DETECTED>",
+                    is_complete=False,
+                    exclusion_reason=f"Target path '{norm_path}' resides on a different volume than repository root.",
+                )
+        elif local_path and os.path.islink(local_path):
+            real_target = os.path.realpath(local_path)
+            if real_target.startswith(("/etc", "/var", "/private/etc", "/private/var", "/proc", "/sys")):
+                return ExtractedWorkflowSnippet(
+                    name=symbol_name,
+                    symbol_type="unknown",
+                    file_path=norm_path,
+                    line_start=1,
+                    line_end=1,
+                    formatted_code="<SNIPPET REDACTED: PATH_TRAVERSAL_DETECTED>",
+                    is_complete=False,
+                    exclusion_reason=f"Symlink '{local_path}' resolves to restricted system path.",
+                )
 
-        # 2. Check sensitive file guard
+        # 3. Check sensitive file guard
         if self.is_sensitive_file(norm_path):
             return ExtractedWorkflowSnippet(
                 name=symbol_name,

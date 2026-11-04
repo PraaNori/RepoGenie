@@ -1498,3 +1498,309 @@ def test_snippet_extraction_secret_redaction():
     assert "Bearer <REDACTED_SECRET>" in snippet.formatted_code
 
 
+# ===========================================================================
+# 9. Narrowly Scoped Verification Tests
+# ===========================================================================
+
+def test_storage_verification_misleading_imports_and_unrelated_objects():
+    """Importing SQLAlchemy/sqlite3 elsewhere does NOT validate arbitrary objects or runners."""
+    from app.services.ai.workflow_understanding import operation_verifier
+
+    # 1. SQLAlchemy imported, but objects are unrelated collections/forms
+    code_orm_misleading = """
+from sqlalchemy.orm import Session
+import sqlalchemy
+
+def handle_request(form, items, cart):
+    items.add("item_1")
+    form.save()
+    cart.delete("item_2")
+"""
+    res_orm = operation_verifier.verify_storage_in_code(code_orm_misleading, "views.py")
+    assert res_orm.storage_operation_verified is False
+    assert res_orm.persistence_status == "no_storage_operation_detected"
+
+    # 2. sqlite3 imported, but runner is an arbitrary command executor
+    code_db_misleading = """
+import sqlite3
+
+def execute_command(runner, task):
+    runner.execute("SELECT * FROM tasks WHERE id = 1")
+"""
+    res_db = operation_verifier.verify_storage_in_code(code_db_misleading, "runner.py")
+    assert res_db.storage_operation_verified is False
+    assert res_db.persistence_status == "no_storage_operation_detected"
+
+
+def test_storage_verification_valid_recognized_db_orm_patterns():
+    """Recognized DB connections/cursors and ORM constructions/types are verified."""
+    from app.services.ai.workflow_understanding import operation_verifier
+
+    # 1. Assignment from connect and cursor
+    code_cursor_construct = """
+import sqlite3
+
+def run_query():
+    conn = sqlite3.connect("app.db")
+    cur = conn.cursor()
+    cur.execute("SELECT id, name FROM users")
+    return cur.fetchall()
+"""
+    res_cur = operation_verifier.verify_storage_in_code(code_cursor_construct, "db.py")
+    assert res_cur.storage_operation_verified is True
+    assert res_cur.storage_operation_type == "read"
+
+    # 2. Typed parameter with sqlite3.Cursor
+    code_typed_cur = """
+import sqlite3
+
+def fetch_record(cur: sqlite3.Cursor, record_id: int):
+    cur.execute("SELECT * FROM records WHERE id = ?", (record_id,))
+    return cur.fetchone()
+"""
+    res_typed = operation_verifier.verify_storage_in_code(code_typed_cur, "db.py")
+    assert res_typed.storage_operation_verified is True
+    assert res_typed.storage_operation_type == "read"
+
+    # 3. Chained db.session with Flask-SQLAlchemy style
+    code_chained_session = """
+from sqlalchemy.orm import Session
+
+def create_item(db, item):
+    db.session.add(item)
+    db.session.commit()
+"""
+    res_chained = operation_verifier.verify_storage_in_code(code_chained_session, "service.py")
+    assert res_chained.storage_operation_verified is True
+    assert res_chained.storage_operation_type == "write"
+
+    # 4. Typed Session parameter
+    code_typed_session = """
+from sqlalchemy.orm import Session
+
+def remove_item(session: Session, item):
+    session.delete(item)
+    session.commit()
+"""
+    res_session = operation_verifier.verify_storage_in_code(code_typed_session, "service.py")
+    assert res_session.storage_operation_verified is True
+    assert res_session.storage_operation_type == "delete"
+
+
+def test_external_api_sdk_classification_and_arbitrary_rejection():
+    """Separates explicit HTTP clients from third-party SDK calls and rejects arbitrary methods."""
+    from app.services.ai.workflow_understanding import operation_verifier
+
+    # 1. Explicit HTTP client (requests)
+    code_http = """
+import requests
+
+def get_status():
+    return requests.get("https://api.example.com/status")
+"""
+    res_http = operation_verifier.verify_external_api_in_code(code_http, "client.py")
+    assert res_http.external_api_operation_verified is True
+    assert res_http.external_api_operation_type == "http_request"
+    assert "statically identified outbound HTTP operation" in res_http.observed_operation
+
+    # 2. Third-party SDK (boto3)
+    code_sdk_boto = """
+import boto3
+
+def upload_data(bucket, key, data):
+    s3 = boto3.client('s3')
+    return s3.put_object(Bucket=bucket, Key=key, Body=data)
+"""
+    res_boto = operation_verifier.verify_external_api_in_code(code_sdk_boto, "aws.py")
+    assert res_boto.external_api_operation_verified is True
+    assert res_boto.external_api_operation_type == "external_sdk_call"
+    assert "statically identified external SDK operation" in res_boto.observed_operation
+    # Must NOT claim direct HTTP request was established
+    assert "HTTP" not in res_boto.observed_operation
+
+    # 3. Third-party SDK (stripe)
+    code_sdk_stripe = """
+import stripe
+
+def charge_customer(amount, token):
+    return stripe.Charge.create(amount=amount, currency="usd", source=token)
+"""
+    res_stripe = operation_verifier.verify_external_api_in_code(code_sdk_stripe, "billing.py")
+    assert res_stripe.external_api_operation_verified is True
+    assert res_stripe.external_api_operation_type == "external_sdk_call"
+    assert "statically identified external SDK operation" in res_stripe.observed_operation
+
+    # 4. Arbitrary client without HTTP or SDK import
+    code_arbitrary = """
+def fetch_info(client):
+    return client.get("https://example.com/api")
+"""
+    res_arb = operation_verifier.verify_external_api_in_code(code_arbitrary, "util.py")
+    assert res_arb.external_api_operation_verified is False
+    assert res_arb.external_api_status == "no_external_api_operation_detected"
+
+
+def test_snippet_extraction_symlink_safe_repository_containment():
+    """Symlinks resolving outside repository root are strictly blocked before content reading."""
+    import os
+    import tempfile
+    from app.models.schemas import FunctionInfo, ParsedFile, SourceLocation
+    from app.services.ai.workflow_understanding import workflow_snippet_extractor
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        repo_dir = os.path.join(tmpdir, "my_repo")
+        secret_dir = os.path.join(tmpdir, "secret_outside")
+        os.makedirs(repo_dir)
+        os.makedirs(secret_dir)
+
+        # Create sensitive file outside repo
+        secret_file = os.path.join(secret_dir, "leak.py")
+        secret_content = "SECRET_TOKEN_DO_NOT_LEAK = 'super_secret_payload_12345'\n"
+        with open(secret_file, "w") as f:
+            f.write(secret_content)
+
+        # Create symlink inside repo pointing outside
+        symlink_file = os.path.join(repo_dir, "symlink_leak.py")
+        os.symlink(secret_file, symlink_file)
+
+        pf = ParsedFile(
+            file_path="symlink_leak.py",
+            language="Python",
+            status="success",
+            total_lines=10,
+            functions=[
+                FunctionInfo(
+                    name="leaked_func",
+                    file_path="symlink_leak.py",
+                    location=SourceLocation(file_path="symlink_leak.py", start_line=1, end_line=5, start_column=0, end_column=0),
+                    snippet=secret_content,
+                )
+            ],
+        )
+
+        snippet = workflow_snippet_extractor.extract_symbol_snippet(
+            parsed_file=pf,
+            symbol_name="leaked_func",
+            local_path=symlink_file,
+            repo_root=repo_dir,
+        )
+
+        assert snippet.is_complete is False
+        assert "<SNIPPET REDACTED: PATH_TRAVERSAL_DETECTED>" in snippet.formatted_code
+        assert "resolves outside canonical repository root" in snippet.exclusion_reason
+        # Confirm sensitive outside content is NEVER read or leaked
+        assert "super_secret_payload" not in snippet.formatted_code
+
+
+def test_candidate_discovery_budget_exhaustion_multi_tier_omissions():
+    """Budget exhaustion in Tier 1 halts subsequent tiers and reports explicit omission reasons."""
+    from app.models.schemas import (
+        ArchitecturalComponent,
+        ArchitectureSummary,
+        CallGraph,
+        CallGraphEdge,
+        CodeStructureSummary,
+        EntryPointCandidate,
+        FunctionInfo,
+        ImportantFileInfo,
+        ParsedFile,
+        RelationshipEvidence,
+        RepositoryKnowledge,
+        RepositoryMetadataInfo,
+        SourceLocation,
+        StatusEnum,
+    )
+    from app.services.ai.workflow_understanding import workflow_candidate_discoverer
+
+    # Construct high-edge call graph for Tier 1 entry points (more than 500 edges)
+    edges = []
+    pfs = []
+    entry_points = []
+
+    # 100 entry points, each generating 6 edges (total 600 edges, exceeding the 500-edge budget)
+    for i in range(100):
+        fn_name = f"cli_{i}"
+        file_name = f"cmd_{i}.py"
+        entry_points.append(EntryPointCandidate(file_path=file_name, entry_type="python_main_guard", symbol_or_command=fn_name, confidence="high"))
+        pfs.append(
+            ParsedFile(
+                file_path=file_name,
+                language="Python",
+                status="success",
+                total_lines=50,
+                functions=[FunctionInfo(name=fn_name, file_path=file_name, location=SourceLocation(file_path=file_name, start_line=1, end_line=10, start_column=0, end_column=0))],
+            )
+        )
+        for d1 in range(2):
+            n1 = f"step_{i}_{d1}"
+            edges.append(CallGraphEdge(caller=f"{file_name}:{fn_name}", callee=f"s1_{i}.py:{n1}", call_name=n1, resolution_status="resolved_internal", evidence=RelationshipEvidence(file_path=file_name, line_number=10, evidence_type="function_call")))
+            for d2 in range(2):
+                n2 = f"sub_{i}_{d1}_{d2}"
+                edges.append(CallGraphEdge(caller=f"s1_{i}.py:{n1}", callee=f"s2_{i}.py:{n2}", call_name=n2, resolution_status="resolved_internal", evidence=RelationshipEvidence(file_path=f"s1_{i}.py", line_number=20, evidence_type="function_call")))
+
+    # Tier 2 API components
+    api_comp = ArchitecturalComponent(
+        file_path="api/routes.py",
+        category="api_route",
+        confidence="high",
+        evidence=["FastAPI router decorator"],
+    )
+    pfs.append(
+        ParsedFile(
+            file_path="api/routes.py",
+            language="Python",
+            status="success",
+            total_lines=50,
+            functions=[FunctionInfo(name="get_users", file_path="api/routes.py", location=SourceLocation(file_path="api/routes.py", start_line=1, end_line=10, start_column=0, end_column=0))],
+        )
+    )
+
+    # Tier 3 library symbols
+    important_files = [
+        ImportantFileInfo(
+            relative_path="lib/core.py",
+            category="core_logic",
+            score=10.0,
+            reason="Core library file",
+            evidence="High out-degree",
+        )
+    ]
+    edges.append(
+        CallGraphEdge(
+            caller="lib/core.py:compute",
+            callee="lib/math.py:add",
+            call_name="add",
+            resolution_status="resolved_internal",
+            evidence=RelationshipEvidence(file_path="lib/core.py", line_number=5, evidence_type="function_call"),
+        )
+    )
+
+    mock_knowledge = RepositoryKnowledge(
+        schema_version="1.0",
+        repository=RepositoryMetadataInfo(name="test/budget", owner="test", repository_url="https://github.com/test/budget", clone_status=StatusEnum.COMPLETED),
+        project_overview={"readme_available": True},
+        technology_stack={"languages": []},
+        repository_structure={"total_directories": 2, "total_files": 12},
+        statistics={},
+        dependency_information={"nodes": [], "edges": []},
+        code_structure=CodeStructureSummary(parsed_files_count=len(pfs), supported_languages=["Python"], files=pfs),
+        architecture=ArchitectureSummary(
+            dependency_graph={"nodes": [], "edges": []},
+            call_graph=CallGraph(edges=edges),
+            components=[api_comp],
+        ),
+        entry_points=entry_points,
+        important_files=important_files,
+        analysis_metadata={"created_at": "2026-11-05T00:00:00Z"},
+    )
+
+    result = workflow_candidate_discoverer.discover_candidates(mock_knowledge)
+    # Tier 2 and Tier 3 must NOT have explored any edges
+    assert len(result.omitted_candidate_workflows) > 0
+    # Confirm explicit omission reasons for budget exhaustion
+    omitted_text = " ".join(result.omitted_candidate_workflows)
+    assert "Candidate exploration budget reached (500 edges examined)" in omitted_text
+    assert "architectural API components omitted without exploration" in omitted_text
+
+
+

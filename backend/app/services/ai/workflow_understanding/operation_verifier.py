@@ -8,12 +8,14 @@ Implements receiver-aware and semantics-aware verification:
    - ORM .add()/.save() (write) vs .delete() (delete).
    - Dynamic/unresolved SQL query expressions -> 'unresolved_dynamic_sql'.
    - Bare .commit() without preceding write evidence does NOT establish a write.
-   - Eliminates receiver-name false positives without supporting import evidence.
+   - Enforces receiver identity (assignments, parameter types, session protocols)
+     so importing SQLAlchemy elsewhere does not validate arbitrary objects.
 2. External API operations:
-   - Identifiable HTTP clients (requests, httpx, aiohttp, urllib, boto3, stripe, etc.).
-   - Explicitly establishes HTTP client identity backed by import evidence and aliases.
-   - Rejects arbitrary or generic object/dictionary methods (.get()).
-   - Uses verified terminology: 'statically identified outbound HTTP operation'.
+   - Separates explicit HTTP client operations (requests, httpx, aiohttp, urllib)
+     from recognized third-party SDK operations (boto3, stripe, openai, anthropic, etc.).
+   - Explicit HTTP clients -> 'http_request' / 'statically identified outbound HTTP operation'.
+   - Recognized SDK operations -> 'external_sdk_call' / 'statically identified external SDK operation'.
+   - Generic client.get() or arbitrary methods without receiver identity remain unresolved.
 3. Language scope:
    - Deep AST verification is Python-only in this milestone.
    - Non-Python languages return conservative unresolved results.
@@ -35,11 +37,6 @@ logger = logging.getLogger(__name__)
 SQL_READ_PATTERN = re.compile(r"^\s*(SELECT|PRAGMA|EXPLAIN)\b", re.IGNORECASE)
 SQL_WRITE_PATTERN = re.compile(r"^\s*(INSERT\s+INTO|UPDATE|CREATE\s+TABLE|ALTER\s+TABLE)\b", re.IGNORECASE)
 SQL_DELETE_PATTERN = re.compile(r"^\s*(DELETE\s+FROM|DROP\s+TABLE|TRUNCATE)\b", re.IGNORECASE)
-
-# Known database receiver names
-DB_RECEIVER_NAMES: Set[str] = {
-    "cursor", "cur", "session", "db", "conn", "connection", "engine", "client", "repo", "repository"
-}
 
 # Recognized persistent database and ORM libraries
 DB_OR_ORM_LIBRARIES: Set[str] = {
@@ -79,20 +76,27 @@ ORM_LIBRARIES: Set[str] = {
     "mongoengine",
 }
 
-# Recognized HTTP client libraries
-HTTP_LIBRARIES: Set[str] = {
+# Explicit HTTP client libraries
+EXPLICIT_HTTP_LIBRARIES: Set[str] = {
     "requests",
     "httpx",
     "aiohttp",
     "urllib",
     "urllib.request",
     "urllib3",
+}
+
+# Recognized third-party SDK libraries
+RECOGNIZED_SDK_LIBRARIES: Set[str] = {
     "boto3",
     "botocore",
     "google.cloud",
     "stripe",
     "openai",
     "anthropic",
+    "github",
+    "twilio",
+    "slack_sdk",
 }
 
 # Known non-HTTP dictionary / map receivers to reject
@@ -140,7 +144,7 @@ class ExternalAPIVerificationResult:
         self,
         external_api_library_detected: bool = False,
         external_api_operation_verified: bool = False,
-        external_api_operation_type: str = "none",  # "http_request", "none"
+        external_api_operation_type: str = "none",  # "http_request", "external_sdk_call", "none"
         external_api_status: str = "no_external_api_operation_detected",
         external_api_detail: Optional[str] = None,
         observed_operation: Optional[str] = None,
@@ -184,7 +188,7 @@ class OperationVerifier:
     ) -> StorageVerificationResult:
         """
         Parses source code and identifies grounded storage reads, writes, and deletes.
-        Requires import evidence before treating variable names as database connections.
+        Requires import evidence and receiver identity before treating receivers as database/ORM connections.
         Non-Python languages receive conservative unresolved results.
         """
         if language.lower() not in ("python", "py"):
@@ -206,6 +210,9 @@ class OperationVerifier:
         has_pathlib = "pathlib" in modules or "Path" in aliases
         has_shutil = "shutil" in modules
 
+        # Inspect receiver identities from assignments, types, and protocols
+        identities = self._inspect_receiver_identities(tree.root_node, calls, has_db_lib, has_orm_lib)
+
         has_preceding_write = False
         saw_bare_commit = False
         saw_unresolved_sql = False
@@ -216,11 +223,16 @@ class OperationVerifier:
 
         for call in calls:
             receiver, method, first_arg, second_arg, line = call
+            rec_id = identities.get(receiver or "", "unresolved")
 
             # 1. SQL Database via .execute()
             if method == "execute":
-                # Must have database library import evidence to accept receiver as database connection
-                if has_db_lib and (not receiver or receiver.lower() in DB_RECEIVER_NAMES):
+                is_cursor = (rec_id == "db_cursor")
+                # Also recognize direct connection execute if supported
+                if not is_cursor and rec_id == "db_connection":
+                    is_cursor = True
+
+                if is_cursor:
                     if first_arg and (first_arg.startswith(('"', "'"))):
                         clean_sql = first_arg.strip("'\"")
                         if SQL_WRITE_PATTERN.search(clean_sql):
@@ -250,24 +262,24 @@ class OperationVerifier:
                         unresolved_sql_detail = f"Dynamic or unresolved SQL query expression passed to .execute(): {first_arg}"
                         evidence_line = line
 
-            # 2. ORM .add() or .save() - Requires ORM library import evidence
-            elif method in ("add", "save") and has_orm_lib and (receiver and receiver.lower() in ("session", "db", "db.session", "repo")):
+            # 2. ORM .add() or .save() - Requires established ORM session identity
+            elif method in ("add", "save") and rec_id == "orm_session":
                 has_preceding_write = True
                 verified_op_type = "write"
                 observed_op = f"ORM entity write via .{method}()"
                 evidence_line = line
                 break
 
-            # 3. ORM .delete() - Requires ORM library import evidence
-            elif method == "delete" and has_orm_lib and (receiver and receiver.lower() in ("session", "db", "db.session", "repo")):
+            # 3. ORM .delete() - Requires established ORM session identity
+            elif method == "delete" and rec_id == "orm_session":
                 has_preceding_write = True
                 verified_op_type = "delete"
                 observed_op = "ORM entity delete via .delete()"
                 evidence_line = line
                 break
 
-            # 4. ORM .commit() - Requires database/ORM library import evidence
-            elif method == "commit" and has_db_lib and (receiver and receiver.lower() in ("session", "db", "db.session", "conn")):
+            # 4. ORM .commit() - Requires established ORM session or database connection identity
+            elif method == "commit" and rec_id in ("orm_session", "db_connection"):
                 saw_bare_commit = True
                 evidence_line = line
 
@@ -326,7 +338,7 @@ class OperationVerifier:
                 break
 
             # 11. File handle .write()
-            elif method in ("write", "writelines") and receiver and receiver.lower() in ("f", "file", "fp", "handle", "out"):
+            elif method in ("write", "writelines") and receiver and (rec_id == "file_handle" or receiver.lower() in ("f", "file", "fp", "handle", "out")):
                 has_preceding_write = True
                 verified_op_type = "write"
                 observed_op = f"File write call via .{method}()"
@@ -334,7 +346,7 @@ class OperationVerifier:
                 break
 
             # 12. File handle .read()
-            elif method in ("read", "readline", "readlines") and receiver and receiver.lower() in ("f", "file", "fp", "handle", "in_file"):
+            elif method in ("read", "readline", "readlines") and receiver and (rec_id == "file_handle" or receiver.lower() in ("f", "file", "fp", "handle", "in_file")):
                 if verified_op_type == "none":
                     verified_op_type = "read"
                     observed_op = f"File read call via .{method}()"
@@ -400,9 +412,9 @@ class OperationVerifier:
         file_imports: Optional[Union[Set[str], List[str], List[Any]]] = None,
     ) -> ExternalAPIVerificationResult:
         """
-        Parses source code and identifies grounded outbound HTTP/API requests.
-        Requires import evidence establishing HTTP client identity.
-        Rejects ordinary dictionary lookups (dict.get) and methods on arbitrary objects.
+        Parses source code and identifies grounded outbound HTTP or third-party SDK operations.
+        Separates explicit HTTP clients from recognized third-party SDK calls.
+        Rejects ordinary dictionary lookups (dict.get) and methods on arbitrary objects without identity evidence.
         """
         if language.lower() not in ("python", "py"):
             return ExternalAPIVerificationResult(
@@ -417,9 +429,16 @@ class OperationVerifier:
         modules, aliases = self._extract_imports(tree.root_node, file_imports)
         calls = self._collect_calls(tree.root_node)
 
-        http_modules = modules.intersection(HTTP_LIBRARIES)
-        http_aliases = {k: v for k, v in aliases.items() if any(lib in v for lib in HTTP_LIBRARIES)}
+        http_modules = modules.intersection(EXPLICIT_HTTP_LIBRARIES)
+        http_aliases = {k: v for k, v in aliases.items() if any(lib in v for lib in EXPLICIT_HTTP_LIBRARIES)}
         has_http_lib = bool(http_modules or http_aliases)
+
+        sdk_modules = modules.intersection(RECOGNIZED_SDK_LIBRARIES)
+        sdk_aliases = {k: v for k, v in aliases.items() if any(lib in v for lib in RECOGNIZED_SDK_LIBRARIES)}
+        has_sdk_lib = bool(sdk_modules or sdk_aliases)
+
+        # Inspect receiver identities
+        identities = self._inspect_receiver_identities(tree.root_node, calls, False, False)
 
         for call in calls:
             receiver, method, first_arg, second_arg, line = call
@@ -428,24 +447,18 @@ class OperationVerifier:
             if method == "get" and receiver and receiver.lower() in DICT_RECEIVER_NAMES:
                 continue
 
-            # Verify that receiver establishes genuine HTTP client identity backed by import evidence
-            is_http_receiver = False
-
-            if receiver and (receiver in HTTP_LIBRARIES or receiver.split(".")[0] in HTTP_LIBRARIES):
-                is_http_receiver = True
+            # 1. Check for Explicit HTTP client call
+            is_http_client = False
+            if receiver and (receiver in EXPLICIT_HTTP_LIBRARIES or receiver.split(".")[0] in EXPLICIT_HTTP_LIBRARIES):
+                is_http_client = True
             elif receiver and receiver in http_aliases:
-                is_http_receiver = True
-            elif has_http_lib and receiver and receiver.lower() in ("client", "http_client", "session", "api_client", "http"):
-                is_http_receiver = True
+                is_http_client = True
+            elif identities.get(receiver or "") == "http_client":
+                is_http_client = True
             elif (receiver is None or receiver in ("urllib", "urllib.request")) and method == "urlopen" and ("urllib" in modules or "urllib.request" in modules or "urlopen" in aliases):
-                is_http_receiver = True
+                is_http_client = True
 
-            if not is_http_receiver:
-                # Arbitrary object calling .get() or .post() without HTTP client evidence is rejected
-                continue
-
-            # Check HTTP methods on verified HTTP receivers
-            if method in ("get", "post", "put", "patch", "delete", "request", "urlopen"):
+            if is_http_client and method in ("get", "post", "put", "patch", "delete", "request", "urlopen"):
                 caller_desc = f"{receiver}.{method}()" if receiver else f"{method}()"
                 obs = f"statically identified outbound HTTP operation: {caller_desc}"
                 detail = f"statically identified outbound HTTP operation via {caller_desc}"
@@ -460,13 +473,161 @@ class OperationVerifier:
                     supporting_evidence=ev,
                 )
 
+            # 2. Check for Recognized third-party SDK call
+            is_sdk_call = False
+            if receiver and (receiver in RECOGNIZED_SDK_LIBRARIES or receiver.split(".")[0] in RECOGNIZED_SDK_LIBRARIES):
+                is_sdk_call = True
+            elif receiver and receiver in sdk_aliases:
+                is_sdk_call = True
+            elif identities.get(receiver or "") == "external_sdk":
+                is_sdk_call = True
+
+            if is_sdk_call and method in (
+                "get", "post", "put", "delete", "create", "list", "retrieve", "update",
+                "chat", "completions", "upload_file", "download_file", "put_object",
+                "get_object", "send", "publish"
+            ):
+                caller_desc = f"{receiver}.{method}()" if receiver else f"{method}()"
+                obs = f"statically identified external SDK operation: {caller_desc}"
+                detail = f"statically identified external SDK operation via {caller_desc}"
+                ev = [EvidenceReference(file_path=file_path, line_start=line, line_end=line, confidence="high")]
+                return ExternalAPIVerificationResult(
+                    external_api_library_detected=True,
+                    external_api_operation_verified=True,
+                    external_api_operation_type="external_sdk_call",
+                    external_api_status="external_api_operation_verified",
+                    external_api_detail=detail,
+                    observed_operation=obs,
+                    supporting_evidence=ev,
+                )
+
         return ExternalAPIVerificationResult(
-            external_api_library_detected=has_http_lib,
+            external_api_library_detected=(has_http_lib or has_sdk_lib),
             external_api_operation_verified=False,
             external_api_operation_type="none",
             external_api_status="no_external_api_operation_detected",
-            external_api_detail="No outbound external API requests detected in code evidence.",
+            external_api_detail="No outbound external API or recognized SDK requests detected in code evidence.",
         )
+
+    def _inspect_receiver_identities(
+        self,
+        root_node: tree_sitter.Node,
+        calls: List[Tuple[Optional[str], str, Optional[str], Optional[str], int]],
+        has_db_lib: bool,
+        has_orm_lib: bool,
+    ) -> Dict[str, str]:
+        """
+        Maps receiver variable names to established identities:
+        'orm_session', 'db_cursor', 'db_connection', 'http_client', 'external_sdk', 'file_handle'.
+        Uses assignments, with-statements, parameter type annotations, and protocol methods.
+        """
+        identities: Dict[str, str] = {}
+
+        # Pre-index calls by receiver
+        receiver_methods: Dict[str, Set[str]] = {}
+        for r, m, _, _, _ in calls:
+            if r:
+                receiver_methods.setdefault(r, set()).add(m)
+
+        # 1. Walk AST for assignments, typed parameters, and with-statements
+        stack = [root_node]
+        while stack:
+            n = stack.pop()
+
+            # Assignments: var = expr
+            if n.type == "assignment":
+                left = n.child_by_field_name("left")
+                right = n.child_by_field_name("right")
+                if left and right:
+                    l_text = left.text.decode("utf-8", errors="replace")
+                    r_text = right.text.decode("utf-8", errors="replace")
+
+                    if ".cursor(" in r_text:
+                        identities[l_text] = "db_cursor"
+                    elif any(fn in r_text for fn in ("sqlite3.connect", ".connect(", "create_engine(")):
+                        identities[l_text] = "db_connection"
+                    elif any(cls in r_text for cls in ("Session(", "SessionLocal(", "scoped_session(", "sessionmaker(", "get_db(", "get_session(")):
+                        identities[l_text] = "orm_session"
+                    elif any(cls in r_text for cls in ("requests.Session(", "httpx.Client(", "httpx.AsyncClient(", "aiohttp.ClientSession(")):
+                        identities[l_text] = "http_client"
+                    elif any(cls in r_text for cls in ("boto3.client(", "boto3.resource(", "openai.OpenAI(", "anthropic.Anthropic(", "stripe.")):
+                        identities[l_text] = "external_sdk"
+
+            # With statements: with expr as var:
+            elif n.type in ("with_statement", "with_clause", "with_item"):
+                item_node = n if n.type == "with_item" else None
+                if not item_node and n.type == "with_statement":
+                    clause = n.child_by_field_name("clause") or (n.children[0] if n.children else None)
+                    if clause and clause.type == "with_clause":
+                        item_node = clause.child_by_field_name("item") or (clause.children[0] if clause.children else None)
+
+                if item_node and item_node.type == "with_item":
+                    val_n = item_node.child_by_field_name("value")
+                    var_n = item_node.child_by_field_name("alias")
+                    if val_n and var_n:
+                        v_text = val_n.text.decode("utf-8", errors="replace")
+                        var_text = var_n.text.decode("utf-8", errors="replace")
+                        if "open(" in v_text:
+                            identities[var_text] = "file_handle"
+                        elif ".cursor(" in v_text:
+                            identities[var_text] = "db_cursor"
+                        elif ".connect(" in v_text:
+                            identities[var_text] = "db_connection"
+                        elif "Session(" in v_text or "SessionLocal(" in v_text:
+                            identities[var_text] = "orm_session"
+                        elif "httpx.Client" in v_text:
+                            identities[var_text] = "http_client"
+
+            # Typed parameters: def func(p: Type):
+            elif n.type == "function_definition":
+                params = n.child_by_field_name("parameters")
+                if params:
+                    for child in params.children:
+                        if child.type == "typed_parameter":
+                            p_name = child.child_by_field_name("name") or (child.children[0] if child.children else None)
+                            p_type = child.child_by_field_name("type") or (child.children[-1] if child.children else None)
+                            if p_name and p_type:
+                                name_str = p_name.text.decode("utf-8", errors="replace")
+                                type_str = p_type.text.decode("utf-8", errors="replace")
+                                if any(t in type_str for t in ("Session", "AsyncSession", "scoped_session")):
+                                    identities[name_str] = "orm_session"
+                                elif any(t in type_str for t in ("Cursor", "sqlite3.Cursor")):
+                                    identities[name_str] = "db_cursor"
+                                elif any(t in type_str for t in ("Connection", "Engine", "sqlite3.Connection")):
+                                    identities[name_str] = "db_connection"
+                                elif any(t in type_str for t in ("Client", "AsyncClient", "requests.Session")):
+                                    identities[name_str] = "http_client"
+
+            for c in reversed(n.children):
+                stack.append(c)
+
+        # 2. Chained ORM receivers
+        if has_orm_lib:
+            identities["db.session"] = "orm_session"
+            identities["self.session"] = "orm_session"
+
+        # 3. Protocol methods and standard DB/ORM receiver roles
+        for rec, meths in receiver_methods.items():
+            if rec in identities:
+                continue
+
+            # DB-API Cursor: cursor / cur calling execute
+            if has_db_lib and rec.lower() in ("cursor", "cur") and "execute" in meths:
+                identities[rec] = "db_cursor"
+            # DB-API Cursor: any receiver calling execute + fetch
+            elif has_db_lib and "execute" in meths and any(f in meths for f in ("fetchone", "fetchall", "fetchmany", "description", "rowcount")):
+                identities[rec] = "db_cursor"
+            # DB-API Connection: conn / connection calling cursor or execute
+            elif has_db_lib and rec.lower() in ("conn", "connection") and any(m in meths for m in ("cursor", "execute", "commit", "close")):
+                identities[rec] = "db_connection"
+            # ORM Session: session calling add/delete/commit
+            elif has_orm_lib and rec.lower() == "session" and any(m in meths for m in ("add", "delete", "commit", "rollback", "flush", "query")):
+                identities[rec] = "orm_session"
+            # ORM Session protocol: any receiver calling add/delete + commit/rollback/flush
+            elif has_orm_lib and any(m in meths for m in ("add", "delete")) and any(c in meths for c in ("commit", "rollback", "flush", "refresh", "query", "scalars")):
+                identities[rec] = "orm_session"
+
+        return identities
 
     def _extract_imports(
         self,
