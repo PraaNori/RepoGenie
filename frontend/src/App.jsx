@@ -14,6 +14,7 @@ export default function App() {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isSimulating, setIsSimulating] = useState(false);
   const [currentJob, setCurrentJob] = useState(null);
+  const [serverError, setServerError] = useState('');
 
   // Health check handler
   const checkHealth = useCallback(async () => {
@@ -32,44 +33,79 @@ export default function App() {
     checkHealth();
   }, [checkHealth]);
 
+  // Polling for live ingestion progress
+  useEffect(() => {
+    if (
+      currentView !== 'processing' ||
+      !currentJob ||
+      !backendStatus.connected ||
+      currentJob.job_id.startsWith('mock-')
+    ) {
+      return;
+    }
+
+    const isIngesting = currentJob.ingestion_status === 'in_progress' ||
+                        currentJob.stages?.[0]?.status === 'in_progress';
+
+    if (!isIngesting) {
+      return;
+    }
+
+    const timer = setInterval(async () => {
+      const res = await getJobStatus(currentJob.job_id);
+      if (res.success) {
+        setCurrentJob(res.data);
+      }
+    }, 1200);
+
+    return () => clearInterval(timer);
+  }, [currentView, currentJob, backendStatus.connected]);
+
   // Handle URL submission from Homepage
   const handleSubmitUrl = async (githubUrl) => {
+    setServerError('');
     setIsSubmitting(true);
 
-    const res = await createJob(githubUrl);
-    if (res.success) {
-      setCurrentJob(res.data);
-      setCurrentView('processing');
-    } else {
-      // If backend is unreachable or returned error
-      alert(`Backend Request Failed:\n${res.error}\n\nFalling back to local demo state for Milestone 1 evaluation.`);
-      const repoName = githubUrl.replace(/^https?:\/\/github\.com\//, '').replace(/\/$/, '');
-      const mockJob = {
-        job_id: 'mock-m1-' + Date.now(),
-        repo_name: repoName,
-        repo_url: githubUrl,
-        status: 'pending',
-        current_stage: 'Repository Fetching',
-        progress_percentage: 0,
-        stages: [
-          { id: 1, name: 'Repository Fetching', status: 'pending', detail: 'Ready to fetch repository' },
-          { id: 2, name: 'Repository Analysis', status: 'pending', detail: 'Waiting in queue' },
-          { id: 3, name: 'Code Understanding', status: 'pending', detail: 'Waiting in queue' },
-          { id: 4, name: 'AI Summary Generation', status: 'pending', detail: 'Waiting in queue' },
-          { id: 5, name: 'Script Generation', status: 'pending', detail: 'Waiting in queue' },
-          { id: 6, name: 'Storyboard Generation', status: 'pending', detail: 'Waiting in queue' },
-          { id: 7, name: 'Visual Generation', status: 'pending', detail: 'Waiting in queue' },
-          { id: 8, name: 'Voice Generation', status: 'pending', detail: 'Waiting in queue' },
-          { id: 9, name: 'Video Assembly', status: 'pending', detail: 'Waiting in queue' },
-        ],
-      };
-      setCurrentJob(mockJob);
-      setCurrentView('processing');
+    if (backendStatus.connected) {
+      const res = await createJob(githubUrl);
+      if (res.success) {
+        setCurrentJob(res.data);
+        setCurrentView('processing');
+      } else {
+        setServerError(res.error);
+      }
+      setIsSubmitting(false);
+      return;
     }
+
+    // Backend is offline, provide mock demo job
+    const repoName = githubUrl.replace(/^https?:\/\/(?:www\.)?github\.com\//, '').replace(/\/$/, '');
+    const mockJob = {
+      job_id: 'mock-m2-' + Date.now(),
+      repo_name: repoName,
+      repo_url: githubUrl,
+      status: 'pending',
+      current_stage: 'Repository Fetching',
+      progress_percentage: 0,
+      ingestion_status: 'pending',
+      stages: [
+        { id: 1, name: 'Repository Fetching', status: 'pending', detail: 'Ready to fetch repository' },
+        { id: 2, name: 'Repository Analysis', status: 'pending', detail: 'Waiting in queue' },
+        { id: 3, name: 'Code Understanding', status: 'pending', detail: 'Waiting in queue' },
+        { id: 4, name: 'AI Summary Generation', status: 'pending', detail: 'Waiting in queue' },
+        { id: 5, name: 'Script Generation', status: 'pending', detail: 'Waiting in queue' },
+        { id: 6, name: 'Storyboard Generation', status: 'pending', detail: 'Waiting in queue' },
+        { id: 7, name: 'Visual Generation', status: 'pending', detail: 'Waiting in queue' },
+        { id: 8, name: 'Voice Generation', status: 'pending', detail: 'Waiting in queue' },
+        { id: 9, name: 'Video Assembly', status: 'pending', detail: 'Waiting in queue' },
+      ],
+    };
+    setCurrentJob(mockJob);
+    setCurrentView('processing');
     setIsSubmitting(false);
   };
 
-  // Advance simulation step in Milestone 1
+  // Advance simulation step for remaining stages
   const handleSimulateStep = async () => {
     if (!currentJob) return;
 
@@ -136,6 +172,7 @@ export default function App() {
 
   const handleReset = () => {
     setCurrentJob(null);
+    setServerError('');
     setCurrentView('home');
   };
 
@@ -156,6 +193,8 @@ export default function App() {
               onSubmitUrl={handleSubmitUrl}
               isSubmitting={isSubmitting}
               backendOnline={backendStatus.connected}
+              serverError={serverError}
+              onClearError={() => setServerError('')}
             />
             <HowItWorks />
           </div>

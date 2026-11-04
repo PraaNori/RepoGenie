@@ -16,7 +16,7 @@ const SAMPLE_REPOS = [
   'https://github.com/expressjs/express',
 ];
 
-export default function UrlInputCard({ onSubmit, isSubmitting, backendOnline }) {
+export default function UrlInputCard({ onSubmit, isSubmitting, backendOnline, serverError, onClearError }) {
   const [url, setUrl] = useState('');
   const [validationError, setValidationError] = useState('');
 
@@ -25,7 +25,7 @@ export default function UrlInputCard({ onSubmit, isSubmitting, backendOnline }) 
     if (!trimmed) {
       return 'Please enter a GitHub repository URL.';
     }
-    const regex = /^https?:\/\/github\.com\/[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+(?:\.git)?\/?$/;
+    const regex = /^https?:\/\/(?:www\.)?github\.com\/[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+(?:\.git)?\/?(?:[?#].*)?$/;
     if (!regex.test(trimmed)) {
       return 'Please enter a valid public GitHub URL (e.g., https://github.com/owner/repository).';
     }
@@ -34,6 +34,8 @@ export default function UrlInputCard({ onSubmit, isSubmitting, backendOnline }) 
 
   const handleSubmit = (e) => {
     e.preventDefault();
+    if (isSubmitting) return;
+
     const error = validateUrl(url);
     if (error) {
       setValidationError(error);
@@ -44,9 +46,19 @@ export default function UrlInputCard({ onSubmit, isSubmitting, backendOnline }) 
   };
 
   const handleSelectSample = (sampleUrl) => {
+    if (isSubmitting) return;
     setUrl(sampleUrl);
     setValidationError('');
+    if (onClearError) onClearError();
   };
+
+  const handleInputChange = (e) => {
+    setUrl(e.target.value);
+    if (validationError) setValidationError('');
+    if (onClearError) onClearError();
+  };
+
+  const displayError = validationError || serverError;
 
   return (
     <div className="w-full max-w-3xl mx-auto">
@@ -64,13 +76,11 @@ export default function UrlInputCard({ onSubmit, isSubmitting, backendOnline }) 
               <input
                 type="text"
                 value={url}
-                onChange={(e) => {
-                  setUrl(e.target.value);
-                  if (validationError) setValidationError('');
-                }}
+                onChange={handleInputChange}
+                disabled={isSubmitting}
                 placeholder="https://github.com/owner/repository"
-                className={`w-full pl-11 pr-4 py-3.5 rounded-xl text-slate-900 bg-slate-50/70 border placeholder:text-slate-400 text-sm font-mono focus:bg-white focus:outline-none focus:ring-2 transition-all ${
-                  validationError
+                className={`w-full pl-11 pr-4 py-3.5 rounded-xl text-slate-900 bg-slate-50/70 border placeholder:text-slate-400 text-sm font-mono focus:bg-white focus:outline-none focus:ring-2 transition-all disabled:opacity-60 disabled:cursor-not-allowed ${
+                  displayError
                     ? 'border-rose-300 focus:ring-rose-200 focus:border-rose-400'
                     : 'border-slate-200 focus:ring-indigo-200 focus:border-indigo-500'
                 }`}
@@ -85,7 +95,7 @@ export default function UrlInputCard({ onSubmit, isSubmitting, backendOnline }) 
               {isSubmitting ? (
                 <>
                   <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                  <span>Initiating...</span>
+                  <span>Ingesting Repository...</span>
                 </>
               ) : (
                 <>
@@ -96,15 +106,15 @@ export default function UrlInputCard({ onSubmit, isSubmitting, backendOnline }) 
             </button>
           </div>
 
-          {validationError && (
-            <div className="flex items-center gap-2 text-xs text-rose-600 bg-rose-50 border border-rose-100 p-2.5 rounded-lg">
+          {displayError && (
+            <div className="flex items-center gap-2 text-xs text-rose-600 bg-rose-50 border border-rose-100 p-3 rounded-lg text-left">
               <AlertCircle className="w-4 h-4 flex-shrink-0" />
-              <span>{validationError}</span>
+              <span>{displayError}</span>
             </div>
           )}
 
           {!backendOnline && (
-            <div className="flex items-center gap-2 text-xs text-amber-700 bg-amber-50 border border-amber-200 p-2.5 rounded-lg">
+            <div className="flex items-center gap-2 text-xs text-amber-700 bg-amber-50 border border-amber-200 p-2.5 rounded-lg text-left">
               <AlertCircle className="w-4 h-4 flex-shrink-0" />
               <span>
                 Backend is currently offline. Ensure FastAPI is running on port 8000.
@@ -120,8 +130,9 @@ export default function UrlInputCard({ onSubmit, isSubmitting, backendOnline }) 
                 <button
                   key={sample}
                   type="button"
+                  disabled={isSubmitting}
                   onClick={() => handleSelectSample(sample)}
-                  className="text-xs px-2.5 py-1 rounded-md bg-slate-100 hover:bg-slate-200 text-slate-600 font-mono transition-colors"
+                  className="text-xs px-2.5 py-1 rounded-md bg-slate-100 hover:bg-slate-200 text-slate-600 font-mono transition-colors disabled:opacity-50"
                 >
                   {sample.replace('https://github.com/', '')}
                 </button>

@@ -2,7 +2,7 @@ import React from 'react';
 import { Film, Code, Sparkles, Cpu, Layers } from 'lucide-react';
 import UrlInputCard from './UrlInputCard';
 
-export default function HeroSection({ onSubmitUrl, isSubmitting, backendOnline }) {
+export default function HeroSection({ onSubmitUrl, isSubmitting, backendOnline, serverError, onClearError }) {
   return (
     <section className="pt-12 sm:pt-16 pb-14 text-center">
       <div className="max-w-4xl mx-auto px-4 sm:px-6">
@@ -29,7 +29,9 @@ export default function HeroSection({ onSubmitUrl, isSubmitting, backendOnline }
         <UrlInputCard 
           onSubmit={onSubmitUrl} 
           isSubmitting={isSubmitting} 
-          backendOnline={backendOnline} 
+          backendOnline={backendOnline}
+          serverError={serverError}
+          onClearError={onClearError}
         />
 
         {/* Feature Pills */}

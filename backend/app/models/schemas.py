@@ -1,7 +1,7 @@
 from datetime import datetime
 from enum import Enum
 from typing import Dict, List, Optional
-from pydantic import BaseModel, Field, HttpUrl
+from pydantic import BaseModel, Field
 
 class StageEnum(str, Enum):
     REPO_FETCHING = "Repository Fetching"
@@ -51,6 +51,10 @@ class JobResponse(BaseModel):
     job_id: str
     repo_url: str
     repo_name: str
+    repository_owner: Optional[str] = None
+    repository_name: Optional[str] = None
+    clone_url: Optional[str] = None
+    ingestion_status: StatusEnum = StatusEnum.PENDING
     status: StatusEnum
     current_stage: str
     progress_percentage: int

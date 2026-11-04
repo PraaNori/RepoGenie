@@ -1,3 +1,5 @@
+import os
+from pathlib import Path
 from typing import List
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -5,7 +7,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     APP_NAME: str = "RepoGenie API"
-    APP_VERSION: str = "0.1.0"
+    APP_VERSION: str = "0.2.0"
     APP_ENV: str = "development"
     DEBUG: bool = True
     PORT: int = 8000
@@ -14,8 +16,29 @@ class Settings(BaseSettings):
     # CORS configuration
     CORS_ORIGINS: str = "http://localhost:5173,http://127.0.0.1:5173"
 
+    # Storage paths
+    STORAGE_DIR: str = "./storage"
+    REPOS_DIR: str = "./storage/repos"
+
+    # Repository Ingestion limits
+    CLONE_TIMEOUT_SECONDS: int = 120
+    MAX_REPO_SIZE_MB: int = 500
+    CLONE_DEPTH: int = 1
+
     @property
     def cors_origins_list(self) -> List[str]:
         return [origin.strip() for origin in self.CORS_ORIGINS.split(",") if origin.strip()]
+
+    @property
+    def repos_path(self) -> Path:
+        base = Path(self.REPOS_DIR)
+        base.mkdir(parents=True, exist_ok=True)
+        return base.resolve()
+
+    @property
+    def storage_path(self) -> Path:
+        base = Path(self.STORAGE_DIR)
+        base.mkdir(parents=True, exist_ok=True)
+        return base.resolve()
 
 settings = Settings()

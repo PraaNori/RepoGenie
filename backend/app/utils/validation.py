@@ -1,9 +1,8 @@
-"""Utility functions for RepoGenie."""
-import re
+"""Legacy validation utility, forwards to github_url parser."""
 from typing import Optional, Tuple
-
-GITHUB_URL_PATTERN = re.compile(
-    r"^https?://github\.com/(?P<owner>[a-zA-Z0-9_.-]+)/(?P<repo>[a-zA-Z0-9_.-]+?)(?:\.git)?/?$"
+from .github_url import (
+    GitHubURLValidationError,
+    parse_and_validate_github_url,
 )
 
 def parse_github_url(url: str) -> Optional[Tuple[str, str]]:
@@ -11,10 +10,8 @@ def parse_github_url(url: str) -> Optional[Tuple[str, str]]:
     Parses a GitHub URL into (owner, repo_name).
     Returns None if URL is invalid.
     """
-    cleaned = url.strip()
-    match = GITHUB_URL_PATTERN.match(cleaned)
-    if not match:
+    try:
+        parsed = parse_and_validate_github_url(url)
+        return parsed.owner, parsed.repo
+    except (GitHubURLValidationError, Exception):
         return None
-    owner = match.group("owner")
-    repo = match.group("repo")
-    return owner, repo

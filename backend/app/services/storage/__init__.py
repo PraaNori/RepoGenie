@@ -1,4 +1,4 @@
 """Storage package."""
-from .job_store import job_store, PIPELINE_STAGES
+from .job_store import JobInternal, PIPELINE_STAGES, job_store
 
-__all__ = ["job_store", "PIPELINE_STAGES"]
+__all__ = ["JobInternal", "PIPELINE_STAGES", "job_store"]

@@ -40,21 +40,29 @@ flowchart TD
 
 ---
 
-## Milestone 1 Status
+## Milestones Status
 
+### Milestone 1: Project Foundation & UI Skeleton
 - [x] Complete directory structure established
 - [x] React + Vite + Tailwind CSS frontend with light developer-tool aesthetic
-- [x] Three primary screens implemented:
-  - **Homepage**: Hero, central repository URL input card, sample repo shortcuts, How It Works breakdown
-  - **Processing Screen**: Real-time progress bar, 9-stage status tracker with pending/in-progress/completed states, simulation controls
-  - **Video Result Screen**: 1080p video player, repository metadata, tech stack badges, architectural breakdown, MP4 download button
-- [x] FastAPI backend initialized with modular structure:
-  - Configuration via `pydantic-settings`
-  - Health check endpoints (`/health` and `/api/v1/health`)
-  - Video generation job management (`/api/v1/jobs`)
-  - CORS middleware enabled for local development
-- [x] Live Frontend-to-Backend communication with real-time health indicator in the header
-- [x] Automated test suite passing (`pytest` for backend, Vite build for frontend)
+- [x] Three primary screens implemented (Homepage, Processing Screen with 9 stages, Video Result Screen)
+- [x] FastAPI backend with health check and job endpoints
+- [x] Frontend-backend integration verified
+
+### Milestone 2: Repository Processing
+- [x] **2.1 GitHub URL Processing**:
+  - Dedicated URL parser (`backend/app/utils/github_url.py`) supporting standard, `.git`, trailing-slash, and query/fragment variants
+  - Rejection of invalid URLs, non-GitHub domains, profiles, and organization roots
+  - Lightweight repository verification on GitHub
+- [x] **2.2 GitHub Repository Ingestion**:
+  - Secure GitPython shallow cloning (`--depth=1`) under `storage/repos/{job_id}`
+  - Non-overlapping target directory enforcement
+  - Configurable clone timeout (`CLONE_TIMEOUT_SECONDS`) and max size budget (`MAX_REPO_SIZE_MB`)
+  - Automatic directory cleanup on failed or timed-out clones
+  - Safe execution: zero script/code execution on cloned repositories
+  - Live frontend polling on the processing screen tracking repository fetching state
+- [ ] 2.3 Repository Structure & File Hierarchy Analysis
+- [ ] 2.4 AST Code Parsing with Tree-sitter
 
 ---
 
