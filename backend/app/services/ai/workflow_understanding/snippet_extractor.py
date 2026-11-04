@@ -6,7 +6,9 @@ Strictly enforces:
 - Max 25 lines per selected symbol.
 - Complete function/method boundaries with 1-indexed line numbers.
 - Exclusion of sensitive files (.env, secrets, credentials, keys).
-- Global snippet token/character budget limit.
+- Value-level secret redaction for hardcoded API keys, tokens, and credentials.
+- Path traversal prevention against repository directory escape.
+- Global snippet token/character budget limit (MAX_TOTAL_SNIPPET_CHARS).
 - Never executes repository code.
 """
 
@@ -86,16 +88,85 @@ class WorkflowSnippetExtractor:
         base = os.path.basename(file_path.replace("\\", "/").strip())
         return any(pat.match(base) for pat in SENSITIVE_FILE_PATTERNS)
 
+    def redact_embedded_secrets(self, code: str) -> str:
+        """
+        Redacts embedded API keys, access tokens, passwords, and private keys
+        from snippet text without exposing secret values.
+        """
+        if not code:
+            return code
+
+        # 1. Google API keys (AIza...)
+        code = re.sub(r"AIza[0-9A-Za-z\-_]{35}", "<REDACTED_SECRET>", code)
+
+        # 2. OpenAI / Anthropic API keys (sk-...)
+        code = re.sub(r"sk-(?:proj-|live-)?[A-Za-z0-9_\-]{20,}", "<REDACTED_SECRET>", code)
+
+        # 3. GitHub personal access tokens (ghp_..., gho_..., ghu_..., ghs_..., ghr_...)
+        code = re.sub(r"gh[pousr][_-][A-Za-z0-9_]{20,}", "<REDACTED_SECRET>", code)
+
+        # 4. AWS Access Key ID (AKIA...)
+        code = re.sub(r"AKIA[0-9A-Z]{16}", "<REDACTED_SECRET>", code)
+
+        # 5. Bearer tokens
+        code = re.sub(r"(?i)\bBearer\s+[A-Za-z0-9_\-\.]{20,}\b", "Bearer <REDACTED_SECRET>", code)
+
+        # 6. RSA / Private Key blocks
+        code = re.sub(
+            r"-----BEGIN [A-Z ]+ PRIVATE KEY-----[\s\S]*?-----END [A-Z ]+ PRIVATE KEY-----",
+            "-----BEGIN PRIVATE KEY-----\n<REDACTED_PRIVATE_KEY>\n-----END PRIVATE KEY-----",
+            code,
+        )
+
+        # 7. Explicit password/secret variable assignments: password = "..." / api_key = "..."
+        code = re.sub(
+            r"(?i)\b((?:api[_-]?key|secret[_-]?key|client[_-]?secret|password|passwd|auth[_-]?token|access[_-]?token)\s*=\s*)(['\"][^'\"]{8,}['\"])",
+            r'\1"<REDACTED_SECRET>"',
+            code,
+        )
+
+        return code
+
     def extract_symbol_snippet(
         self,
         parsed_file: Optional[ParsedFile],
         symbol_name: str,
         local_path: Optional[str] = None,
+        repo_root: Optional[str] = None,
     ) -> ExtractedWorkflowSnippet:
         """Extracts a bounded snippet for a function, method, or class symbol."""
         norm_path = (parsed_file.file_path if parsed_file else "").replace("\\", "/").strip().lstrip("/")
 
-        # Check sensitive file guard
+        # 1. Check path traversal guard
+        if ".." in norm_path or (local_path and ".." in local_path) or norm_path.startswith("/"):
+            clean = os.path.normpath(norm_path)
+            if clean.startswith("..") or "/../" in norm_path or norm_path.startswith("/") or clean.startswith("/"):
+                return ExtractedWorkflowSnippet(
+                    name=symbol_name,
+                    symbol_type="unknown",
+                    file_path=norm_path,
+                    line_start=1,
+                    line_end=1,
+                    formatted_code="<SNIPPET REDACTED: PATH_TRAVERSAL_DETECTED>",
+                    is_complete=False,
+                    exclusion_reason=f"File path '{norm_path}' attempts path traversal outside repository boundaries.",
+                )
+            if repo_root and local_path:
+                abs_repo = os.path.abspath(repo_root)
+                abs_file = os.path.abspath(local_path)
+                if os.path.commonpath([abs_repo, abs_file]) != abs_repo:
+                    return ExtractedWorkflowSnippet(
+                        name=symbol_name,
+                        symbol_type="unknown",
+                        file_path=norm_path,
+                        line_start=1,
+                        line_end=1,
+                        formatted_code="<SNIPPET REDACTED: PATH_TRAVERSAL_DETECTED>",
+                        is_complete=False,
+                        exclusion_reason=f"Path '{local_path}' escapes repository root '{repo_root}'.",
+                    )
+
+        # 2. Check sensitive file guard
         if self.is_sensitive_file(norm_path):
             return ExtractedWorkflowSnippet(
                 name=symbol_name,
@@ -157,7 +228,7 @@ class WorkflowSnippetExtractor:
         line_end = func.location.end_line
         total_lines = line_end - line_start + 1
 
-        raw_code = func.snippet or ""
+        raw_code = self.redact_embedded_secrets(func.snippet or "")
         docstring = self._extract_docstring(raw_code)
 
         if total_lines > self.MAX_SYMBOL_LINES:
@@ -194,7 +265,7 @@ class WorkflowSnippetExtractor:
         line_end = method.location.end_line
         total_lines = line_end - line_start + 1
 
-        raw_code = method.snippet or ""
+        raw_code = self.redact_embedded_secrets(method.snippet or "")
         docstring = self._extract_docstring(raw_code)
 
         if total_lines > self.MAX_SYMBOL_LINES:
@@ -230,7 +301,7 @@ class WorkflowSnippetExtractor:
         line_end = cls.location.end_line
         total_lines = line_end - line_start + 1
 
-        raw_code = cls.snippet or ""
+        raw_code = self.redact_embedded_secrets(cls.snippet or "")
         docstring = self._extract_docstring(raw_code)
 
         if total_lines > self.MAX_SYMBOL_LINES:
@@ -262,11 +333,17 @@ class WorkflowSnippetExtractor:
         )
 
     def _format_lines(self, lines: List[str], start_line: int) -> str:
-        """Formats code with accurate 1-indexed source line numbers."""
+        """Formats code with accurate 1-indexed source line numbers, strictly bounding character budget."""
         formatted: List[str] = []
+        total_chars = 0
         for idx, line in enumerate(lines):
             curr_line = start_line + idx
-            formatted.append(f"L{curr_line}: {line}")
+            line_str = f"L{curr_line}: {line}"
+            if total_chars + len(line_str) + 1 > self.MAX_TOTAL_SNIPPET_CHARS:
+                formatted.append(f"# ... [Snippet character budget limit reached ({self.MAX_TOTAL_SNIPPET_CHARS} chars)]")
+                break
+            formatted.append(line_str)
+            total_chars += len(line_str) + 1
         return "\n".join(formatted)
 
     def _get_signature_lines(self, code: str, max_lines: int = 6) -> List[str]:
@@ -283,7 +360,10 @@ class WorkflowSnippetExtractor:
             if start != -1:
                 end = stripped.find(quote, start + 3)
                 if end != -1:
-                    return stripped[start + 3 : end].strip()
+                    raw_doc = stripped[start + 3 : end].strip()
+                    if len(raw_doc) > 200:
+                        return raw_doc[:200] + "..."
+                    return raw_doc
         return None
 
 

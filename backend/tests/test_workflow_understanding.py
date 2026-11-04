@@ -980,6 +980,8 @@ def test_storage_verification_sql_select_read():
     from app.services.ai.workflow_understanding import operation_verifier
 
     code = """
+import sqlite3
+
 def fetch_user(cursor, user_id):
     cursor.execute("SELECT id, name FROM users WHERE id = ?", (user_id,))
     return cursor.fetchone()
@@ -995,6 +997,8 @@ def test_storage_verification_sql_insert_write():
     from app.services.ai.workflow_understanding import operation_verifier
 
     code = """
+import sqlite3
+
 def create_audit_log(cursor, msg):
     cursor.execute("INSERT INTO logs (message) VALUES (?)", (msg,))
 """
@@ -1032,7 +1036,9 @@ def test_storage_verification_bare_commit_not_a_write():
     from app.services.ai.workflow_understanding import operation_verifier
 
     code = """
-def just_commit(session):
+from sqlalchemy.orm import Session
+
+def just_commit(session: Session):
     # Only calls commit without any preceding add, insert, or write
     session.commit()
 """
@@ -1047,7 +1053,9 @@ def test_storage_verification_orm_operations():
     from app.services.ai.workflow_understanding import operation_verifier
 
     code_add = """
-def add_user(session, user):
+from sqlalchemy.orm import Session
+
+def add_user(session: Session, user):
     session.add(user)
     session.commit()
 """
@@ -1056,7 +1064,9 @@ def add_user(session, user):
     assert res_add.storage_operation_type == "write"
 
     code_del = """
-def remove_user(session, user):
+from sqlalchemy.orm import Session
+
+def remove_user(session: Session, user):
     session.delete(user)
     session.commit()
 """
@@ -1110,4 +1120,381 @@ def test_operation_verification_non_python_conservative():
     res_api = operation_verifier.verify_external_api_in_code(code, "api.go", language="Go")
     assert res_api.external_api_operation_verified is False
     assert "deep external API verification is supported for Python in Milestone 3.4" in res_api.external_api_detail
+
+
+# ===========================================================================
+# 8. Milestone 3.4 Phase 2 Audit Tests
+# ===========================================================================
+
+def test_candidate_discovery_high_branching_work_limits():
+    """Synthetic high-branching graph respects branching, visited node, and edge limits without explosion."""
+    from app.models.schemas import (
+        ArchitectureSummary,
+        CallGraph,
+        CallGraphEdge,
+        CodeStructureSummary,
+        EntryPointCandidate,
+        FunctionInfo,
+        ParsedFile,
+        RelationshipEvidence,
+        RepositoryKnowledge,
+        RepositoryMetadataInfo,
+        SourceLocation,
+        StatusEnum,
+    )
+    from app.services.ai.workflow_understanding import workflow_candidate_discoverer
+
+    # Create root seed with 10 outgoing edges, each pointing to 10 more edges
+    edges = []
+    parsed_files = [
+        ParsedFile(
+            file_path="root.py",
+            language="Python",
+            status="success",
+            total_lines=100,
+            functions=[FunctionInfo(name="entry", file_path="root.py", location=SourceLocation(file_path="root.py", start_line=1, end_line=10, start_column=0, end_column=0))],
+        )
+    ]
+
+    for i in range(10):
+        edges.append(
+            CallGraphEdge(
+                caller="root.py:entry",
+                callee=f"branch_{i}.py:step_{i}",
+                call_name=f"step_{i}",
+                resolution_status="resolved_internal",
+                evidence=RelationshipEvidence(file_path="root.py", line_number=10 + i, evidence_type="function_call"),
+            )
+        )
+        for j in range(10):
+            edges.append(
+                CallGraphEdge(
+                    caller=f"branch_{i}.py:step_{i}",
+                    callee=f"leaf_{i}_{j}.py:sub_{j}",
+                    call_name=f"sub_{j}",
+                    resolution_status="resolved_internal",
+                    evidence=RelationshipEvidence(file_path=f"branch_{i}.py", line_number=5 + j, evidence_type="function_call"),
+                )
+            )
+
+    mock_knowledge = RepositoryKnowledge(
+        schema_version="1.0",
+        repository=RepositoryMetadataInfo(name="test/highbranch", owner="test", repository_url="https://github.com/test/highbranch", clone_status=StatusEnum.COMPLETED),
+        project_overview={"readme_available": True},
+        technology_stack={"languages": []},
+        repository_structure={"total_directories": 1, "total_files": 20},
+        statistics={},
+        dependency_information={"nodes": [], "edges": []},
+        code_structure=CodeStructureSummary(parsed_files_count=1, supported_languages=["Python"], files=parsed_files),
+        architecture=ArchitectureSummary(dependency_graph={"nodes": [], "edges": []}, call_graph=CallGraph(edges=edges)),
+        entry_points=[EntryPointCandidate(file_path="root.py", entry_type="python_main_guard", symbol_or_command="entry", confidence="high")],
+        analysis_metadata={"created_at": "2026-11-05T00:00:00Z"},
+    )
+
+    result = workflow_candidate_discoverer.discover_candidates(mock_knowledge)
+    assert len(result.selected_ai_candidates) == 1
+    cand = result.selected_ai_candidates[0]
+    # Call chain must not explode; limited to max depth and max branches per step
+    assert len(cand.call_chain) <= 6
+    assert len(cand.participating_files) <= 10
+
+
+def test_candidate_ranking_all_five_criteria_affect_score():
+    """All 5 approved criteria (confidence, depth, call quality, file diversity, evidence completeness) affect score."""
+    from app.models.schemas import (
+        ArchitectureSummary,
+        CallGraph,
+        CallGraphEdge,
+        CodeStructureSummary,
+        EntryPointCandidate,
+        FunctionInfo,
+        ParsedFile,
+        RelationshipEvidence,
+        RepositoryKnowledge,
+        RepositoryMetadataInfo,
+        SourceLocation,
+        StatusEnum,
+    )
+    from app.services.ai.workflow_understanding import workflow_candidate_discoverer
+
+    # Rich multi-file workflow with verified lines and internal calls
+    rich_edges = [
+        CallGraphEdge(caller="main.py:run", callee="service.py:process", call_name="process", resolution_status="resolved_internal", evidence=RelationshipEvidence(file_path="main.py", line_number=10, evidence_type="function_call")),
+        CallGraphEdge(caller="service.py:process", callee="db.py:save", call_name="save", resolution_status="resolved_internal", evidence=RelationshipEvidence(file_path="service.py", line_number=25, evidence_type="function_call")),
+        CallGraphEdge(caller="db.py:save", callee="audit.py:log", call_name="log", resolution_status="resolved_internal", evidence=RelationshipEvidence(file_path="db.py", line_number=40, evidence_type="function_call")),
+    ]
+
+    # Shallow single-file workflow with external unresolved call and no line numbers
+    shallow_edges = [
+        CallGraphEdge(caller="util.py:helper", callee="external_lib:foo", call_name="foo", resolution_status="unresolved_external", evidence=RelationshipEvidence(file_path="util.py", line_number=None, evidence_type="function_call")),
+    ]
+
+    pfs = [
+        ParsedFile(file_path="main.py", language="Python", status="success", total_lines=50, functions=[FunctionInfo(name="run", file_path="main.py", location=SourceLocation(file_path="main.py", start_line=1, end_line=20, start_column=0, end_column=0))]),
+        ParsedFile(file_path="util.py", language="Python", status="success", total_lines=50, functions=[FunctionInfo(name="helper", file_path="util.py", location=SourceLocation(file_path="util.py", start_line=1, end_line=20, start_column=0, end_column=0))]),
+    ]
+
+    mock_knowledge = RepositoryKnowledge(
+        schema_version="1.0",
+        repository=RepositoryMetadataInfo(name="test/ranking", owner="test", repository_url="https://github.com/test/ranking", clone_status=StatusEnum.COMPLETED),
+        project_overview={"readme_available": True},
+        technology_stack={"languages": []},
+        repository_structure={"total_directories": 1, "total_files": 2},
+        statistics={},
+        dependency_information={"nodes": [], "edges": []},
+        code_structure=CodeStructureSummary(parsed_files_count=2, supported_languages=["Python"], files=pfs),
+        architecture=ArchitectureSummary(dependency_graph={"nodes": [], "edges": []}, call_graph=CallGraph(edges=rich_edges + shallow_edges)),
+        entry_points=[
+            EntryPointCandidate(file_path="main.py", entry_type="python_main_guard", symbol_or_command="run", confidence="high"),
+            EntryPointCandidate(file_path="util.py", entry_type="python_main_guard", symbol_or_command="helper", confidence="medium"),
+        ],
+        analysis_metadata={"created_at": "2026-11-05T00:00:00Z"},
+    )
+
+    result = workflow_candidate_discoverer.discover_candidates(mock_knowledge)
+    assert len(result.selected_ai_candidates) == 2
+    rich_cand = [c for c in result.selected_ai_candidates if c.entry_symbol == "run"][0]
+    shallow_cand = [c for c in result.selected_ai_candidates if c.entry_symbol == "helper"][0]
+
+    # Rich candidate must significantly outscore shallow candidate
+    assert rich_cand.score > shallow_cand.score
+    # Rich candidate has 4 participating files, 3 hops, 100% internal calls, 100% line evidence
+    assert rich_cand.score >= 15.0
+
+
+def test_candidate_deduplication_preserves_distinct_leaf_operations():
+    """Candidates sharing the same entry point but with diverging terminal leaves are preserved."""
+    from app.services.ai.workflow_understanding.candidate_discoverer import (
+        CandidateCallNode,
+        DiscoveredWorkflowCandidate,
+        workflow_candidate_discoverer,
+    )
+
+    # Cand 1: main -> parse -> login -> save_session (terminal = save_session)
+    cand1 = DiscoveredWorkflowCandidate(
+        candidate_id="cand-1",
+        name="Save Session Workflow",
+        category="user_request",
+        entry_symbol="run",
+        entry_file="cli.py",
+        trigger="CLI run",
+        call_chain=[
+            CandidateCallNode(caller_file="cli.py", caller_symbol="run", callee_file="parser.py", callee_symbol="parse", call_name="parse", call_site_line=10, call_graph_edge_id="e1", call_site_id="s1"),
+            CandidateCallNode(caller_file="parser.py", caller_symbol="parse", callee_file="auth.py", callee_symbol="login", call_name="login", call_site_line=20, call_graph_edge_id="e2", call_site_id="s2"),
+            CandidateCallNode(caller_file="auth.py", caller_symbol="login", callee_file="db.py", callee_symbol="save_session", call_name="save_session", call_site_line=30, call_graph_edge_id="e3", call_site_id="s3"),
+        ],
+        score=10.0,
+    )
+
+    # Cand 2: main -> parse -> login -> export_metrics (terminal = export_metrics)
+    cand2 = DiscoveredWorkflowCandidate(
+        candidate_id="cand-2",
+        name="Export Metrics Workflow",
+        category="user_request",
+        entry_symbol="run",
+        entry_file="cli.py",
+        trigger="CLI run",
+        call_chain=[
+            CandidateCallNode(caller_file="cli.py", caller_symbol="run", callee_file="parser.py", callee_symbol="parse", call_name="parse", call_site_line=10, call_graph_edge_id="e1", call_site_id="s1"),
+            CandidateCallNode(caller_file="parser.py", caller_symbol="parse", callee_file="auth.py", callee_symbol="login", call_name="login", call_site_line=20, call_graph_edge_id="e2", call_site_id="s2"),
+            CandidateCallNode(caller_file="auth.py", caller_symbol="login", callee_file="report.py", callee_symbol="export_metrics", call_name="export_metrics", call_site_line=35, call_graph_edge_id="e4", call_site_id="s4"),
+        ],
+        score=9.5,
+    )
+
+    # Even though edge overlap is 2/3 (67%), let's test that diverging terminal leaves are NEVER merged
+    deduped, reasons = workflow_candidate_discoverer._deduplicate_candidates([cand1, cand2])
+    assert len(deduped) == 2
+    assert {c.candidate_id for c in deduped} == {"cand-1", "cand-2"}
+
+    # Cand 3: Identical terminal operation as cand 1 (save_session) with >=70% overlap
+    cand3 = DiscoveredWorkflowCandidate(
+        candidate_id="cand-3",
+        name="Duplicate Save Session",
+        category="user_request",
+        entry_symbol="run",
+        entry_file="cli.py",
+        trigger="CLI run",
+        call_chain=[
+            CandidateCallNode(caller_file="cli.py", caller_symbol="run", callee_file="parser.py", callee_symbol="parse", call_name="parse", call_site_line=10, call_graph_edge_id="e1", call_site_id="s1"),
+            CandidateCallNode(caller_file="parser.py", caller_symbol="parse", callee_file="auth.py", callee_symbol="login", call_name="login", call_site_line=20, call_graph_edge_id="e2", call_site_id="s2"),
+            CandidateCallNode(caller_file="auth.py", caller_symbol="login", callee_file="db.py", callee_symbol="save_session", call_name="save_session", call_site_line=30, call_graph_edge_id="e3", call_site_id="s3"),
+        ],
+        score=8.0,
+    )
+    deduped2, reasons2 = workflow_candidate_discoverer._deduplicate_candidates([cand1, cand3])
+    assert len(deduped2) == 1
+    assert deduped2[0].candidate_id == "cand-1"
+    assert len(reasons2) == 1
+    assert "deduplicated into 'Save Session Workflow'" in reasons2[0]
+
+
+def test_storage_verification_rejects_misleading_receiver_without_import():
+    """Misleading receiver names (cursor, db, session) without DB library import are rejected."""
+    from app.services.ai.workflow_understanding import operation_verifier
+
+    code = """
+def process_data(cursor, db, session):
+    cursor.execute("SELECT * FROM users")
+    session.add(item)
+    session.commit()
+"""
+    res = operation_verifier.verify_storage_in_code(code, "handler.py")
+    assert res.storage_operation_verified is False
+    assert res.storage_library_detected is False
+    assert res.persistence_status == "no_storage_operation_detected"
+
+
+def test_storage_verification_dynamic_sql_unresolved():
+    """Dynamic SQL query expressions result in unresolved_dynamic_sql status."""
+    from app.services.ai.workflow_understanding import operation_verifier
+
+    code_var = """
+import sqlite3
+
+def run_query(cursor, query_str):
+    cursor.execute(query_str)
+"""
+    res_var = operation_verifier.verify_storage_in_code(code_var, "db.py")
+    assert res_var.storage_operation_verified is False
+    assert res_var.storage_library_detected is True
+    assert res_var.storage_operation_type == "unresolved"
+    assert res_var.persistence_status == "unresolved_dynamic_sql"
+    assert "Dynamic or unresolved SQL query" in res_var.persistence_detail
+
+
+def test_storage_verification_filesystem_extended_operations():
+    """Path.write_text, Path.read_text, Path.unlink, and os.remove are verified."""
+    from app.services.ai.workflow_understanding import operation_verifier
+
+    code_write = """
+from pathlib import Path
+
+def save_file(content):
+    p = Path("log.txt")
+    p.write_text(content)
+"""
+    res_w = operation_verifier.verify_storage_in_code(code_write, "fs.py")
+    assert res_w.storage_operation_verified is True
+    assert res_w.storage_operation_type == "write"
+
+    code_read = """
+from pathlib import Path
+
+def read_file():
+    p = Path("log.txt")
+    return p.read_text()
+"""
+    res_r = operation_verifier.verify_storage_in_code(code_read, "fs.py")
+    assert res_r.storage_operation_verified is True
+    assert res_r.storage_operation_type == "read"
+
+    code_del = """
+import os
+
+def cleanup(path):
+    os.remove(path)
+"""
+    res_d = operation_verifier.verify_storage_in_code(code_del, "fs.py")
+    assert res_d.storage_operation_verified is True
+    assert res_d.storage_operation_type == "delete"
+
+
+def test_external_api_client_identity_verification():
+    """External API verification enforces HTTP client identity and uses verified terminology."""
+    from app.services.ai.workflow_understanding import operation_verifier
+
+    # 1. Arbitrary object calling .get() without HTTP import must be rejected
+    code_arbitrary = """
+def fetch_something(client):
+    return client.get("https://api.example.com/items")
+"""
+    res_arb = operation_verifier.verify_external_api_in_code(code_arbitrary, "client.py")
+    assert res_arb.external_api_operation_verified is False
+    assert res_arb.external_api_status == "no_external_api_operation_detected"
+
+    # 2. Aliased import: import requests as req -> req.get()
+    code_alias = """
+import requests as req
+
+def fetch_data():
+    return req.get("https://api.example.com/data")
+"""
+    res_alias = operation_verifier.verify_external_api_in_code(code_alias, "client.py")
+    assert res_alias.external_api_operation_verified is True
+    assert res_alias.external_api_operation_type == "http_request"
+    assert "statically identified outbound HTTP operation" in res_alias.observed_operation
+
+    # 3. httpx client with HTTP identity
+    code_httpx = """
+import httpx
+
+def post_event(payload):
+    client = httpx.Client()
+    return client.post("https://api.example.com/events", json=payload)
+"""
+    res_httpx = operation_verifier.verify_external_api_in_code(code_httpx, "client.py")
+    assert res_httpx.external_api_operation_verified is True
+    assert "statically identified outbound HTTP operation" in res_httpx.external_api_detail
+
+
+def test_snippet_extraction_path_traversal_rejection():
+    """Path traversal sequences (..) attempting directory escape are blocked."""
+    from app.models.schemas import FunctionInfo, ParsedFile, SourceLocation
+    from app.services.ai.workflow_understanding import workflow_snippet_extractor
+
+    pf_traversal = ParsedFile(
+        file_path="../../etc/passwd",
+        language="Python",
+        status="success",
+        total_lines=10,
+        functions=[FunctionInfo(name="leak", file_path="../../etc/passwd", location=SourceLocation(file_path="../../etc/passwd", start_line=1, end_line=5, start_column=0, end_column=0))],
+    )
+
+    snippet = workflow_snippet_extractor.extract_symbol_snippet(pf_traversal, "leak")
+    assert snippet.is_complete is False
+    assert "<SNIPPET REDACTED: PATH_TRAVERSAL_DETECTED>" in snippet.formatted_code
+    assert "path traversal" in snippet.exclusion_reason.lower()
+
+
+def test_snippet_extraction_secret_redaction():
+    """Embedded API keys, tokens, and credentials are redacted without leaking secret values."""
+    from app.models.schemas import FunctionInfo, ParsedFile, SourceLocation
+    from app.services.ai.workflow_understanding import workflow_snippet_extractor
+
+    # Build function snippet with hardcoded secrets
+    code_with_secrets = (
+        "def setup_client():\n"
+        "    api_key = \"AIzaSyD-1234567890abcdefghijklmnopqr\"\n"
+        "    openai_token = \"sk-proj-abcdef1234567890ghijklmnopqr\"\n"
+        "    gh_token = \"ghp_1234567890abcdefghijklmnopqrstuv\"\n"
+        "    aws_key = \"AKIAIOSFODNN7EXAMPLE\"\n"
+        "    headers = {\"Authorization\": \"Bearer my_auth_secret_token_123456789\"}\n"
+        "    password = \"my_super_secret_password_123\"\n"
+        "    return api_key\n"
+    )
+
+    func = FunctionInfo(
+        name="setup_client",
+        file_path="client.py",
+        location=SourceLocation(file_path="client.py", start_line=1, end_line=8, start_column=0, end_column=0),
+        snippet=code_with_secrets,
+    )
+    pf = ParsedFile(file_path="client.py", language="Python", status="success", total_lines=20, functions=[func])
+
+    snippet = workflow_snippet_extractor.extract_symbol_snippet(pf, "setup_client")
+    assert snippet.is_complete is True
+
+    # Confirm raw secret values never appear in formatted snippet
+    assert "AIzaSyD" not in snippet.formatted_code
+    assert "sk-proj-" not in snippet.formatted_code
+    assert "ghp_" not in snippet.formatted_code
+    assert "AKIAIOSFODNN7EXAMPLE" not in snippet.formatted_code
+    assert "my_auth_secret_token" not in snippet.formatted_code
+    assert "my_super_secret_password" not in snippet.formatted_code
+
+    # Confirm redaction placeholders are present
+    assert "<REDACTED_SECRET>" in snippet.formatted_code
+    assert "Bearer <REDACTED_SECRET>" in snippet.formatted_code
+
 

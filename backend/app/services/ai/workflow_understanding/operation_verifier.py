@@ -6,10 +6,14 @@ Implements receiver-aware and semantics-aware verification:
    - SQL SELECT (read) vs INSERT/UPDATE (write) vs DELETE (delete).
    - open(..., 'w') (write) vs open(..., 'r') (read).
    - ORM .add()/.save() (write) vs .delete() (delete).
+   - Dynamic/unresolved SQL query expressions -> 'unresolved_dynamic_sql'.
    - Bare .commit() without preceding write evidence does NOT establish a write.
+   - Eliminates receiver-name false positives without supporting import evidence.
 2. External API operations:
-   - Identifiable HTTP clients (requests, httpx, aiohttp, urllib, ClientSession).
-   - Rejects ordinary dictionary/object methods (dict.get).
+   - Identifiable HTTP clients (requests, httpx, aiohttp, urllib, boto3, stripe, etc.).
+   - Explicitly establishes HTTP client identity backed by import evidence and aliases.
+   - Rejects arbitrary or generic object/dictionary methods (.get()).
+   - Uses verified terminology: 'statically identified outbound HTTP operation'.
 3. Language scope:
    - Deep AST verification is Python-only in this milestone.
    - Non-Python languages return conservative unresolved results.
@@ -19,7 +23,7 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
 import tree_sitter
 import tree_sitter_python as tspython
 
@@ -37,14 +41,63 @@ DB_RECEIVER_NAMES: Set[str] = {
     "cursor", "cur", "session", "db", "conn", "connection", "engine", "client", "repo", "repository"
 }
 
-# Known HTTP client receivers
-HTTP_CLIENT_RECEIVERS: Set[str] = {
-    "requests", "httpx", "aiohttp", "urllib", "client", "http_client", "session", "api_client"
+# Recognized persistent database and ORM libraries
+DB_OR_ORM_LIBRARIES: Set[str] = {
+    "sqlite3",
+    "sqlalchemy",
+    "psycopg",
+    "psycopg2",
+    "asyncpg",
+    "pymongo",
+    "motor",
+    "tortoise",
+    "peewee",
+    "django",
+    "django.db",
+    "databases",
+    "redis",
+    "aioredis",
+    "mysql",
+    "mysql.connector",
+    "aiomysql",
+    "sqlmodel",
+    "pony",
+    "tinydb",
+    "alembic",
+}
+
+# Recognized ORM-specific libraries
+ORM_LIBRARIES: Set[str] = {
+    "sqlalchemy",
+    "sqlalchemy.orm",
+    "django",
+    "django.db.models",
+    "tortoise",
+    "peewee",
+    "sqlmodel",
+    "pony",
+    "mongoengine",
+}
+
+# Recognized HTTP client libraries
+HTTP_LIBRARIES: Set[str] = {
+    "requests",
+    "httpx",
+    "aiohttp",
+    "urllib",
+    "urllib.request",
+    "urllib3",
+    "boto3",
+    "botocore",
+    "google.cloud",
+    "stripe",
+    "openai",
+    "anthropic",
 }
 
 # Known non-HTTP dictionary / map receivers to reject
 DICT_RECEIVER_NAMES: Set[str] = {
-    "dict", "d", "my_dict", "kwargs", "params", "config", "headers", "mapping", "map", "data"
+    "dict", "d", "my_dict", "kwargs", "params", "config", "headers", "mapping", "map", "data", "row", "item"
 }
 
 
@@ -55,7 +108,7 @@ class StorageVerificationResult:
         self,
         storage_library_detected: bool = False,
         storage_operation_verified: bool = False,
-        storage_operation_type: str = "none",  # "read", "write", "delete", "none"
+        storage_operation_type: str = "none",  # "read", "write", "delete", "unresolved", "none"
         persistence_status: str = "no_storage_operation_detected",
         persistence_detail: Optional[str] = None,
         observed_operation: Optional[str] = None,
@@ -127,9 +180,11 @@ class OperationVerifier:
         source_code: str,
         file_path: str = "source.py",
         language: str = "Python",
+        file_imports: Optional[Union[Set[str], List[str], List[Any]]] = None,
     ) -> StorageVerificationResult:
         """
         Parses source code and identifies grounded storage reads, writes, and deletes.
+        Requires import evidence before treating variable names as database connections.
         Non-Python languages receive conservative unresolved results.
         """
         if language.lower() not in ("python", "py"):
@@ -142,10 +197,19 @@ class OperationVerifier:
             )
 
         tree = self._parser.parse(source_code.encode("utf-8"))
+        modules, aliases = self._extract_imports(tree.root_node, file_imports)
         calls = self._collect_calls(tree.root_node)
+
+        has_db_lib = bool(modules.intersection(DB_OR_ORM_LIBRARIES) or any(any(lib in v for lib in DB_OR_ORM_LIBRARIES) for v in aliases.values()))
+        has_orm_lib = bool(modules.intersection(ORM_LIBRARIES) or any(any(lib in v for lib in ORM_LIBRARIES) for v in aliases.values()))
+        has_os = "os" in modules
+        has_pathlib = "pathlib" in modules or "Path" in aliases
+        has_shutil = "shutil" in modules
 
         has_preceding_write = False
         saw_bare_commit = False
+        saw_unresolved_sql = False
+        unresolved_sql_detail: Optional[str] = None
         verified_op_type = "none"
         observed_op: Optional[str] = None
         evidence_line: Optional[int] = None
@@ -155,8 +219,9 @@ class OperationVerifier:
 
             # 1. SQL Database via .execute()
             if method == "execute":
-                if not receiver or receiver.lower() in DB_RECEIVER_NAMES:
-                    if first_arg:
+                # Must have database library import evidence to accept receiver as database connection
+                if has_db_lib and (not receiver or receiver.lower() in DB_RECEIVER_NAMES):
+                    if first_arg and (first_arg.startswith(('"', "'"))):
                         clean_sql = first_arg.strip("'\"")
                         if SQL_WRITE_PATTERN.search(clean_sql):
                             has_preceding_write = True
@@ -175,33 +240,39 @@ class OperationVerifier:
                                 verified_op_type = "read"
                                 observed_op = f"Database SQL query (read-only): '{clean_sql[:50]}...'"
                                 evidence_line = line
-                else:
-                    # Unknown receiver for execute
-                    pass
+                        else:
+                            saw_unresolved_sql = True
+                            unresolved_sql_detail = f"Unrecognized SQL statement command type: '{clean_sql[:40]}'"
+                            evidence_line = line
+                    else:
+                        # Dynamic SQL variable or formatting expression
+                        saw_unresolved_sql = True
+                        unresolved_sql_detail = f"Dynamic or unresolved SQL query expression passed to .execute(): {first_arg}"
+                        evidence_line = line
 
-            # 2. ORM .add() or .save()
-            elif method in ("add", "save") and (not receiver or receiver.lower() in ("session", "db", "repo")):
+            # 2. ORM .add() or .save() - Requires ORM library import evidence
+            elif method in ("add", "save") and has_orm_lib and (receiver and receiver.lower() in ("session", "db", "db.session", "repo")):
                 has_preceding_write = True
                 verified_op_type = "write"
                 observed_op = f"ORM entity write via .{method}()"
                 evidence_line = line
                 break
 
-            # 3. ORM .delete()
-            elif method == "delete" and (not receiver or receiver.lower() in ("session", "db", "repo")):
+            # 3. ORM .delete() - Requires ORM library import evidence
+            elif method == "delete" and has_orm_lib and (receiver and receiver.lower() in ("session", "db", "db.session", "repo")):
                 has_preceding_write = True
                 verified_op_type = "delete"
                 observed_op = "ORM entity delete via .delete()"
                 evidence_line = line
                 break
 
-            # 4. ORM .commit()
-            elif method == "commit" and (not receiver or receiver.lower() in ("session", "db", "conn")):
+            # 4. ORM .commit() - Requires database/ORM library import evidence
+            elif method == "commit" and has_db_lib and (receiver and receiver.lower() in ("session", "db", "db.session", "conn")):
                 saw_bare_commit = True
+                evidence_line = line
 
             # 5. File System open()
             elif method == "open" and not receiver:
-                # Inspect mode argument (second_arg)
                 mode = second_arg.strip("'\"").lower() if second_arg else "r"
                 if any(m in mode for m in ("w", "a", "x")):
                     has_preceding_write = True
@@ -215,7 +286,46 @@ class OperationVerifier:
                         observed_op = f"File system read: open(..., mode='{mode}')"
                         evidence_line = line
 
-            # 6. File handle .write()
+            # 6. Path.write_text() / Path.write_bytes()
+            elif method in ("write_text", "write_bytes") and (has_pathlib or (receiver and "path" in receiver.lower())):
+                has_preceding_write = True
+                verified_op_type = "write"
+                observed_op = f"File system write via Path.{method}()"
+                evidence_line = line
+                break
+
+            # 7. Path.read_text() / Path.read_bytes()
+            elif method in ("read_text", "read_bytes") and (has_pathlib or (receiver and "path" in receiver.lower())):
+                if verified_op_type == "none":
+                    verified_op_type = "read"
+                    observed_op = f"File system read via Path.{method}()"
+                    evidence_line = line
+
+            # 8. File deletion: os.remove() / os.unlink()
+            elif method in ("remove", "unlink") and (receiver == "os" or (has_os and receiver in ("os", "pathlib"))):
+                has_preceding_write = True
+                verified_op_type = "delete"
+                observed_op = f"File system deletion via os.{method}()"
+                evidence_line = line
+                break
+
+            # 9. Path.unlink()
+            elif method == "unlink" and (has_pathlib or (receiver and "path" in receiver.lower())):
+                has_preceding_write = True
+                verified_op_type = "delete"
+                observed_op = "File system deletion via Path.unlink()"
+                evidence_line = line
+                break
+
+            # 10. Directory deletion: shutil.rmtree()
+            elif method == "rmtree" and (receiver == "shutil" or has_shutil):
+                has_preceding_write = True
+                verified_op_type = "delete"
+                observed_op = "File directory tree deletion via shutil.rmtree()"
+                evidence_line = line
+                break
+
+            # 11. File handle .write()
             elif method in ("write", "writelines") and receiver and receiver.lower() in ("f", "file", "fp", "handle", "out"):
                 has_preceding_write = True
                 verified_op_type = "write"
@@ -223,7 +333,7 @@ class OperationVerifier:
                 evidence_line = line
                 break
 
-            # 7. File handle .read()
+            # 12. File handle .read()
             elif method in ("read", "readline", "readlines") and receiver and receiver.lower() in ("f", "file", "fp", "handle", "in_file"):
                 if verified_op_type == "none":
                     verified_op_type = "read"
@@ -255,8 +365,17 @@ class OperationVerifier:
                 supporting_evidence=ev,
             )
 
+        if saw_unresolved_sql:
+            return StorageVerificationResult(
+                storage_library_detected=True,
+                storage_operation_verified=False,
+                storage_operation_type="unresolved",
+                persistence_status="unresolved_dynamic_sql",
+                persistence_detail=unresolved_sql_detail or "Dynamic or unresolved SQL query expression passed to .execute().",
+                observed_operation="Dynamic SQL execution",
+            )
+
         if saw_bare_commit and not has_preceding_write:
-            # Bare commit without preceding write evidence does not establish persistence
             return StorageVerificationResult(
                 storage_library_detected=True,
                 storage_operation_verified=False,
@@ -266,7 +385,7 @@ class OperationVerifier:
             )
 
         return StorageVerificationResult(
-            storage_library_detected=False,
+            storage_library_detected=has_db_lib or has_orm_lib,
             storage_operation_verified=False,
             storage_operation_type="none",
             persistence_status="no_storage_operation_detected",
@@ -278,10 +397,12 @@ class OperationVerifier:
         source_code: str,
         file_path: str = "source.py",
         language: str = "Python",
+        file_imports: Optional[Union[Set[str], List[str], List[Any]]] = None,
     ) -> ExternalAPIVerificationResult:
         """
         Parses source code and identifies grounded outbound HTTP/API requests.
-        Rejects ordinary dictionary lookups (e.g. dict.get).
+        Requires import evidence establishing HTTP client identity.
+        Rejects ordinary dictionary lookups (dict.get) and methods on arbitrary objects.
         """
         if language.lower() not in ("python", "py"):
             return ExternalAPIVerificationResult(
@@ -293,7 +414,12 @@ class OperationVerifier:
             )
 
         tree = self._parser.parse(source_code.encode("utf-8"))
+        modules, aliases = self._extract_imports(tree.root_node, file_imports)
         calls = self._collect_calls(tree.root_node)
+
+        http_modules = modules.intersection(HTTP_LIBRARIES)
+        http_aliases = {k: v for k, v in aliases.items() if any(lib in v for lib in HTTP_LIBRARIES)}
+        has_http_lib = bool(http_modules or http_aliases)
 
         for call in calls:
             receiver, method, first_arg, second_arg, line = call
@@ -302,50 +428,120 @@ class OperationVerifier:
             if method == "get" and receiver and receiver.lower() in DICT_RECEIVER_NAMES:
                 continue
 
-            # Check HTTP methods on verified HTTP receivers
-            if method in ("get", "post", "put", "patch", "delete", "request"):
-                if receiver and (
-                    receiver.lower() in HTTP_CLIENT_RECEIVERS
-                    or "client" in receiver.lower()
-                    or "session" in receiver.lower()
-                    or "http" in receiver.lower()
-                ):
-                    clean_arg = first_arg.strip("'\"") if first_arg else ""
-                    # Check if argument looks like a URL or endpoint path
-                    is_url = bool(re.match(r"^(https?://|/|\{)", clean_arg)) or "url" in clean_arg.lower()
-                    obs = f"Outbound HTTP {method.upper()} request via {receiver}.{method}()"
-                    ev = [EvidenceReference(file_path=file_path, line_start=line, line_end=line, confidence="high")]
-                    return ExternalAPIVerificationResult(
-                        external_api_library_detected=True,
-                        external_api_operation_verified=True,
-                        external_api_operation_type="http_request",
-                        external_api_status="external_api_operation_verified",
-                        external_api_detail=obs,
-                        observed_operation=obs,
-                        supporting_evidence=ev,
-                    )
+            # Verify that receiver establishes genuine HTTP client identity backed by import evidence
+            is_http_receiver = False
 
-            # urllib urlopen
-            if method == "urlopen" and (not receiver or "urllib" in receiver.lower()):
-                obs = "Outbound HTTP request via urllib.request.urlopen()"
+            if receiver and (receiver in HTTP_LIBRARIES or receiver.split(".")[0] in HTTP_LIBRARIES):
+                is_http_receiver = True
+            elif receiver and receiver in http_aliases:
+                is_http_receiver = True
+            elif has_http_lib and receiver and receiver.lower() in ("client", "http_client", "session", "api_client", "http"):
+                is_http_receiver = True
+            elif (receiver is None or receiver in ("urllib", "urllib.request")) and method == "urlopen" and ("urllib" in modules or "urllib.request" in modules or "urlopen" in aliases):
+                is_http_receiver = True
+
+            if not is_http_receiver:
+                # Arbitrary object calling .get() or .post() without HTTP client evidence is rejected
+                continue
+
+            # Check HTTP methods on verified HTTP receivers
+            if method in ("get", "post", "put", "patch", "delete", "request", "urlopen"):
+                caller_desc = f"{receiver}.{method}()" if receiver else f"{method}()"
+                obs = f"statically identified outbound HTTP operation: {caller_desc}"
+                detail = f"statically identified outbound HTTP operation via {caller_desc}"
                 ev = [EvidenceReference(file_path=file_path, line_start=line, line_end=line, confidence="high")]
                 return ExternalAPIVerificationResult(
                     external_api_library_detected=True,
                     external_api_operation_verified=True,
                     external_api_operation_type="http_request",
                     external_api_status="external_api_operation_verified",
-                    external_api_detail=obs,
+                    external_api_detail=detail,
                     observed_operation=obs,
                     supporting_evidence=ev,
                 )
 
         return ExternalAPIVerificationResult(
-            external_api_library_detected=False,
+            external_api_library_detected=has_http_lib,
             external_api_operation_verified=False,
             external_api_operation_type="none",
             external_api_status="no_external_api_operation_detected",
             external_api_detail="No outbound external API requests detected in code evidence.",
         )
+
+    def _extract_imports(
+        self,
+        root_node: tree_sitter.Node,
+        file_imports: Optional[Union[Set[str], List[str], List[Any]]] = None,
+    ) -> Tuple[Set[str], Dict[str, str]]:
+        """Extracts imported module names and aliases from AST and optional file_imports."""
+        modules: Set[str] = set()
+        aliases: Dict[str, str] = {}
+
+        # 1. Inspect AST for import statements
+        stack = [root_node]
+        while stack:
+            n = stack.pop()
+            if n.type == "import_statement":
+                for child in n.children:
+                    if child.type == "dotted_name":
+                        mod = child.text.decode("utf-8", errors="replace")
+                        modules.add(mod)
+                        modules.add(mod.split(".")[0])
+                    elif child.type == "aliased_import":
+                        name_n = child.child_by_field_name("name")
+                        alias_n = child.child_by_field_name("alias")
+                        if name_n and alias_n:
+                            mod = name_n.text.decode("utf-8", errors="replace")
+                            alias = alias_n.text.decode("utf-8", errors="replace")
+                            modules.add(mod)
+                            modules.add(mod.split(".")[0])
+                            aliases[alias] = mod
+            elif n.type == "import_from_statement":
+                mod_n = n.child_by_field_name("module_name")
+                mod_name = mod_n.text.decode("utf-8", errors="replace") if mod_n else ""
+                if mod_name:
+                    modules.add(mod_name)
+                    modules.add(mod_name.split(".")[0])
+
+                seen_import_kw = False
+                for child in n.children:
+                    if child.type == "import":
+                        seen_import_kw = True
+                        continue
+                    if not seen_import_kw:
+                        continue
+                    if child.type == "aliased_import":
+                        name_n = child.child_by_field_name("name")
+                        alias_n = child.child_by_field_name("alias")
+                        if name_n and alias_n:
+                            sym = name_n.text.decode("utf-8", errors="replace")
+                            alias = alias_n.text.decode("utf-8", errors="replace")
+                            full = f"{mod_name}.{sym}" if mod_name else sym
+                            aliases[alias] = full
+                    elif child.type in ("dotted_name", "identifier"):
+                        sym = child.text.decode("utf-8", errors="replace")
+                        full = f"{mod_name}.{sym}" if mod_name else sym
+                        aliases[sym] = full
+
+            for c in reversed(n.children):
+                stack.append(c)
+
+        # 2. Add external file_imports if provided
+        if file_imports:
+            for item in file_imports:
+                if isinstance(item, str):
+                    modules.add(item)
+                    modules.add(item.split(".")[0])
+                elif hasattr(item, "module"):
+                    mod = getattr(item, "module", "")
+                    alias = getattr(item, "alias", None)
+                    if mod:
+                        modules.add(mod)
+                        modules.add(mod.split(".")[0])
+                    if alias:
+                        aliases[alias] = mod
+
+        return modules, aliases
 
     def _collect_calls(
         self, root_node: tree_sitter.Node

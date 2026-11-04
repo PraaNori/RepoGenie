@@ -62,6 +62,7 @@ class DiscoveredWorkflowCandidate(BaseModel):
     is_library_flow: bool = False
     is_recursive: bool = False
     seed_type: str = "entry_point"          # "entry_point", "api_route", "library_symbol"
+    omission_reasons: List[str] = Field(default_factory=list)
 
 
 class CandidateDiscoveryResult(BaseModel):
@@ -81,6 +82,10 @@ class WorkflowCandidateDiscoverer:
     MAX_DEPTH = 4
     MAX_AI_CANDIDATES = 2
     MAX_STRUCTURAL_CHAINS = 2
+    MAX_BRANCHES_PER_NODE = 2
+    MAX_VISITED_NODES_PER_SEED = 25
+    MAX_PATHS_EXPLORED_PER_SEED = 50
+    MAX_EDGES_EXAMINED_PER_RUN = 500
 
     def discover_candidates(self, knowledge: RepositoryKnowledge) -> CandidateDiscoveryResult:
         """Discovers, traces, ranks, and deduplicates workflow candidates from RepositoryKnowledge."""
@@ -95,6 +100,10 @@ class WorkflowCandidateDiscoverer:
             for f in getattr(getattr(knowledge, "code_structure", None), "files", [])
         }
 
+        # Shared traversal stats to bound global work across seeds
+        traversal_stats: Dict[str, int] = {"edges_examined": 0}
+        omitted_reasons: List[str] = []
+
         # 1. Collect candidate seeds
         raw_candidates: List[DiscoveredWorkflowCandidate] = []
         seen_entry_keys: Set[Tuple[str, str]] = set()
@@ -102,6 +111,11 @@ class WorkflowCandidateDiscoverer:
         # Seed Tier 1: High-confidence Entry Points
         entry_points = getattr(knowledge, "entry_points", []) or []
         for ep in entry_points:
+            if traversal_stats["edges_examined"] >= self.MAX_EDGES_EXAMINED_PER_RUN:
+                omitted_reasons.append(
+                    f"Candidate exploration budget reached ({self.MAX_EDGES_EXAMINED_PER_RUN} edges examined); remaining entry points omitted."
+                )
+                break
             seeds = self._extract_seeds_from_entry_point(ep, parsed_files_map)
             for file_path, symbol_name, trigger in seeds:
                 key = (file_path, symbol_name)
@@ -116,6 +130,7 @@ class WorkflowCandidateDiscoverer:
                     seed_type="entry_point",
                     edge_index=edge_index,
                     confidence_weight=3.0 if getattr(ep, "confidence", "medium") == "high" else 2.0,
+                    traversal_stats=traversal_stats,
                 )
                 if cand:
                     raw_candidates.append(cand)
@@ -123,6 +138,11 @@ class WorkflowCandidateDiscoverer:
         # Seed Tier 2: API Routes from Architectural Components
         arch_components = getattr(getattr(knowledge, "architecture", None), "components", []) or []
         for comp in arch_components:
+            if traversal_stats["edges_examined"] >= self.MAX_EDGES_EXAMINED_PER_RUN:
+                omitted_reasons.append(
+                    f"Candidate exploration budget reached ({self.MAX_EDGES_EXAMINED_PER_RUN} edges examined); remaining API components omitted."
+                )
+                break
             if getattr(comp, "category", "") in ("api_route", "entry_point"):
                 norm_path = comp.file_path.replace("\\", "/").strip().lstrip("/")
                 if norm_path in parsed_files_map:
@@ -142,6 +162,7 @@ class WorkflowCandidateDiscoverer:
                             seed_type="api_route",
                             edge_index=edge_index,
                             confidence_weight=2.5,
+                            traversal_stats=traversal_stats,
                         )
                         if cand:
                             raw_candidates.append(cand)
@@ -150,6 +171,11 @@ class WorkflowCandidateDiscoverer:
         if len(raw_candidates) < (self.MAX_AI_CANDIDATES + self.MAX_STRUCTURAL_CHAINS):
             library_seeds = self._extract_library_seeds(knowledge, edge_index, seen_entry_keys)
             for file_path, symbol_name, trigger in library_seeds:
+                if traversal_stats["edges_examined"] >= self.MAX_EDGES_EXAMINED_PER_RUN:
+                    omitted_reasons.append(
+                        f"Candidate exploration budget reached ({self.MAX_EDGES_EXAMINED_PER_RUN} edges examined); remaining library symbols omitted."
+                    )
+                    break
                 key = (file_path, symbol_name)
                 if key in seen_entry_keys:
                     continue
@@ -163,12 +189,13 @@ class WorkflowCandidateDiscoverer:
                     edge_index=edge_index,
                     confidence_weight=1.5,
                     is_library_flow=True,
+                    traversal_stats=traversal_stats,
                 )
                 if cand:
                     raw_candidates.append(cand)
 
-        # 2. Deduplicate candidates
-        deduplicated = self._deduplicate_candidates(raw_candidates)
+        # 2. Deduplicate candidates (protect distinct workflows with different terminal leaves)
+        deduplicated, dedup_reasons = self._deduplicate_candidates(raw_candidates)
 
         # 3. Sort by deterministic score descending
         deduplicated.sort(key=lambda c: (c.score, len(c.call_chain), len(c.participating_files)), reverse=True)
@@ -176,15 +203,18 @@ class WorkflowCandidateDiscoverer:
         total_discovered = len(deduplicated)
         ai_candidates = deduplicated[: self.MAX_AI_CANDIDATES]
         structural_candidates = deduplicated[self.MAX_AI_CANDIDATES : self.MAX_AI_CANDIDATES + self.MAX_STRUCTURAL_CHAINS]
-        omitted = [
+        
+        # Combine deduplication reasons, budget omissions, and per-candidate omission messages
+        budget_omitted = [
             f"Candidate '{c.name}' ({c.entry_file}:{c.entry_symbol}) omitted due to workflow budget limit."
             for c in deduplicated[self.MAX_AI_CANDIDATES + self.MAX_STRUCTURAL_CHAINS :]
         ]
+        all_omitted = dedup_reasons + omitted_reasons + budget_omitted
 
         return CandidateDiscoveryResult(
             selected_ai_candidates=ai_candidates,
             structural_call_chain_candidates=structural_candidates,
-            omitted_candidate_workflows=omitted,
+            omitted_candidate_workflows=all_omitted,
             total_candidates_discovered=total_discovered,
         )
 
@@ -265,6 +295,7 @@ class WorkflowCandidateDiscoverer:
         edge_index: Dict[str, List[CallGraphEdge]],
         confidence_weight: float,
         is_library_flow: bool = False,
+        traversal_stats: Optional[Dict[str, int]] = None,
     ) -> Optional[DiscoveredWorkflowCandidate]:
         """Traces directional CallGraph edges starting at file_path:symbol_name up to MAX_DEPTH."""
         norm_file = file_path.replace("\\", "/").strip().lstrip("/")
@@ -274,13 +305,29 @@ class WorkflowCandidateDiscoverer:
         visited_nodes: Set[str] = {root_node_id}
         participating_files: Set[str] = {norm_file}
         participating_symbols: Set[str] = {symbol_name}
+        omission_reasons: List[str] = []
         is_recursive = False
+        paths_explored = 0
 
         # DFS stack: (current_node_id, current_depth)
         frontier = [(root_node_id, 1)]
 
         while frontier and len(call_chain) < 5:
+            if len(visited_nodes) >= self.MAX_VISITED_NODES_PER_SEED:
+                omission_reasons.append(
+                    f"Per-seed visited node limit reached ({self.MAX_VISITED_NODES_PER_SEED} nodes visited); remaining path omitted."
+                )
+                break
+
+            if paths_explored >= self.MAX_PATHS_EXPLORED_PER_SEED:
+                omission_reasons.append(
+                    f"Per-seed path exploration limit reached ({self.MAX_PATHS_EXPLORED_PER_SEED} paths explored); remaining path omitted."
+                )
+                break
+
             curr_id, depth = frontier.pop(0)
+            paths_explored += 1
+
             if depth > self.MAX_DEPTH:
                 continue
 
@@ -289,7 +336,27 @@ class WorkflowCandidateDiscoverer:
                 bare = curr_id.split(":")[-1]
                 outgoing = edge_index.get(bare, [])
 
-            for edge in outgoing[:2]:  # Limit fan-out to 2 primary calls per step
+            # Deterministic ordering: prioritize resolved internal calls, then source line number, then callee
+            outgoing_sorted = sorted(
+                outgoing,
+                key=lambda e: (
+                    e.resolution_status != "resolved_internal",
+                    getattr(e.evidence, "line_number", 0) or 0,
+                    e.callee,
+                    e.call_name or "",
+                ),
+            )
+
+            # Limit fan-out to MAX_BRANCHES_PER_NODE (2 primary calls per step)
+            for edge in outgoing_sorted[: self.MAX_BRANCHES_PER_NODE]:
+                if traversal_stats is not None:
+                    traversal_stats["edges_examined"] = traversal_stats.get("edges_examined", 0) + 1
+                    if traversal_stats["edges_examined"] >= self.MAX_EDGES_EXAMINED_PER_RUN:
+                        omission_reasons.append(
+                            f"Global edge examination budget reached ({self.MAX_EDGES_EXAMINED_PER_RUN} edges); remaining exploration halted."
+                        )
+                        break
+
                 tgt = edge.callee.replace("\\", "/").strip().lstrip("/")
                 if tgt in visited_nodes:
                     is_recursive = True
@@ -330,10 +397,28 @@ class WorkflowCandidateDiscoverer:
                 if depth + 1 <= self.MAX_DEPTH:
                     frontier.append((tgt, depth + 1))
 
-        # Calculate deterministic composite score
-        depth_score = min(len(call_chain), 4) * 1.5
-        comp_diversity_score = len(participating_files) * 2.0
-        score = confidence_weight + depth_score + comp_diversity_score
+        # Calculate deterministic composite score using all 5 approved criteria:
+        # 1. Entry-point confidence / centrality
+        c_weight = confidence_weight
+
+        # 2. Call-chain depth (longer chains preferred up to depth 4)
+        depth_score = min(len(call_chain), self.MAX_DEPTH) * 1.5
+
+        # 3. Relevant-call quality (proportion of calls that are internal/resolved vs trivial builtins)
+        internal_calls = sum(1 for c in call_chain if c.is_internal)
+        quality_score = (internal_calls / max(len(call_chain), 1)) * 3.0
+
+        # 4. Unique participating files (multi-file workflows preferred over single-file scripts)
+        comp_diversity_score = min(len(participating_files), 4) * 2.0
+
+        # 5. Evidence completeness (proportion of steps with verified call-site line numbers)
+        ev_complete = sum(1 for c in call_chain if c.call_site_line > 0)
+        evidence_score = (ev_complete / max(len(call_chain), 1)) * 2.0
+
+        # Library penalty to prevent library utility functions from outranking meaningful application workflows
+        library_penalty = 1.0 if is_library_flow else 0.0
+
+        score = c_weight + depth_score + quality_score + comp_diversity_score + evidence_score - library_penalty
 
         cand_id = f"candidate-{norm_file.replace('/', '_')}-{symbol_name}".lower()
         title_name = f"{symbol_name.capitalize()} Workflow" if not is_library_flow else f"{symbol_name} Library Flow"
@@ -352,16 +437,19 @@ class WorkflowCandidateDiscoverer:
             is_library_flow=is_library_flow,
             is_recursive=is_recursive,
             seed_type=seed_type,
+            omission_reasons=omission_reasons,
         )
 
     def _deduplicate_candidates(
         self, candidates: List[DiscoveredWorkflowCandidate]
-    ) -> List[DiscoveredWorkflowCandidate]:
+    ) -> Tuple[List[DiscoveredWorkflowCandidate], List[str]]:
         """
-        Deduplicates candidate workflows sharing the same entry point and >70% of call edges.
-        Does not merge distinct workflows simply because they share common helper functions.
+        Deduplicates candidate workflows sharing the same entry point, >=70% call edges,
+        AND equivalent terminal/leaf operations.
+        Preserves distinct workflows with different downstream operations or target components.
         """
         deduped: List[DiscoveredWorkflowCandidate] = []
+        dedup_reasons: List[str] = []
 
         for cand in candidates:
             is_dup = False
@@ -372,16 +460,32 @@ class WorkflowCandidateDiscoverer:
                     edges_exist = {c.call_graph_edge_id for c in existing.call_chain}
                     if edges_cand and edges_exist:
                         overlap = len(edges_cand.intersection(edges_exist)) / max(len(edges_cand), len(edges_exist))
-                        if overlap >= 0.70:
+
+                        # Compare terminal / leaf operations
+                        cand_leaf = (cand.call_chain[-1].callee_file, cand.call_chain[-1].callee_symbol) if cand.call_chain else None
+                        exist_leaf = (existing.call_chain[-1].callee_file, existing.call_chain[-1].callee_symbol) if existing.call_chain else None
+
+                        # Only deduplicate if edge overlap >= 70% AND terminal leaf operations match
+                        if overlap >= 0.70 and cand_leaf == exist_leaf:
                             is_dup = True
+                            leaf_desc = cand_leaf[1] if cand_leaf else "none"
                             if cand.score > existing.score:
+                                dedup_reasons.append(
+                                    f"Candidate '{existing.name}' ({existing.entry_file}:{existing.entry_symbol}) deduplicated into '{cand.name}' "
+                                    f"(edge overlap: {overlap:.0%}, identical terminal operation '{leaf_desc}')."
+                                )
                                 deduped.remove(existing)
                                 deduped.append(cand)
+                            else:
+                                dedup_reasons.append(
+                                    f"Candidate '{cand.name}' ({cand.entry_file}:{cand.entry_symbol}) deduplicated into '{existing.name}' "
+                                    f"(edge overlap: {overlap:.0%}, identical terminal operation '{leaf_desc}')."
+                                )
                             break
             if not is_dup:
                 deduped.append(cand)
 
-        return deduped
+        return deduped, dedup_reasons
 
 
 workflow_candidate_discoverer = WorkflowCandidateDiscoverer()
