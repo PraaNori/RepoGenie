@@ -2,6 +2,7 @@ import logging
 from datetime import datetime, timezone
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, status
 from ...models.schemas import (
+    ArchitectureAnalysisResult,
     JobCreateRequest,
     JobResponse,
     ParsedRepository,
@@ -10,6 +11,7 @@ from ...models.schemas import (
     VideoResult,
 )
 from ...services.repo.analyzer import repo_analyzer_service
+from ...services.repo.architecture_analyzer import architecture_analyzer_service
 from ...services.repo.code_parser import code_parser_service
 from ...services.repo.ingest import (
     CloneExecutionError,
@@ -85,7 +87,6 @@ def run_ingestion_and_analysis_task(job_id: str, clone_url: str):
                     local_path=internal_job.local_path,
                     analysis=analysis_result,
                 )
-                job_store.update_job_code_parsing_success(job_id, code_analysis)
                 logger.info(
                     "Successfully parsed code for job %s: %d files, %d functions, %d classes",
                     job_id,
@@ -93,9 +94,31 @@ def run_ingestion_and_analysis_task(job_id: str, clone_url: str):
                     code_analysis.total_functions,
                     code_analysis.total_classes,
                 )
+
+                # Step 4: Milestone 2.5 Architecture and Dependency Relationship Analysis
+                architecture = architecture_analyzer_service.analyze_architecture(
+                    job_id=job_id,
+                    repo_name=internal_job.repo_name,
+                    parsed_repo=code_analysis,
+                    analysis=analysis_result,
+                    local_path=internal_job.local_path,
+                )
+                job_store.update_job_code_and_architecture_success(
+                    job_id=job_id,
+                    code_analysis=code_analysis,
+                    architecture=architecture,
+                )
+                logger.info(
+                    "Successfully analyzed architecture for job %s: %d internal dependencies, %d resolved calls, %d entry points, %d components",
+                    job_id,
+                    architecture.dependency_graph.total_internal_dependencies,
+                    architecture.call_graph.total_resolved_calls,
+                    len(architecture.entry_points),
+                    len(architecture.components),
+                )
             except Exception as exc:
                 job_store.update_job_code_parsing_failed(job_id, str(exc))
-                logger.exception("Code parsing failed for job %s: %s", job_id, exc)
+                logger.exception("Code parsing or architecture analysis failed for job %s: %s", job_id, exc)
 
     except DestinationExistsError as exc:
         job_store.update_job_ingestion_failed(job_id, str(exc))
@@ -265,6 +288,49 @@ def get_job_code_analysis(job_id: str):
             detail=f"Code parsing metadata is not ready for job '{job_id}'.",
         )
     return internal.code_analysis
+
+@router.get("/{job_id}/architecture", response_model=ArchitectureAnalysisResult)
+def get_job_architecture(job_id: str):
+    """
+    Get the detailed architecture and dependency relationship analysis (dependency graph, call graph, inheritance, entry points, components).
+    """
+    internal = job_store.get_internal_job(job_id)
+    if not internal:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Job with ID '{job_id}' not found",
+        )
+    if internal.ingestion_status == StatusEnum.FAILED:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Repository ingestion failed for job '{job_id}': {internal.error}",
+        )
+    if internal.ingestion_status in (StatusEnum.PENDING, StatusEnum.IN_PROGRESS):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Repository ingestion is still in progress for job '{job_id}'.",
+        )
+    if internal.stages[1].status in (StatusEnum.PENDING, StatusEnum.IN_PROGRESS):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Repository structure analysis is still in progress for job '{job_id}'.",
+        )
+    if internal.stages[2].status in (StatusEnum.PENDING, StatusEnum.IN_PROGRESS):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Architecture and code analysis is still in progress for job '{job_id}'.",
+        )
+    if not internal.architecture:
+        if internal.stages[2].status == StatusEnum.FAILED:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Architecture analysis failed: {internal.stages[2].detail}",
+            )
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Architecture analysis metadata is not ready for job '{job_id}'.",
+        )
+    return internal.architecture
 
 @router.post("/{job_id}/simulate-step", response_model=JobResponse)
 def simulate_job_step(job_id: str):

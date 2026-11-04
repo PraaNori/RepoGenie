@@ -125,6 +125,30 @@ export async function getJobCodeAnalysis(jobId) {
   }
 }
 
+export async function getJobArchitecture(jobId) {
+  try {
+    const response = await fetch(`${API_BASE_URL}/api/v1/jobs/${jobId}/architecture`, {
+      method: 'GET',
+      headers: {
+        'Accept': 'application/json',
+      },
+    });
+
+    const data = await response.json();
+
+    if (!response.ok) {
+      throw new Error(data.detail || `Failed to fetch architecture analysis (${response.status})`);
+    }
+
+    return { success: true, data };
+  } catch (error) {
+    return {
+      success: false,
+      error: error.message || 'Error checking architecture analysis',
+    };
+  }
+}
+
 export async function simulateJobStep(jobId) {
   try {
     const response = await fetch(`${API_BASE_URL}/api/v1/jobs/${jobId}/simulate-step`, {

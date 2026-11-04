@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from typing import Dict, List, Optional
 from pydantic import BaseModel
 from ...models.schemas import (
+    ArchitectureAnalysisResult,
     JobResponse,
     ParsedRepository,
     RepoAnalysisResult,
@@ -43,6 +44,7 @@ class JobInternal(BaseModel):
     updated_at: datetime
     analysis: Optional[RepoAnalysisResult] = None
     code_analysis: Optional[ParsedRepository] = None
+    architecture: Optional[ArchitectureAnalysisResult] = None
     result: Optional[VideoResult] = None
     error: Optional[str] = None
 
@@ -64,6 +66,7 @@ class JobInternal(BaseModel):
             updated_at=self.updated_at,
             analysis=self.analysis,
             code_analysis=self.code_analysis,
+            architecture=self.architecture,
             result=self.result,
             error=self.error,
         )
@@ -245,6 +248,34 @@ class JobStore:
             f"{code_analysis.total_classes} classes, "
             f"{code_analysis.total_methods} methods, "
             f"{code_analysis.total_imports} imports)"
+        )
+        job.progress_percentage = 33
+        # Set next stage ready (Stage 4: AI Summary Generation)
+        job.current_stage = PIPELINE_STAGES[3]
+        job.stages[3].status = StatusEnum.PENDING
+        job.stages[3].detail = "Ready for AI summary generation"
+        job.updated_at = now
+        return job
+
+    def update_job_code_and_architecture_success(
+        self,
+        job_id: str,
+        code_analysis: ParsedRepository,
+        architecture: ArchitectureAnalysisResult,
+    ) -> Optional[JobInternal]:
+        job = self._jobs.get(job_id)
+        if not job:
+            return None
+        now = datetime.now(timezone.utc)
+        job.code_analysis = code_analysis
+        job.architecture = architecture
+        job.stages[2].status = StatusEnum.COMPLETED
+        job.stages[2].completed_at = now
+        job.stages[2].detail = (
+            f"Parsed {code_analysis.total_parsed_files} files "
+            f"({architecture.dependency_graph.total_internal_dependencies} internal dependencies, "
+            f"{architecture.call_graph.total_resolved_calls} resolved calls, "
+            f"{len(architecture.entry_points)} entry points)"
         )
         job.progress_percentage = 33
         # Set next stage ready (Stage 4: AI Summary Generation)

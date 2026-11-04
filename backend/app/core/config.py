@@ -36,6 +36,12 @@ class Settings(BaseSettings):
     MAX_SNIPPET_LINES: int = 60             # Maximum lines for stored code snippet
     MAX_SNIPPET_CHARS: int = 2500           # Maximum characters for stored code snippet
 
+    # Architecture & Dependency Analysis limits (Milestone 2.5)
+    MAX_GRAPH_NODES: int = 1000             # Maximum nodes in dependency and call graphs
+    MAX_GRAPH_EDGES: int = 5000             # Maximum edges in dependency and call graphs
+    MAX_RELATIONSHIPS_PER_FILE: int = 100   # Maximum extracted relationships per file
+    MAX_UNRESOLVED_REFS_RETAINED: int = 500 # Maximum unresolved references stored
+
     @property
     def cors_origins_list(self) -> List[str]:
         return [origin.strip() for origin in self.CORS_ORIGINS.split(",") if origin.strip()]

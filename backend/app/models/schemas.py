@@ -184,6 +184,99 @@ class ParsedRepository(BaseModel):
     parsing_status: StatusEnum = StatusEnum.COMPLETED
     warnings: List[str] = []
 
+# --- Milestone 2.5: Architecture & Dependency Relationship Analysis Models ---
+
+class RelationshipEvidence(BaseModel):
+    evidence_type: str  # "import_statement", "function_call", "class_inheritance", "instantiation", "type_annotation", "main_guard", "configuration"
+    statement: Optional[str] = None
+    file_path: str
+    line_number: Optional[int] = None
+    confidence: str = "high"  # "high", "medium", "low"
+
+class DependencyNode(BaseModel):
+    id: str  # repository-relative file path or external package name
+    label: str
+    node_type: str  # "internal_file", "external_package", "unresolved"
+    language: Optional[str] = None
+
+class DependencyEdge(BaseModel):
+    source: str
+    target: str
+    relationship_type: str = "imports"  # "imports", "re_exports"
+    is_internal: bool
+    resolution_status: str  # "resolved_internal", "external_package", "unresolved"
+    evidence: RelationshipEvidence
+
+class DependencyGraph(BaseModel):
+    nodes: List[DependencyNode] = []
+    edges: List[DependencyEdge] = []
+    total_internal_dependencies: int = 0
+    total_external_dependencies: int = 0
+    total_unresolved_dependencies: int = 0
+    circular_dependencies: List[List[str]] = []
+
+class CallGraphNode(BaseModel):
+    id: str  # "path/to/file.py:scope.function"
+    name: str
+    file_path: str
+    enclosing_class: Optional[str] = None
+
+class CallGraphEdge(BaseModel):
+    caller: str
+    callee: str
+    call_name: str
+    resolution_status: str  # "resolved_internal", "external_or_unresolved"
+    evidence: RelationshipEvidence
+
+class CallGraph(BaseModel):
+    nodes: List[CallGraphNode] = []
+    edges: List[CallGraphEdge] = []
+    total_resolved_calls: int = 0
+    total_unresolved_calls: int = 0
+
+class InheritanceRelationship(BaseModel):
+    child_class: str
+    child_file: str
+    parent_class: str
+    parent_file: Optional[str] = None
+    relationship_type: str = "inherits"  # "inherits", "implements", "extends"
+    resolution_status: str = "resolved_internal"  # "resolved_internal", "external_or_unresolved"
+    evidence: RelationshipEvidence
+
+class ClassReference(BaseModel):
+    source_class: Optional[str] = None
+    source_file: str
+    referenced_class: str
+    referenced_file: Optional[str] = None
+    reference_type: str  # "instantiation", "type_annotation", "usage"
+    evidence: RelationshipEvidence
+
+class EntryPointCandidate(BaseModel):
+    file_path: str
+    entry_type: str  # "python_main_guard", "application_entry_file", "framework_app_instance", "java_main_method", "go_main", "rust_main", "c_cpp_main", "package_script", "docker_entrypoint"
+    symbol_or_command: Optional[str] = None
+    confidence: str  # "high", "medium", "low"
+    evidence: List[RelationshipEvidence] = []
+
+class ArchitecturalComponent(BaseModel):
+    file_path: str
+    category: str  # "entry_point", "api_route", "service", "repository_or_dao", "model", "database", "frontend", "utility", "test", "configuration", "external_integration", "unknown"
+    confidence: str  # "high", "medium", "low"
+    evidence: List[str] = []
+
+class ArchitectureAnalysisResult(BaseModel):
+    job_id: str
+    repository_name: str
+    dependency_graph: DependencyGraph
+    call_graph: CallGraph
+    inheritance_relationships: List[InheritanceRelationship] = []
+    class_references: List[ClassReference] = []
+    entry_points: List[EntryPointCandidate] = []
+    components: List[ArchitecturalComponent] = []
+    component_counts: Dict[str, int] = {}
+    analysis_status: StatusEnum = StatusEnum.COMPLETED
+    warnings: List[str] = []
+
 # --- Main Job Models ---
 
 class JobResponse(BaseModel):
@@ -202,5 +295,6 @@ class JobResponse(BaseModel):
     updated_at: datetime
     analysis: Optional[RepoAnalysisResult] = None
     code_analysis: Optional[ParsedRepository] = None
+    architecture: Optional[ArchitectureAnalysisResult] = None
     result: Optional[VideoResult] = None
     error: Optional[str] = None

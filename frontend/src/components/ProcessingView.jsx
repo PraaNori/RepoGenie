@@ -24,7 +24,11 @@ import {
   Layers,
   Cpu,
   Hash,
-  Terminal
+  Terminal,
+  Network,
+  Compass,
+  Share2,
+  Boxes
 } from 'lucide-react';
 
 const STAGE_ICONS = {
@@ -73,6 +77,7 @@ export default function ProcessingView({
   const isStageThreeInProgress = job.stages?.[2]?.status === 'in_progress';
   const analysis = job.analysis;
   const codeAnalysis = job.code_analysis;
+  const architecture = job.architecture;
 
   return (
     <div className="max-w-4xl mx-auto py-8 px-4 sm:px-6">
@@ -445,6 +450,191 @@ export default function ProcessingView({
                   <span>{w}</span>
                 </div>
               ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Milestone 2.5: Architecture & Dependency Analysis Summary Card */}
+      {architecture && (
+        <div className="mb-6 p-6 sm:p-7 rounded-2xl bg-white border border-slate-200/90 shadow-sm transition-all hover:shadow-md">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-5 border-b border-slate-100 mb-5">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-xl bg-violet-50 text-violet-600 flex items-center justify-center border border-violet-100">
+                <Network className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-base font-bold text-slate-900">
+                  Architecture & Dependency Analysis
+                </h3>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  Static module graphs, function calls, class hierarchies, and entry point mappings
+                </p>
+              </div>
+            </div>
+            <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-violet-50 text-violet-700 border border-violet-200 self-start sm:self-auto">
+              <Compass className="w-3.5 h-3.5" />
+              <span>Layer & Dependency Map</span>
+            </span>
+          </div>
+
+          {/* Statistics Grid */}
+          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-6 gap-3 mb-6">
+            <div className="p-3 rounded-xl bg-slate-50 border border-slate-200/70">
+              <div className="flex items-center gap-1.5 text-xs text-slate-500 mb-1">
+                <Share2 className="w-3.5 h-3.5 text-violet-600" />
+                <span>Internal Deps</span>
+              </div>
+              <p className="text-lg font-bold text-slate-900 font-mono">
+                {architecture.dependency_graph.total_internal_dependencies.toLocaleString()}
+              </p>
+              <span className="text-[10px] text-slate-400">file-to-file</span>
+            </div>
+
+            <div className="p-3 rounded-xl bg-slate-50 border border-slate-200/70">
+              <div className="flex items-center gap-1.5 text-xs text-slate-500 mb-1">
+                <Box className="w-3.5 h-3.5 text-violet-600" />
+                <span>External Pkgs</span>
+              </div>
+              <p className="text-lg font-bold text-slate-900 font-mono">
+                {architecture.dependency_graph.total_external_dependencies.toLocaleString()}
+              </p>
+              <span className="text-[10px] text-slate-400">stdlib & 3rd party</span>
+            </div>
+
+            <div className="p-3 rounded-xl bg-slate-50 border border-slate-200/70">
+              <div className="flex items-center gap-1.5 text-xs text-slate-500 mb-1">
+                <Terminal className="w-3.5 h-3.5 text-violet-600" />
+                <span>Resolved Calls</span>
+              </div>
+              <p className="text-lg font-bold text-slate-900 font-mono">
+                {architecture.call_graph.total_resolved_calls.toLocaleString()}
+              </p>
+              <span className="text-[10px] text-slate-400">call graph edges</span>
+            </div>
+
+            <div className="p-3 rounded-xl bg-slate-50 border border-slate-200/70">
+              <div className="flex items-center gap-1.5 text-xs text-slate-500 mb-1">
+                <Layers className="w-3.5 h-3.5 text-violet-600" />
+                <span>Inheritance</span>
+              </div>
+              <p className="text-lg font-bold text-slate-900 font-mono">
+                {architecture.inheritance_relationships.length.toLocaleString()}
+              </p>
+              <span className="text-[10px] text-slate-400">class hierarchies</span>
+            </div>
+
+            <div className="p-3 rounded-xl bg-slate-50 border border-slate-200/70">
+              <div className="flex items-center gap-1.5 text-xs text-slate-500 mb-1">
+                <Compass className="w-3.5 h-3.5 text-violet-600" />
+                <span>Entry Points</span>
+              </div>
+              <p className="text-lg font-bold text-slate-900 font-mono">
+                {architecture.entry_points.length.toLocaleString()}
+              </p>
+              <span className="text-[10px] text-slate-400">candidates</span>
+            </div>
+
+            <div className="p-3 rounded-xl bg-slate-50 border border-slate-200/70">
+              <div className="flex items-center gap-1.5 text-xs text-slate-500 mb-1">
+                <Boxes className="w-3.5 h-3.5 text-violet-600" />
+                <span>Components</span>
+              </div>
+              <p className="text-lg font-bold text-slate-900 font-mono">
+                {architecture.components.length.toLocaleString()}
+              </p>
+              <span className="text-[10px] text-slate-400">classified files</span>
+            </div>
+          </div>
+
+          {/* Component Classification Breakdown */}
+          {architecture.component_counts && Object.keys(architecture.component_counts).length > 0 && (
+            <div className="mb-5">
+              <h4 className="text-xs font-semibold text-slate-700 uppercase tracking-wider mb-2.5">
+                Architectural Layers ({Object.keys(architecture.component_counts).length})
+              </h4>
+              <div className="flex flex-wrap gap-2">
+                {Object.entries(architecture.component_counts).map(([cat, count]) => (
+                  <span
+                    key={cat}
+                    className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-violet-50 text-violet-800 border border-violet-200/70 text-xs font-medium font-mono"
+                  >
+                    <span className="capitalize">{cat.replace(/_/g, ' ')}:</span>
+                    <strong className="font-bold">{count}</strong>
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Detected Entry Points */}
+          {architecture.entry_points && architecture.entry_points.length > 0 && (
+            <div className="mb-5">
+              <h4 className="text-xs font-semibold text-slate-700 uppercase tracking-wider mb-2.5">
+                Primary Entry Points
+              </h4>
+              <div className="space-y-1.5">
+                {architecture.entry_points.slice(0, 4).map((ep, idx) => (
+                  <div
+                    key={idx}
+                    className="p-2 rounded-lg bg-slate-50 border border-slate-200/60 flex items-center justify-between text-xs font-mono"
+                  >
+                    <div className="flex items-center gap-2 truncate">
+                      <span className="px-1.5 py-0.5 rounded text-[10px] uppercase font-bold bg-slate-200 text-slate-700">
+                        {ep.entry_type.replace(/_/g, ' ')}
+                      </span>
+                      <span className="text-slate-800 font-semibold truncate">{ep.file_path}</span>
+                      {ep.symbol_or_command && (
+                        <span className="text-slate-500 text-[11px] truncate">({ep.symbol_or_command})</span>
+                      )}
+                    </div>
+                    <span className={`px-2 py-0.5 rounded text-[10px] font-semibold uppercase ${
+                      ep.confidence === 'high' ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-800'
+                    }`}>
+                      {ep.confidence}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Representative Internal Dependency Edges */}
+          {architecture.dependency_graph?.edges && architecture.dependency_graph.edges.filter(e => e.is_internal).length > 0 && (
+            <div className="mb-2">
+              <h4 className="text-xs font-semibold text-slate-700 uppercase tracking-wider mb-2.5">
+                Sample Internal Dependencies
+              </h4>
+              <div className="space-y-1.5 max-h-36 overflow-y-auto pr-1">
+                {architecture.dependency_graph.edges
+                  .filter(e => e.is_internal)
+                  .slice(0, 5)
+                  .map((edge, idx) => (
+                    <div
+                      key={idx}
+                      className="p-2 rounded-lg bg-slate-50/70 border border-slate-200/50 flex items-center justify-between text-xs font-mono"
+                    >
+                      <span className="text-slate-700 truncate">{edge.source}</span>
+                      <ArrowRight className="w-3.5 h-3.5 text-slate-400 flex-shrink-0 mx-2" />
+                      <span className="text-violet-700 font-semibold truncate">{edge.target}</span>
+                    </div>
+                  ))}
+              </div>
+            </div>
+          )}
+
+          {/* Circular Dependencies Alert if any */}
+          {architecture.dependency_graph?.circular_dependencies && architecture.dependency_graph.circular_dependencies.length > 0 && (
+            <div className="mt-4 p-3 rounded-lg bg-amber-50 border border-amber-200 text-amber-800 text-xs">
+              <div className="flex items-center gap-1.5 font-semibold mb-1">
+                <AlertCircle className="w-3.5 h-3.5 text-amber-600 flex-shrink-0" />
+                <span>Circular Dependencies Detected ({architecture.dependency_graph.circular_dependencies.length})</span>
+              </div>
+              <ul className="list-disc list-inside space-y-0.5 text-[11px] text-amber-700 font-mono">
+                {architecture.dependency_graph.circular_dependencies.slice(0, 3).map((cycle, idx) => (
+                  <li key={idx}>{cycle.join(' -> ')}</li>
+                ))}
+              </ul>
             </div>
           )}
         </div>
