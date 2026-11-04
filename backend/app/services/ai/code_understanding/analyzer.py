@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
@@ -243,6 +244,27 @@ class CodeUnderstandingAnalyzer:
             parsed_dict["architecture_overview"] = fallback.architecture_overview
         if not isinstance(parsed_dict.get("components"), list) or not parsed_dict["components"]:
             parsed_dict["components"] = [c.model_dump() for c in fallback.components]
+        else:
+            # Check for any selected candidate components omitted by LLM output truncation
+            selected_candidates = self.selector.select_components(knowledge, min_components=3, max_components=4)
+            existing_paths = {
+                c.get("file_path", "").replace("\\", "/").strip().lstrip("/")
+                for c in parsed_dict["components"]
+                if isinstance(c, dict)
+            }
+            omitted = []
+            for cand in selected_candidates:
+                cand_norm = cand.file_path.replace("\\", "/").strip().lstrip("/")
+                if cand_norm not in existing_paths and os.path.basename(cand_norm) not in existing_paths:
+                    omitted.append(cand.file_path)
+                    comp_fb = next((c for c in fallback.components if c.file_path == cand.file_path), None)
+                    if comp_fb:
+                        parsed_dict["components"].append(comp_fb.model_dump())
+            if omitted:
+                parsed_dict.setdefault("validation_warnings", []).append(
+                    f"Output token limit: {len(omitted)} component(s) ({', '.join(omitted)}) were omitted in LLM response and supplemented with static structural analysis."
+                )
+
         if not isinstance(parsed_dict.get("cross_component_interactions"), list):
             parsed_dict["cross_component_interactions"] = [
                 i.model_dump() for i in fallback.cross_component_interactions

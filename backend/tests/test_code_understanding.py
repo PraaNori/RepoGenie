@@ -544,6 +544,19 @@ def test_code_evidence_builder_assembly(sample_knowledge):
     assert any(i["source"] == "src/click/core.py" and i["target"] == "src/click/types.py" for i in interactions)
 
 
+def test_code_evidence_builder_without_project_understanding(sample_knowledge):
+    """Verifies that missing ProjectUnderstanding does not cause errors and fallback executes cleanly."""
+    builder = CodeEvidenceBuilder()
+    pkg = builder.build_evidence_package(sample_knowledge, project_understanding=None)
+    assert pkg["repository"]["name"] == "pallets/click"
+    assert "components" in pkg
+
+    analyzer = CodeUnderstandingAnalyzer()
+    fallback = analyzer.create_rule_based_fallback(sample_knowledge, project_understanding=None)
+    assert fallback.is_fallback is True
+    assert len(fallback.components) >= 2
+
+
 def test_code_evidence_builder_token_estimation():
     builder = CodeEvidenceBuilder()
     sys_prompt = "A" * 400  # ~100 tokens
@@ -601,6 +614,91 @@ def test_code_validator_detects_nonexistent_symbol(sample_knowledge, sample_vali
     assert any("fabricated_crypto_mining_loop" in w for w in validated.validation_warnings)
 
 
+def test_code_validator_interaction_relationship_type_mismatch(sample_knowledge, sample_valid_code_understanding_json):
+    """
+    Verifies that if an interaction claims 'inherits' between core.py and parser.py
+    where only an 'imports' static edge exists, the validator demotes it to inferred.
+    """
+    validator = CodeEvidenceValidator()
+    data = json.loads(sample_valid_code_understanding_json)
+    data["cross_component_interactions"] = [
+        {
+            "source_component": "src/click/core.py",
+            "target_component": "src/click/parser.py",
+            "interaction_type": "inherits",  # FALSE: core.py only imports parser.py!
+            "description": "Command inherits from parser classes.",
+            "is_confirmed": True,
+            "supporting_evidence": [
+                {
+                    "file_path": "src/click/core.py",
+                    "line_start": 18,
+                    "line_end": 18,
+                    "evidence_type": "code",
+                }
+            ],
+        }
+    ]
+    understanding = RepositoryCodeUnderstanding.model_validate(data)
+    validated = validator.validate_code_understanding(understanding, sample_knowledge)
+
+    inter = validated.cross_component_interactions[0]
+    assert inter.is_confirmed is False
+    assert inter.confidence == "medium"
+    assert any("claimed 'inherits' relationship but static edges only substantiate" in w for w in validated.validation_warnings)
+
+
+def test_code_validator_interaction_evidence_file_origin(sample_knowledge, sample_valid_code_understanding_json):
+    """
+    Verifies that supporting evidence for an interaction must originate from the source component.
+    """
+    validator = CodeEvidenceValidator()
+    data = json.loads(sample_valid_code_understanding_json)
+    data["cross_component_interactions"][0]["supporting_evidence"] = [
+        {
+            "file_path": "src/click/parser.py",  # Unrelated third file for core -> types interaction
+            "line_start": 20,
+            "line_end": 20,
+            "evidence_type": "code",
+        }
+    ]
+    understanding = RepositoryCodeUnderstanding.model_validate(data)
+    validated = validator.validate_code_understanding(understanding, sample_knowledge)
+
+    assert any("does not originate from source component" in w for w in validated.validation_warnings)
+
+
+def test_code_understanding_omitted_component_supplemented(sample_knowledge):
+    """
+    Verifies that when LLM output omits a candidate component, it is supplemented
+    with static structural analysis and reported in validation warnings.
+    """
+    analyzer = CodeUnderstandingAnalyzer()
+    # Provide an output dictionary containing only 1 component
+    partial_output = {
+        "schema_version": "1.0",
+        "repository_name": "pallets/click",
+        "architecture_overview": "Click CLI toolkit.",
+        "components": [
+            {
+                "component_id": "src/click/core.py",
+                "name": "Command Execution Engine",
+                "file_path": "src/click/core.py",
+                "category": "core",
+                "importance_score": 9.5,
+                "primary_responsibility": "Command handling.",
+                "why_important": "Core module.",
+                "inputs_and_outputs": "CLI args in.",
+            }
+        ],
+        "cross_component_interactions": [],
+    }
+
+    normalized = analyzer._normalize_parsed_dict(partial_output, sample_knowledge)
+    # The missing candidates should be supplemented
+    assert len(normalized["components"]) >= 2
+    assert any("Output token limit:" in w for w in normalized.get("validation_warnings", []))
+
+
 # ---------------------------------------------------------------------------
 # 5. Analyzer & Fallback Tests
 # ---------------------------------------------------------------------------
@@ -635,7 +733,7 @@ async def test_code_understanding_analyzer_success(sample_knowledge, sample_vali
     assert result.repository_name == "pallets/click"
     assert result.provider == "groq"
     assert result.is_fallback is False
-    assert len(result.components) == 1
+    assert len(result.components) >= 1
     assert result.components[0].name == "Command Execution Engine"
     assert len(result.cross_component_interactions) == 1
 

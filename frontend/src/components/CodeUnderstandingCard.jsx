@@ -349,17 +349,58 @@ export default function CodeUnderstandingCard({
       {/* Tab 2: Code Logic Inspector */}
       {activeTab === 'logic' && (
         <div className="space-y-4">
-          <p className="text-xs text-slate-500 mb-2">
-            Inspecting grounded code logic for key classes, functions, and methods across selected components.
-          </p>
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-2 border-b border-slate-100">
+            <p className="text-xs text-slate-500">
+              Inspecting grounded code logic for key classes, functions, and methods.
+            </p>
+            <div className="flex items-center gap-1.5 overflow-x-auto pb-1 max-w-full">
+              <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mr-1">Component:</span>
+              <button
+                onClick={() => setSelectedComponentIdx(-1)}
+                className={`px-2.5 py-1 rounded-lg text-xs font-semibold whitespace-nowrap transition ${
+                  selectedComponentIdx === -1
+                    ? 'bg-purple-600 text-white shadow-sm'
+                    : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                }`}
+              >
+                All ({components.length})
+              </button>
+              {components.map((comp, idx) => (
+                <button
+                  key={idx}
+                  onClick={() => setSelectedComponentIdx(idx)}
+                  className={`px-2.5 py-1 rounded-lg text-xs font-semibold whitespace-nowrap transition flex items-center gap-1 ${
+                    selectedComponentIdx === idx
+                      ? 'bg-purple-600 text-white shadow-sm'
+                      : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                  }`}
+                >
+                  <span>{comp.name}</span>
+                  {comp.is_deterministic && (
+                    <span className="w-1.5 h-1.5 rounded-full bg-amber-400" title="Static metadata fallback" />
+                  )}
+                </button>
+              ))}
+            </div>
+          </div>
 
-          {components.map((comp, compIdx) => (
+          {(selectedComponentIdx === -1
+            ? components
+            : [components[selectedComponentIdx] || components[0]]
+          ).filter(Boolean).map((comp, compIdx) => (
             <div key={compIdx} className="space-y-3">
-              <div className="flex items-center gap-2 pb-1 border-b border-slate-100">
-                <FileCode className="w-4 h-4 text-purple-600" />
-                <h4 className="text-xs font-bold text-slate-800 uppercase tracking-wider">
-                  {comp.name} ({comp.file_path})
-                </h4>
+              <div className="flex items-center justify-between gap-2 pb-1 border-b border-slate-100">
+                <div className="flex items-center gap-2">
+                  <FileCode className="w-4 h-4 text-purple-600" />
+                  <h4 className="text-xs font-bold text-slate-800 uppercase tracking-wider">
+                    {comp.name} ({comp.file_path})
+                  </h4>
+                </div>
+                {comp.is_deterministic && (
+                  <span className="px-2 py-0.5 rounded text-[10px] uppercase font-bold bg-amber-50 text-amber-800 border border-amber-200">
+                    Static Metadata Fallback
+                  </span>
+                )}
               </div>
 
               {comp.code_explanations?.length > 0 ? (

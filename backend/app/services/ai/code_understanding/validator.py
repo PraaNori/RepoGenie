@@ -58,25 +58,34 @@ class CodeEvidenceValidator:
 
     def _collect_static_edges(
         self, knowledge: RepositoryKnowledge
-    ) -> Set[Tuple[str, str]]:
-        """Collects all verified internal static dependency and call edges as (source_path, target_path)."""
-        static_edges: Set[Tuple[str, str]] = set()
+    ) -> Dict[Tuple[str, str], Set[str]]:
+        """
+        Maps (source_norm_path, target_norm_path) to a set of verified relationship types
+        (e.g. {'imports', 'calls', 'inherits'}). Does not conflate different edge types.
+        """
+        static_edges: Dict[Tuple[str, str], Set[str]] = {}
+
+        def add_edge(src: str, tgt: str, rel_type: str):
+            key = (src, tgt)
+            if key not in static_edges:
+                static_edges[key] = set()
+            static_edges[key].add(rel_type.lower())
 
         # 1. Dependency Edges (Imports)
         if hasattr(knowledge, "dependency_information") and knowledge.dependency_information:
             for edge in getattr(knowledge.dependency_information, "edges", []):
                 src = edge.source.replace("\\", "/").strip().lstrip("/")
                 tgt = edge.target.replace("\\", "/").strip().lstrip("/")
-                static_edges.add((src, tgt))
-                static_edges.add((os.path.basename(src), os.path.basename(tgt)))
+                rel_type = (edge.relationship_type or "imports").lower()
+                add_edge(src, tgt, rel_type)
+                add_edge(src, tgt, "imports")
 
         # 2. Call Graph Edges (Resolved Calls)
         if hasattr(knowledge, "architecture") and knowledge.architecture and knowledge.architecture.call_graph:
             for call_edge in getattr(knowledge.architecture.call_graph, "edges", []):
                 caller_file = call_edge.caller.split(":")[0].replace("\\", "/").strip().lstrip("/")
                 callee_file = call_edge.callee.split(":")[0].replace("\\", "/").strip().lstrip("/")
-                static_edges.add((caller_file, callee_file))
-                static_edges.add((os.path.basename(caller_file), os.path.basename(callee_file)))
+                add_edge(caller_file, callee_file, "calls")
 
         # 3. Inheritance Edges
         if hasattr(knowledge, "architecture") and knowledge.architecture:
@@ -84,10 +93,17 @@ class CodeEvidenceValidator:
                 if inh.child_file and inh.parent_file:
                     cf = inh.child_file.replace("\\", "/").strip().lstrip("/")
                     pf = inh.parent_file.replace("\\", "/").strip().lstrip("/")
-                    static_edges.add((cf, pf))
-                    static_edges.add((os.path.basename(cf), os.path.basename(pf)))
+                    add_edge(cf, pf, "inherits")
 
         return static_edges
+
+    def _build_unique_basename_map(self, known_files: Set[str]) -> Dict[str, str]:
+        """Maps basename -> full relative path only if the basename is unambiguous in the repository."""
+        counts: Dict[str, List[str]] = {}
+        for p in known_files:
+            b = os.path.basename(p)
+            counts.setdefault(b, []).append(p)
+        return {b: paths[0] for b, paths in counts.items() if len(paths) == 1}
 
     def validate_code_understanding(
         self,
@@ -104,6 +120,7 @@ class CodeEvidenceValidator:
         )
         symbols_map = self._collect_file_symbols(knowledge)
         static_edges = self._collect_static_edges(knowledge)
+        unique_basenames = self._build_unique_basename_map(known_files)
 
         warnings = list(understanding.validation_warnings)
 
@@ -162,34 +179,55 @@ class CodeEvidenceValidator:
         for inter in understanding.cross_component_interactions:
             src_norm = inter.source_component.replace("\\", "/").strip().lstrip("/")
             tgt_norm = inter.target_component.replace("\\", "/").strip().lstrip("/")
-            src_base = os.path.basename(src_norm)
-            tgt_base = os.path.basename(tgt_norm)
+
+            # Resolve basename to unique full path if possible
+            if src_norm not in known_files and src_norm in unique_basenames:
+                src_norm = unique_basenames[src_norm]
+            if tgt_norm not in known_files and tgt_norm in unique_basenames:
+                tgt_norm = unique_basenames[tgt_norm]
+
+            rel_type = (inter.interaction_type or "calls").lower()
 
             # Check if this interaction was claimed as statically confirmed
             if inter.is_confirmed:
-                has_static_edge = (
-                    (src_norm, tgt_norm) in static_edges
-                    or (src_base, tgt_base) in static_edges
-                    or (src_norm, tgt_base) in static_edges
-                    or (src_base, tgt_norm) in static_edges
+                edge_types = static_edges.get((src_norm, tgt_norm), set())
+                # Verify that the specific claimed relationship type exists
+                type_matches = (
+                    rel_type in edge_types
+                    or (rel_type == "calls" and "calls" in edge_types)
+                    or (rel_type in ("imports", "data_flow") and "imports" in edge_types)
+                    or (rel_type == "inherits" and "inherits" in edge_types)
                 )
 
-                if not has_static_edge:
+                if not type_matches:
                     # Demote to inferred conceptual relationship
                     inter.is_confirmed = False
                     inter.confidence = "medium"
-                    warnings.append(
-                        f"Interaction '{inter.source_component} -> {inter.target_component}': demoted from confirmed to inferred (no static call or import edge found in repository architecture)."
-                    )
+                    if edge_types:
+                        warnings.append(
+                            f"Interaction '{inter.source_component} -> {inter.target_component}': claimed '{rel_type}' relationship but static edges only substantiate {edge_types}; demoted to inferred."
+                        )
+                    else:
+                        warnings.append(
+                            f"Interaction '{inter.source_component} -> {inter.target_component}': demoted from confirmed to inferred (no static {rel_type} edge exists between these components)."
+                        )
 
             # Validate supporting evidence
             for ev in inter.supporting_evidence:
-                if not self.base_validator.validate_reference(
+                ev_valid = self.base_validator.validate_reference(
                     ev, known_files, line_counts, has_complete_inventory, local_path
-                ):
+                )
+                if not ev_valid:
                     warnings.append(
                         f"Interaction '{inter.source_component} -> {inter.target_component}': unverified evidence file '{ev.file_path}'."
                     )
+                else:
+                    # Verify evidence originates from the source component
+                    ev_norm = ev.file_path.replace("\\", "/").strip().lstrip("/")
+                    if ev_norm not in (src_norm, os.path.basename(src_norm)) and src_norm in known_files:
+                        warnings.append(
+                            f"Interaction '{inter.source_component} -> {inter.target_component}': evidence file '{ev.file_path}' does not originate from source component '{src_norm}'."
+                        )
 
         understanding.validation_warnings = warnings
         return understanding

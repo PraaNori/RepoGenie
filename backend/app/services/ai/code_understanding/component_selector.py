@@ -49,7 +49,7 @@ class ComponentSelector:
         self,
         knowledge: RepositoryKnowledge,
         min_components: int = 3,
-        max_components: int = 6,
+        max_components: int = 4,
     ) -> List[SelectedComponentCandidate]:
         # Map parsed files for fast lookup
         parsed_files_map: Dict[str, ParsedFile] = {
