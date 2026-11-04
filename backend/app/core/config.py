@@ -30,6 +30,12 @@ class Settings(BaseSettings):
     MAX_FILES_INDEXED: int = 5000
     MAX_FILE_SIZE_BYTES: int = 1_048_576  # 1 MB maximum for manifest content inspection
 
+    # Code Parsing & Structural Extraction limits (Milestone 2.4)
+    MAX_CODE_FILE_SIZE_BYTES: int = 524_288  # 512 KB per source file eligible for AST parsing
+    MAX_CODE_FILES_TO_PARSE: int = 500      # Maximum source files to parse per repository
+    MAX_SNIPPET_LINES: int = 60             # Maximum lines for stored code snippet
+    MAX_SNIPPET_CHARS: int = 2500           # Maximum characters for stored code snippet
+
     @property
     def cors_origins_list(self) -> List[str]:
         return [origin.strip() for origin in self.CORS_ORIGINS.split(",") if origin.strip()]

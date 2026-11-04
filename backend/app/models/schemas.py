@@ -99,6 +99,91 @@ class RepoAnalysisResult(BaseModel):
     analysis_status: StatusEnum = StatusEnum.COMPLETED
     warnings: List[str] = []
 
+# --- Milestone 2.4: Code Parsing & Structural Extraction Models ---
+
+class SourceLocation(BaseModel):
+    file_path: str
+    start_line: int
+    end_line: int
+    start_column: int
+    end_column: int
+
+class ParsingWarning(BaseModel):
+    file_path: str
+    line_number: Optional[int] = None
+    message: str
+    warning_type: str
+
+class FunctionInfo(BaseModel):
+    name: str
+    file_path: str
+    location: SourceLocation
+    parameters: List[str] = []
+    is_async: bool = False
+    visibility: Optional[str] = None
+    return_type: Optional[str] = None
+    enclosing_scope: Optional[str] = None
+    snippet: Optional[str] = None
+
+class MethodInfo(BaseModel):
+    name: str
+    parent_class: str
+    file_path: str
+    location: SourceLocation
+    parameters: List[str] = []
+    is_async: bool = False
+    visibility: Optional[str] = None
+    return_type: Optional[str] = None
+    snippet: Optional[str] = None
+
+class ClassInfo(BaseModel):
+    name: str
+    file_path: str
+    location: SourceLocation
+    base_classes: List[str] = []
+    methods: List[str] = []
+    nested_classes: List[str] = []
+    snippet: Optional[str] = None
+
+class ImportInfo(BaseModel):
+    module: str
+    symbols: List[str] = []
+    alias: Optional[str] = None
+    file_path: str
+    line_number: int
+
+class FunctionCallInfo(BaseModel):
+    call_name: str
+    enclosing_scope: Optional[str] = None
+    file_path: str
+    line_number: int
+
+class ParsedFile(BaseModel):
+    file_path: str
+    language: str
+    status: str  # "success", "syntax_error", "skipped", "error"
+    functions: List[FunctionInfo] = []
+    classes: List[ClassInfo] = []
+    methods: List[MethodInfo] = []
+    imports: List[ImportInfo] = []
+    function_calls: List[FunctionCallInfo] = []
+    warnings: List[ParsingWarning] = []
+    total_lines: int = 0
+
+class ParsedRepository(BaseModel):
+    job_id: str
+    repository_name: str
+    total_parsed_files: int
+    total_functions: int
+    total_classes: int
+    total_methods: int
+    total_imports: int
+    total_function_calls: int
+    supported_languages: List[str]
+    files: List[ParsedFile] = []
+    parsing_status: StatusEnum = StatusEnum.COMPLETED
+    warnings: List[str] = []
+
 # --- Main Job Models ---
 
 class JobResponse(BaseModel):
@@ -116,5 +201,6 @@ class JobResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
     analysis: Optional[RepoAnalysisResult] = None
+    code_analysis: Optional[ParsedRepository] = None
     result: Optional[VideoResult] = None
     error: Optional[str] = None

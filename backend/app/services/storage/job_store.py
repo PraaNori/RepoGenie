@@ -5,6 +5,7 @@ from typing import Dict, List, Optional
 from pydantic import BaseModel
 from ...models.schemas import (
     JobResponse,
+    ParsedRepository,
     RepoAnalysisResult,
     StageEnum,
     StageInfo,
@@ -41,6 +42,7 @@ class JobInternal(BaseModel):
     created_at: datetime
     updated_at: datetime
     analysis: Optional[RepoAnalysisResult] = None
+    code_analysis: Optional[ParsedRepository] = None
     result: Optional[VideoResult] = None
     error: Optional[str] = None
 
@@ -61,6 +63,7 @@ class JobInternal(BaseModel):
             created_at=self.created_at,
             updated_at=self.updated_at,
             analysis=self.analysis,
+            code_analysis=self.code_analysis,
             result=self.result,
             error=self.error,
         )
@@ -211,6 +214,54 @@ class JobStore:
         job.stages[1].completed_at = now
         job.stages[1].detail = f"Analysis failed: {error_message}"
         # Keep cloned repo intact, mark error in warnings/detail
+        job.updated_at = now
+        return job
+
+    def update_job_code_parsing_started(self, job_id: str) -> Optional[JobInternal]:
+        job = self._jobs.get(job_id)
+        if not job:
+            return None
+        now = datetime.now(timezone.utc)
+        job.current_stage = PIPELINE_STAGES[2]
+        job.stages[2].status = StatusEnum.IN_PROGRESS
+        job.stages[2].started_at = now
+        job.stages[2].detail = "Parsing source code with Tree-sitter AST..."
+        job.updated_at = now
+        return job
+
+    def update_job_code_parsing_success(
+        self, job_id: str, code_analysis: ParsedRepository
+    ) -> Optional[JobInternal]:
+        job = self._jobs.get(job_id)
+        if not job:
+            return None
+        now = datetime.now(timezone.utc)
+        job.code_analysis = code_analysis
+        job.stages[2].status = StatusEnum.COMPLETED
+        job.stages[2].completed_at = now
+        job.stages[2].detail = (
+            f"Parsed {code_analysis.total_parsed_files} files "
+            f"({code_analysis.total_functions} functions, "
+            f"{code_analysis.total_classes} classes, "
+            f"{code_analysis.total_methods} methods, "
+            f"{code_analysis.total_imports} imports)"
+        )
+        job.progress_percentage = 33
+        # Set next stage ready (Stage 4: AI Summary Generation)
+        job.current_stage = PIPELINE_STAGES[3]
+        job.stages[3].status = StatusEnum.PENDING
+        job.stages[3].detail = "Ready for AI summary generation"
+        job.updated_at = now
+        return job
+
+    def update_job_code_parsing_failed(self, job_id: str, error_message: str) -> Optional[JobInternal]:
+        job = self._jobs.get(job_id)
+        if not job:
+            return None
+        now = datetime.now(timezone.utc)
+        job.stages[2].status = StatusEnum.FAILED
+        job.stages[2].completed_at = now
+        job.stages[2].detail = f"Code parsing failed: {error_message}"
         job.updated_at = now
         return job
 

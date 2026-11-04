@@ -47,7 +47,8 @@ export default function App() {
     const isProcessing =
       currentJob.ingestion_status === 'in_progress' ||
       currentJob.stages?.[0]?.status === 'in_progress' ||
-      currentJob.stages?.[1]?.status === 'in_progress';
+      currentJob.stages?.[1]?.status === 'in_progress' ||
+      currentJob.stages?.[2]?.status === 'in_progress';
 
     if (!isProcessing) {
       return;

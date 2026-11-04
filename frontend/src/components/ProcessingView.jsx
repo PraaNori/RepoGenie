@@ -20,7 +20,11 @@ import {
   FileCode,
   FolderTree,
   Box,
-  Settings2
+  Settings2,
+  Layers,
+  Cpu,
+  Hash,
+  Terminal
 } from 'lucide-react';
 
 const STAGE_ICONS = {
@@ -66,7 +70,9 @@ export default function ProcessingView({
   const isFailed = job.status === 'failed';
   const isStageOneInProgress = job.stages?.[0]?.status === 'in_progress';
   const isStageTwoInProgress = job.stages?.[1]?.status === 'in_progress';
+  const isStageThreeInProgress = job.stages?.[2]?.status === 'in_progress';
   const analysis = job.analysis;
+  const codeAnalysis = job.code_analysis;
 
   return (
     <div className="max-w-4xl mx-auto py-8 px-4 sm:px-6">
@@ -112,6 +118,11 @@ export default function ProcessingView({
                   <Loader2 className="w-3 h-3 animate-spin" /> Analyzing Structure & Languages
                 </span>
               )}
+              {isStageThreeInProgress && (
+                <span className="inline-flex items-center gap-1 text-[11px] font-medium text-amber-700 bg-amber-50 border border-amber-200 px-2 py-0.5 rounded-full">
+                  <Loader2 className="w-3 h-3 animate-spin" /> Parsing Source Code AST
+                </span>
+              )}
             </div>
             <h2 className="text-2xl font-bold text-slate-900 tracking-tight flex items-center gap-2">
               <span>{job.repo_name}</span>
@@ -142,7 +153,7 @@ export default function ProcessingView({
             ) : !isFailed && (
               <button
                 onClick={onSimulateStep}
-                disabled={isSimulating || isStageOneInProgress || isStageTwoInProgress}
+                disabled={isSimulating || isStageOneInProgress || isStageTwoInProgress || isStageThreeInProgress}
                 className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200/70 text-xs font-semibold transition disabled:opacity-50"
                 title="Advance to next stage"
               >
@@ -311,6 +322,124 @@ export default function ProcessingView({
           {analysis.warnings.length > 0 && (
             <div className="mt-4 p-3 rounded-lg bg-amber-50 border border-amber-200 text-amber-800 text-xs space-y-1">
               {analysis.warnings.map((w, idx) => (
+                <div key={idx} className="flex items-center gap-1.5">
+                  <AlertCircle className="w-3.5 h-3.5 text-amber-600 flex-shrink-0" />
+                  <span>{w}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Milestone 2.4: Code Structure Analysis Summary Card */}
+      {codeAnalysis && (
+        <div className="bg-white rounded-2xl border border-slate-200/90 shadow-sm p-6 sm:p-8 mb-6 transition-all">
+          <div className="flex items-center justify-between pb-4 border-b border-slate-100 mb-5">
+            <div>
+              <h3 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2">
+                <Code2 className="w-4 h-4 text-indigo-600" />
+                <span>Code Structure & AST Analysis</span>
+              </h3>
+              <p className="text-xs text-slate-500 mt-0.5">
+                Syntactic extraction via Tree-sitter: functions, classes, methods, imports, and calls.
+              </p>
+            </div>
+            <span className="px-2.5 py-1 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200 text-xs font-semibold">
+              AST Extracted
+            </span>
+          </div>
+
+          {/* Statistics Grid */}
+          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-6 gap-3 mb-6">
+            <div className="p-3 rounded-xl bg-slate-50 border border-slate-200/70">
+              <div className="flex items-center gap-1.5 text-xs text-slate-500 mb-1">
+                <FileCode className="w-3.5 h-3.5 text-indigo-600" />
+                <span>Files</span>
+              </div>
+              <p className="text-lg font-bold text-slate-900 font-mono">
+                {codeAnalysis.total_parsed_files.toLocaleString()}
+              </p>
+              <span className="text-[10px] text-slate-400">parsed ASTs</span>
+            </div>
+
+            <div className="p-3 rounded-xl bg-slate-50 border border-slate-200/70">
+              <div className="flex items-center gap-1.5 text-xs text-slate-500 mb-1">
+                <Terminal className="w-3.5 h-3.5 text-indigo-600" />
+                <span>Functions</span>
+              </div>
+              <p className="text-lg font-bold text-slate-900 font-mono">
+                {codeAnalysis.total_functions.toLocaleString()}
+              </p>
+              <span className="text-[10px] text-slate-400">top-level / async</span>
+            </div>
+
+            <div className="p-3 rounded-xl bg-slate-50 border border-slate-200/70">
+              <div className="flex items-center gap-1.5 text-xs text-slate-500 mb-1">
+                <Layers className="w-3.5 h-3.5 text-indigo-600" />
+                <span>Classes</span>
+              </div>
+              <p className="text-lg font-bold text-slate-900 font-mono">
+                {codeAnalysis.total_classes.toLocaleString()}
+              </p>
+              <span className="text-[10px] text-slate-400">structs / ifaces</span>
+            </div>
+
+            <div className="p-3 rounded-xl bg-slate-50 border border-slate-200/70">
+              <div className="flex items-center gap-1.5 text-xs text-slate-500 mb-1">
+                <Cpu className="w-3.5 h-3.5 text-indigo-600" />
+                <span>Methods</span>
+              </div>
+              <p className="text-lg font-bold text-slate-900 font-mono">
+                {codeAnalysis.total_methods.toLocaleString()}
+              </p>
+              <span className="text-[10px] text-slate-400">class members</span>
+            </div>
+
+            <div className="p-3 rounded-xl bg-slate-50 border border-slate-200/70">
+              <div className="flex items-center gap-1.5 text-xs text-slate-500 mb-1">
+                <Box className="w-3.5 h-3.5 text-indigo-600" />
+                <span>Imports</span>
+              </div>
+              <p className="text-lg font-bold text-slate-900 font-mono">
+                {codeAnalysis.total_imports.toLocaleString()}
+              </p>
+              <span className="text-[10px] text-slate-400">modules / symbols</span>
+            </div>
+
+            <div className="p-3 rounded-xl bg-slate-50 border border-slate-200/70">
+              <div className="flex items-center gap-1.5 text-xs text-slate-500 mb-1">
+                <Hash className="w-3.5 h-3.5 text-indigo-600" />
+                <span>Calls</span>
+              </div>
+              <p className="text-lg font-bold text-slate-900 font-mono">
+                {codeAnalysis.total_function_calls.toLocaleString()}
+              </p>
+              <span className="text-[10px] text-slate-400">call expressions</span>
+            </div>
+          </div>
+
+          {/* Parsed Languages Badges */}
+          <div className="mb-2">
+            <h4 className="text-xs font-semibold text-slate-700 uppercase tracking-wider mb-2.5">
+              Parsed Languages ({codeAnalysis.supported_languages.length})
+            </h4>
+            <div className="flex flex-wrap gap-2">
+              {codeAnalysis.supported_languages.map((lang) => (
+                <span
+                  key={lang}
+                  className="px-2.5 py-1 rounded-md bg-indigo-50 text-indigo-800 border border-indigo-200/80 text-xs font-medium font-mono"
+                >
+                  {lang}
+                </span>
+              ))}
+            </div>
+          </div>
+
+          {/* Warnings if any parsing limits or issues occurred */}
+          {codeAnalysis.warnings && codeAnalysis.warnings.length > 0 && (
+            <div className="mt-4 p-3 rounded-lg bg-amber-50 border border-amber-200 text-amber-800 text-xs space-y-1">
+              {codeAnalysis.warnings.map((w, idx) => (
                 <div key={idx} className="flex items-center gap-1.5">
                   <AlertCircle className="w-3.5 h-3.5 text-amber-600 flex-shrink-0" />
                   <span>{w}</span>

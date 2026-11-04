@@ -4,11 +4,13 @@ from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, status
 from ...models.schemas import (
     JobCreateRequest,
     JobResponse,
+    ParsedRepository,
     RepoAnalysisResult,
     StatusEnum,
     VideoResult,
 )
 from ...services.repo.analyzer import repo_analyzer_service
+from ...services.repo.code_parser import code_parser_service
 from ...services.repo.ingest import (
     CloneExecutionError,
     CloneTimeoutError,
@@ -53,6 +55,7 @@ def run_ingestion_and_analysis_task(job_id: str, clone_url: str):
 
         # Step 2: Milestone 2.3 Repository Structure and File Analysis
         internal_job = job_store.get_internal_job(job_id)
+        analysis_result = None
         if internal_job and internal_job.local_path:
             job_store.update_job_analysis_started(job_id)
             try:
@@ -62,6 +65,7 @@ def run_ingestion_and_analysis_task(job_id: str, clone_url: str):
                     local_path=internal_job.local_path,
                 )
                 job_store.update_job_analysis_success(job_id, analysis)
+                analysis_result = analysis
                 logger.info(
                     "Successfully analyzed repository for job %s: %d source files, %d languages",
                     job_id,
@@ -71,6 +75,27 @@ def run_ingestion_and_analysis_task(job_id: str, clone_url: str):
             except Exception as exc:
                 job_store.update_job_analysis_failed(job_id, str(exc))
                 logger.exception("Repository analysis failed for job %s: %s", job_id, exc)
+
+            # Step 3: Milestone 2.4 Code Parsing and Structural Extraction
+            job_store.update_job_code_parsing_started(job_id)
+            try:
+                code_analysis = code_parser_service.parse_repository(
+                    job_id=job_id,
+                    repo_name=internal_job.repo_name,
+                    local_path=internal_job.local_path,
+                    analysis=analysis_result,
+                )
+                job_store.update_job_code_parsing_success(job_id, code_analysis)
+                logger.info(
+                    "Successfully parsed code for job %s: %d files, %d functions, %d classes",
+                    job_id,
+                    code_analysis.total_parsed_files,
+                    code_analysis.total_functions,
+                    code_analysis.total_classes,
+                )
+            except Exception as exc:
+                job_store.update_job_code_parsing_failed(job_id, str(exc))
+                logger.exception("Code parsing failed for job %s: %s", job_id, exc)
 
     except DestinationExistsError as exc:
         job_store.update_job_ingestion_failed(job_id, str(exc))
@@ -197,6 +222,49 @@ def get_job_analysis(job_id: str):
             detail=f"Repository analysis is still in progress for job '{job_id}'.",
         )
     return internal.analysis
+
+@router.get("/{job_id}/code-analysis", response_model=ParsedRepository)
+def get_job_code_analysis(job_id: str):
+    """
+    Get the detailed AST-parsed code structure metadata (functions, classes, methods, imports, calls).
+    """
+    internal = job_store.get_internal_job(job_id)
+    if not internal:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Job with ID '{job_id}' not found",
+        )
+    if internal.ingestion_status == StatusEnum.FAILED:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Repository ingestion failed for job '{job_id}': {internal.error}",
+        )
+    if internal.ingestion_status in (StatusEnum.PENDING, StatusEnum.IN_PROGRESS):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Repository ingestion is still in progress for job '{job_id}'.",
+        )
+    if internal.stages[1].status in (StatusEnum.PENDING, StatusEnum.IN_PROGRESS):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Repository structure analysis is still in progress for job '{job_id}'.",
+        )
+    if internal.stages[2].status in (StatusEnum.PENDING, StatusEnum.IN_PROGRESS):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Code parsing is still in progress for job '{job_id}'.",
+        )
+    if not internal.code_analysis:
+        if internal.stages[2].status == StatusEnum.FAILED:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Code parsing failed: {internal.stages[2].detail}",
+            )
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Code parsing metadata is not ready for job '{job_id}'.",
+        )
+    return internal.code_analysis
 
 @router.post("/{job_id}/simulate-step", response_model=JobResponse)
 def simulate_job_step(job_id: str):

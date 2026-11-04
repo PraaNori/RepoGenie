@@ -101,6 +101,30 @@ export async function getJobAnalysis(jobId) {
   }
 }
 
+export async function getJobCodeAnalysis(jobId) {
+  try {
+    const response = await fetch(`${API_BASE_URL}/api/v1/jobs/${jobId}/code-analysis`, {
+      method: 'GET',
+      headers: {
+        'Accept': 'application/json',
+      },
+    });
+
+    const data = await response.json();
+
+    if (!response.ok) {
+      throw new Error(data.detail || `Failed to fetch code analysis (${response.status})`);
+    }
+
+    return { success: true, data };
+  } catch (error) {
+    return {
+      success: false,
+      error: error.message || 'Error checking code analysis',
+    };
+  }
+}
+
 export async function simulateJobStep(jobId) {
   try {
     const response = await fetch(`${API_BASE_URL}/api/v1/jobs/${jobId}/simulate-step`, {
