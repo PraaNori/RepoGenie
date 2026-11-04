@@ -30,9 +30,12 @@ from app.models.schemas import (
 from app.services.ai.exceptions import AIInvalidResponseError
 from app.services.ai.project_understanding import (
     EvidenceBuilder,
+    EvidenceReference,
+    EvidenceValidator,
     ProjectUnderstanding,
     ProjectUnderstandingAnalyzer,
     evidence_builder_service,
+    evidence_validator,
     project_understanding_analyzer,
 )
 from app.services.ai.schemas import LLMResponse, TokenUsageRecord
@@ -441,7 +444,8 @@ def test_rule_based_fallback(sample_knowledge):
     assert fallback.identity.name == "pallets/click"
     assert len(fallback.core_features) >= 1
     assert len(fallback.technology_stack) >= 1
-    assert fallback.provider == "fallback"
+    assert fallback.provider == "rule_based_fallback"
+    assert fallback.is_fallback is True
 
 
 # --- 4. API Endpoints Tests ---
@@ -546,3 +550,100 @@ def test_api_simulate_step_ai_summary(sample_knowledge):
     res_data = resp.json()
     assert res_data["project_understanding"] is not None
     assert res_data["project_understanding"]["identity"]["name"] == "pallets/click"
+    assert res_data["project_understanding"]["is_fallback"] is True
+    assert res_data["project_understanding"]["provider"] == "rule_based_fallback"
+
+
+# --- 5. Evidence Reference Validation & Provenance Tests ---
+
+def test_evidence_validator_fabricated_file_paths(sample_knowledge, sample_valid_llm_json_str):
+    data = json.loads(sample_valid_llm_json_str)
+    # Inject fabricated evidence reference
+    data["core_features"][0]["supporting_evidence"] = [
+        {
+            "file_path": "src/blockchain/fabricated_crypto_ledger.py",
+            "line_start": 42,
+            "evidence_type": "code",
+            "confidence": "high",
+            "status": "confirmed",
+        }
+    ]
+    understanding = ProjectUnderstanding.model_validate(data)
+    assert understanding.core_features[0].supporting_evidence[0].is_valid is True
+
+    # Run validator
+    validated = evidence_validator.validate_understanding(understanding, sample_knowledge)
+    ev = validated.core_features[0].supporting_evidence[0]
+    assert ev.is_valid is False
+    assert ev.status == "unverified"
+    assert ev.confidence == "low"
+    assert "does not exist in repository files" in ev.detail
+    # Feature confidence should be downgraded
+    assert validated.core_features[0].confidence == "low"
+    # Validation warnings recorded
+    assert len(validated.validation_warnings) >= 1
+    assert "fabricated_crypto_ledger.py" in validated.validation_warnings[0]
+
+
+def test_evidence_validator_line_numbers_sanitization(sample_knowledge, sample_valid_llm_json_str):
+    data = json.loads(sample_valid_llm_json_str)
+    data["core_features"][0]["supporting_evidence"] = [
+        {
+            "file_path": "src/click/core.py",
+            "line_start": -15,  # Invalid negative line number
+            "evidence_type": "code",
+            "confidence": "high",
+            "status": "confirmed",
+        },
+        {
+            "file_path": "src/click/decorators.py",
+            "line_start": 100,
+            "line_end": 20,  # Inverted line numbers
+            "evidence_type": "code",
+            "confidence": "high",
+            "status": "confirmed",
+        },
+    ]
+    understanding = ProjectUnderstanding.model_validate(data)
+    validated = evidence_validator.validate_understanding(understanding, sample_knowledge)
+
+    ev1 = validated.core_features[0].supporting_evidence[0]
+    assert ev1.is_valid is True
+    assert ev1.line_start is None  # Sanitized to None
+
+    ev2 = validated.core_features[0].supporting_evidence[1]
+    assert ev2.is_valid is True
+    assert ev2.line_end == 100  # Sanitized to line_start
+
+
+def test_fallback_provenance_and_no_fabricated_tokens(sample_knowledge):
+    analyzer = ProjectUnderstandingAnalyzer()
+    fallback = analyzer.create_rule_based_fallback(sample_knowledge)
+
+    assert fallback.is_fallback is True
+    assert fallback.provider == "rule_based_fallback"
+    assert fallback.model == "deterministic-rule-based"
+    assert fallback.token_usage is None
+    assert fallback.latency_ms == 0.0
+
+
+def test_api_post_project_understanding_in_progress_guard(sample_knowledge):
+    job = job_store.create_job(
+        repo_url="https://github.com/pallets/click",
+        repo_name="click",
+        repository_owner="pallets",
+        repository_name="click",
+        clone_url="https://github.com/pallets/click.git",
+    )
+    job.stages[0].status = StatusEnum.COMPLETED
+    job.stages[1].status = StatusEnum.COMPLETED
+    job.stages[2].status = StatusEnum.COMPLETED
+    job.stages[3].status = StatusEnum.IN_PROGRESS  # Already running
+    job.knowledge = sample_knowledge
+    job_store.update_job(job)
+
+    # Calling POST without refresh should return 409 Conflict
+    resp = client.post(f"/api/v1/jobs/{job.job_id}/project-understanding")
+    assert resp.status_code == 409
+    assert "already in progress" in resp.json()["detail"]
+

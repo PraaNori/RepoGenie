@@ -8,10 +8,12 @@ from typing import TYPE_CHECKING, Any, Dict, Optional
 
 if TYPE_CHECKING:
     from ....models.schemas import RepositoryKnowledge
+from ....core.config import settings
 from ..exceptions import AIError, AIInvalidResponseError
 from ..llm_manager import LLMManager
 from ..schemas import LLMGenerationOptions, LLMResponse
 from .evidence_builder import EvidenceBuilder, evidence_builder_service
+from .validator import evidence_validator
 from .prompts import (
     SYSTEM_PROMPT,
     build_project_understanding_user_prompt,
@@ -111,7 +113,7 @@ class ProjectUnderstandingAnalyzer:
         user_prompt = build_project_understanding_user_prompt(evidence_package)
         options = LLMGenerationOptions(
             temperature=0.2,
-            max_output_tokens=2600,
+            max_output_tokens=settings.AI_MAX_OUTPUT_TOKENS,
             timeout_seconds=90,
             system_instruction=SYSTEM_PROMPT,
         )
@@ -144,7 +146,7 @@ class ProjectUnderstandingAnalyzer:
             repair_prompt = build_repair_prompt(response.text[:6000], parse_error or "Invalid JSON")
             repair_options = LLMGenerationOptions(
                 temperature=0.0,
-                max_output_tokens=2600,
+                max_output_tokens=settings.AI_MAX_OUTPUT_TOKENS,
                 timeout_seconds=60,
                 system_instruction="You fix invalid JSON. Output only valid JSON without explanation.",
             )
@@ -191,6 +193,8 @@ class ProjectUnderstandingAnalyzer:
                 len(understanding.technology_stack),
                 understanding.latency_ms,
             )
+            # 8. Statically validate every evidence reference against actual repository files
+            understanding = evidence_validator.validate_understanding(understanding, knowledge)
             return understanding
         except Exception as val_exc:
             logger.error("ProjectUnderstanding validation failed for job %s: %s", job_id, val_exc)
@@ -383,7 +387,7 @@ class ProjectUnderstandingAnalyzer:
     def create_rule_based_fallback(
         self,
         knowledge: RepositoryKnowledge,
-        provider: str = "fallback",
+        provider: str = "rule_based_fallback",
         model: str = "deterministic-rule-based",
     ) -> ProjectUnderstanding:
         """
@@ -459,7 +463,7 @@ class ProjectUnderstandingAnalyzer:
                 )
             )
 
-        return ProjectUnderstanding(
+        fallback_obj = ProjectUnderstanding(
             schema_version="1.0",
             identity=ProjectIdentity(
                 name=repo_name,
@@ -516,8 +520,11 @@ class ProjectUnderstandingAnalyzer:
             ),
             provider=provider,
             model=model,
+            is_fallback=True,
             latency_ms=0.0,
+            token_usage=None,
         )
+        return evidence_validator.validate_understanding(fallback_obj, knowledge)
 
 
 project_understanding_analyzer = ProjectUnderstandingAnalyzer()

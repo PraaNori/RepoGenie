@@ -98,10 +98,17 @@ export default function ProjectUnderstandingCard({
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-5 mb-5 border-b border-slate-100">
         <div>
           <div className="flex items-center gap-2 mb-1.5 flex-wrap">
-            <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-semibold bg-indigo-50 text-indigo-700 border border-indigo-200">
-              <Sparkles className="w-3.5 h-3.5 text-indigo-600" />
-              <span>Milestone 3.2 AI Understanding</span>
-            </span>
+            {understanding.is_fallback ? (
+              <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-semibold bg-amber-50 text-amber-800 border border-amber-300">
+                <AlertCircle className="w-3.5 h-3.5 text-amber-600" />
+                <span>Deterministic Fallback (Offline Mode)</span>
+              </span>
+            ) : (
+              <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-semibold bg-indigo-50 text-indigo-700 border border-indigo-200">
+                <Sparkles className="w-3.5 h-3.5 text-indigo-600" />
+                <span>AI Understanding</span>
+              </span>
+            )}
             <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-mono font-medium bg-slate-100 text-slate-700 border border-slate-200">
               <Cpu className="w-3 h-3 text-slate-500" />
               <span>{understanding.provider}/{understanding.model}</span>
@@ -141,7 +148,7 @@ export default function ProjectUnderstandingCard({
       </div>
 
       {/* Purpose Banner */}
-      <div className="p-4 rounded-xl bg-slate-50/80 border border-slate-200/80 mb-6">
+      <div className="p-4 rounded-xl bg-slate-50/80 border border-slate-200/80 mb-4">
         <h4 className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">
           Primary Purpose
         </h4>
@@ -149,6 +156,21 @@ export default function ProjectUnderstandingCard({
           {identity.primary_purpose || identity.short_description}
         </p>
       </div>
+
+      {/* Validation Warnings Notice */}
+      {understanding.validation_warnings?.length > 0 && (
+        <div className="mb-6 p-3.5 rounded-xl bg-amber-50 border border-amber-200 text-xs text-amber-900 space-y-1.5">
+          <div className="flex items-center gap-1.5 font-bold text-amber-900">
+            <AlertCircle className="w-4 h-4 text-amber-600 flex-shrink-0" />
+            <span>Evidence Validation Notices ({understanding.validation_warnings.length})</span>
+          </div>
+          <ul className="list-disc list-inside space-y-0.5 text-amber-800 text-[11px]">
+            {understanding.validation_warnings.slice(0, 3).map((w, idx) => (
+              <li key={idx}>{w}</li>
+            ))}
+          </ul>
+        </div>
+      )}
 
       {/* Navigation Tabs */}
       <div className="flex border-b border-slate-200 mb-6 overflow-x-auto gap-1 text-xs sm:text-sm font-medium">
@@ -293,17 +315,21 @@ export default function ProjectUnderstandingCard({
                       {feat.supporting_evidence.map((ev, evIdx) => (
                         <span
                           key={evIdx}
-                          className="inline-flex items-center gap-1.5 px-2 py-1 rounded-md bg-slate-100 text-slate-700 font-mono text-[11px] border border-slate-200"
+                          className={`inline-flex items-center gap-1.5 px-2 py-1 rounded-md font-mono text-[11px] border ${
+                            ev.is_valid === false
+                              ? 'bg-amber-50 text-amber-800 border-amber-300'
+                              : 'bg-slate-100 text-slate-700 border-slate-200'
+                          }`}
                         >
-                          <FileCode className="w-3 h-3 text-slate-500" />
+                          <FileCode className={`w-3 h-3 ${ev.is_valid === false ? 'text-amber-600' : 'text-slate-500'}`} />
                           <span>{ev.file_path}</span>
                           {ev.line_start && (
-                            <span className="text-indigo-600 font-bold">
+                            <span className={ev.is_valid === false ? 'text-amber-700 font-bold' : 'text-indigo-600 font-bold'}>
                               L{ev.line_start}{ev.line_end ? `-${ev.line_end}` : ''}
                             </span>
                           )}
                           <span className="text-[9px] uppercase font-bold text-slate-400">
-                            [{ev.evidence_type}]
+                            [{ev.is_valid === false ? 'unverified' : ev.evidence_type}]
                           </span>
                         </span>
                       ))}
@@ -422,9 +448,13 @@ export default function ProjectUnderstandingCard({
                   {tech.supporting_evidence.map((ev, evIdx) => (
                     <span
                       key={evIdx}
-                      className="px-1.5 py-0.5 rounded bg-slate-50 text-slate-600 font-mono text-[10px] border border-slate-200"
+                      className={`px-1.5 py-0.5 rounded font-mono text-[10px] border ${
+                        ev.is_valid === false
+                          ? 'bg-amber-50 text-amber-800 border-amber-300'
+                          : 'bg-slate-50 text-slate-600 border-slate-200'
+                      }`}
                     >
-                      {ev.file_path}
+                      {ev.file_path} {ev.is_valid === false ? '(unverified)' : ''}
                     </span>
                   ))}
                 </div>

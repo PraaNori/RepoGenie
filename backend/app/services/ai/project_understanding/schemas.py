@@ -11,8 +11,9 @@ class EvidenceReference(BaseModel):
     line_end: Optional[int] = None
     evidence_type: str = "code"  # "code", "readme", "manifest", "config", "import", "comment"
     confidence: str = "high"  # "high", "medium", "low"
-    status: str = "confirmed"  # "confirmed", "inferred", "unknown"
+    status: str = "confirmed"  # "confirmed", "inferred", "unknown", "unverified"
     detail: Optional[str] = None
+    is_valid: bool = True
 
 
 class ProjectIdentity(BaseModel):
@@ -80,5 +81,7 @@ class ProjectUnderstanding(BaseModel):
     generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     provider: str = ""
     model: str = ""
+    is_fallback: bool = False
     latency_ms: float = 0.0
     token_usage: Optional[TokenUsageRecord] = None
+    validation_warnings: List[str] = Field(default_factory=list)

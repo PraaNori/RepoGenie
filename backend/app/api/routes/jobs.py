@@ -490,6 +490,13 @@ async def generate_job_project_understanding(
     if internal.project_understanding and not refresh:
         return internal.project_understanding
 
+    # Prevent concurrent duplicate generation requests
+    if internal.stages[3].status == StatusEnum.IN_PROGRESS and not refresh:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Project understanding generation is already in progress for job '{job_id}'.",
+        )
+
     # Update job stage to IN_PROGRESS
     job_store.update_job_ai_summary_started(job_id)
 
