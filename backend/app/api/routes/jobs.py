@@ -22,6 +22,10 @@ from ...services.ai.code_understanding import (
     RepositoryCodeUnderstanding,
     code_understanding_analyzer,
 )
+from ...services.ai.workflow_understanding import (
+    RepositoryWorkflowUnderstanding,
+    workflow_understanding_analyzer,
+)
 from ...services.repo.analyzer import repo_analyzer_service
 from ...services.repo.architecture_analyzer import architecture_analyzer_service
 from ...services.repo.code_parser import code_parser_service
@@ -627,6 +631,118 @@ def get_job_code_understanding(job_id: str):
 
     return internal.code_understanding
 
+
+@router.post("/{job_id}/workflow-understanding", response_model=RepositoryWorkflowUnderstanding)
+async def generate_job_workflow_understanding(
+    job_id: str,
+    provider: Optional[str] = Query(None, description="AI provider to use (gemini or groq)"),
+    refresh: bool = Query(False, description="Force re-generation even if workflow understanding already exists"),
+):
+    """
+    Generates or retrieves cached application workflow and data-flow understanding for a job.
+    Requires completed repository analysis, parsed code structure, CallGraph, and knowledge.
+    Does not reset Stage 4 completion status or alter Stage 5 pending status.
+    """
+    internal = job_store.get_internal_job(job_id)
+    if not internal:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Job with ID '{job_id}' not found",
+        )
+
+    # 1. Prerequisite verification
+    if internal.stages[0].status != StatusEnum.COMPLETED or not internal.local_path:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Repository ingestion must be completed first (source directory unavailable).",
+        )
+    if internal.stages[1].status != StatusEnum.COMPLETED or not internal.analysis:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Repository structure analysis must be completed first (current status: {internal.stages[1].status.value}).",
+        )
+    if not internal.code_analysis:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Parsed code structure is required before workflow understanding can be generated.",
+        )
+    if not internal.architecture or not getattr(internal.architecture, "call_graph", None):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Architecture analysis and directional CallGraph are required before workflow understanding can be generated.",
+        )
+    if internal.stages[2].status != StatusEnum.COMPLETED or not internal.knowledge:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Repository knowledge consolidation must be completed first (current status: {internal.stages[2].status.value}).",
+        )
+
+    # Acquire dedicated per-job lock to serialize concurrent requests for the same job atomically
+    job_lock = await job_store.get_job_lock(job_id)
+    async with job_lock:
+        internal = job_store.get_internal_job(job_id)
+        if not internal or not internal.knowledge:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Job with ID '{job_id}' not found",
+            )
+
+        # Return cached if already available and refresh not requested
+        if internal.workflow_understanding and not refresh:
+            return internal.workflow_understanding
+
+        try:
+            understanding = await workflow_understanding_analyzer.analyze_workflows(
+                job_id=job_id,
+                knowledge=internal.knowledge,
+                project_understanding=internal.project_understanding,
+                code_understanding=internal.code_understanding,
+                provider_name=provider,
+                local_path=internal.local_path,
+            )
+            job_store.update_job_workflow_understanding_success(job_id, understanding)
+            return understanding
+        except AIError as ai_err:
+            logger.error("AI error during workflow understanding for job %s: %s", job_id, ai_err)
+            err_msg = ai_err.message
+            if internal.local_path and internal.local_path in err_msg:
+                err_msg = err_msg.replace(internal.local_path, "<REPO_ROOT>")
+            raise HTTPException(
+                status_code=ai_err.status_code if ai_err.status_code and ai_err.status_code >= 400 else 500,
+                detail=f"AI workflow understanding failed: {err_msg}",
+            )
+        except Exception as exc:
+            logger.exception("Unexpected error during workflow understanding for job %s: %s", job_id, exc)
+            exc_msg = str(exc)
+            if internal.local_path and internal.local_path in exc_msg:
+                exc_msg = exc_msg.replace(internal.local_path, "<REPO_ROOT>")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Unexpected error during workflow understanding: {exc_msg}",
+            )
+
+
+@router.get("/{job_id}/workflow-understanding", response_model=RepositoryWorkflowUnderstanding)
+def get_job_workflow_understanding(job_id: str):
+    """
+    Retrieves cached application workflow and data-flow understanding for a job.
+    Returns 404 if not yet generated.
+    """
+    internal = job_store.get_internal_job(job_id)
+    if not internal:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Job with ID '{job_id}' not found",
+        )
+
+    if not internal.workflow_understanding:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Workflow understanding has not yet been generated for job '{job_id}'. Call POST /api/v1/jobs/{job_id}/workflow-understanding to generate.",
+        )
+
+    return internal.workflow_understanding
+
 @router.post("/{job_id}/simulate-step", response_model=JobResponse)
 def simulate_job_step(job_id: str):
     """
@@ -680,6 +796,10 @@ def simulate_job_step(job_id: str):
                         internal_job.knowledge,
                         project_understanding=internal_job.project_understanding,
                         local_path=internal_job.local_path,
+                    )
+                if not internal_job.workflow_understanding:
+                    internal_job.workflow_understanding = workflow_understanding_analyzer.create_deterministic_fallback(
+                        knowledge=internal_job.knowledge,
                     )
 
             # Check if there is a next stage

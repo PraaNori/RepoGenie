@@ -410,5 +410,6 @@ class JobResponse(BaseModel):
     knowledge: Optional[RepositoryKnowledge] = None
     project_understanding: Optional[ProjectUnderstanding] = None
     has_code_understanding: bool = False
+    has_workflow_understanding: bool = False
     result: Optional[VideoResult] = None
     error: Optional[str] = None

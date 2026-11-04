@@ -17,6 +17,7 @@ from ...models.schemas import (
 )
 from ..ai.project_understanding.schemas import ProjectUnderstanding
 from ..ai.code_understanding.schemas import RepositoryCodeUnderstanding
+from ..ai.workflow_understanding.schemas import RepositoryWorkflowUnderstanding
 
 # Standard 9 pipeline stages
 PIPELINE_STAGES = [
@@ -52,6 +53,7 @@ class JobInternal(BaseModel):
     knowledge: Optional[RepositoryKnowledge] = None
     project_understanding: Optional[ProjectUnderstanding] = None
     code_understanding: Optional[RepositoryCodeUnderstanding] = None
+    workflow_understanding: Optional[RepositoryWorkflowUnderstanding] = None
     result: Optional[VideoResult] = None
     error: Optional[str] = None
 
@@ -77,6 +79,7 @@ class JobInternal(BaseModel):
             knowledge=self.knowledge,
             project_understanding=self.project_understanding,
             has_code_understanding=bool(self.code_understanding is not None),
+            has_workflow_understanding=bool(self.workflow_understanding is not None),
             result=self.result,
             error=self.error,
         )
@@ -397,6 +400,28 @@ class JobStore:
         job.code_understanding = code_understanding
         job.updated_at = now
         return job
+
+    def update_job_workflow_understanding_success(
+        self,
+        job_id: str,
+        workflow_understanding: RepositoryWorkflowUnderstanding,
+    ) -> Optional[JobInternal]:
+        job = self._jobs.get(job_id)
+        if not job:
+            return None
+        now = datetime.now(timezone.utc)
+        job.workflow_understanding = workflow_understanding
+        job.updated_at = now
+        return job
+
+    def get_job_workflow_understanding(
+        self,
+        job_id: str,
+    ) -> Optional[RepositoryWorkflowUnderstanding]:
+        job = self._jobs.get(job_id)
+        if not job:
+            return None
+        return job.workflow_understanding
 
     def update_job_ai_summary_failed(self, job_id: str, error_message: str) -> Optional[JobInternal]:
         job = self._jobs.get(job_id)
