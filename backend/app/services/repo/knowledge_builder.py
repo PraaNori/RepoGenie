@@ -388,20 +388,23 @@ class KnowledgeBuilderService:
                 dep_clean = dep.name.lower()
                 declared_dependencies[dep_clean] = dep.version_spec
 
+        # Determine primary manifest (if available) across dependency manifests
+        primary_manifest: Optional[str] = (
+            analysis.dependency_files[0].file_path if analysis.dependency_files else None
+        )
+
         # Helper to resolve actual evidence file for frameworks, databases, and tools
         def resolve_tech_file(key: str, in_d: bool, in_imp: bool) -> Optional[str]:
             if in_d and analysis.dependency_files:
                 for mf in analysis.dependency_files:
                     if any(key == dep.name.lower() for dep in mf.dependencies):
                         return mf.file_path
-                return analysis.dependency_files[0].file_path
+                return primary_manifest
             if in_imp:
                 for pf in parsed_repo.files:
                     if any(key in imp.module.lower() for imp in pf.imports):
                         return pf.file_path
-            if analysis.dependency_files:
-                return analysis.dependency_files[0].file_path
-            return None
+            return primary_manifest
 
         # 2. Frameworks
         for framework_key, (disp_name, _lang) in FRAMEWORK_CATALOG.items():
@@ -509,10 +512,11 @@ class KnowledgeBuilderService:
                             is_confirmed=True,
                         )
                     )
-                    if len(evidence_list) < self.max_evidence_records:
+                    tool_file = resolve_tech_file(key_lower, in_deps, in_imports)
+                    if tool_file and tool_file in all_files and len(evidence_list) < self.max_evidence_records:
                         evidence_list.append(
                             SourceEvidenceRecord(
-                                file_path=primary_manifest if in_deps else "source_code",
+                                file_path=tool_file,
                                 start_line=1,
                                 evidence_type="manifest_dependency" if in_deps else "code_import",
                                 symbol_or_statement=f"Tool: {disp_name}",
