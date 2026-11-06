@@ -28,7 +28,7 @@ from ....core.config import settings
 from ..exceptions import AIError, AIInvalidResponseError
 from ..llm_manager import LLMManager, llm_manager as default_llm_manager
 from ..schemas import LLMGenerationOptions, LLMResponse, TokenUsageRecord
-from ..script_generation.schemas import EducationalScript
+from ..script_generation.schemas import EducationalScript, SectionPurpose
 from .evidence_builder import (
     StoryboardEvidenceBuilder,
     StoryboardEvidencePackage,
@@ -42,6 +42,7 @@ from .prompts import (
 from .schemas import (
     EducationalStoryboard,
     StoryboardGenerationMetadata,
+    VisualType,
 )
 from .validator import StoryboardValidator, storyboard_validator
 
@@ -209,6 +210,160 @@ class EducationalStoryboardAnalyzer:
             raise json.JSONDecodeError("Top-level JSON value must be an object", clean_text, 0)
         return parsed
 
+    def create_deterministic_fallback(
+        self,
+        script: EducationalScript,
+        knowledge: RepositoryKnowledge,
+        project_understanding: Optional[ProjectUnderstanding] = None,
+        code_understanding: Optional[RepositoryCodeUnderstanding] = None,
+        workflow_understanding: Optional[RepositoryWorkflowUnderstanding] = None,
+        local_path: Optional[str] = None,
+        evidence_package: Optional[StoryboardEvidencePackage] = None,
+        reason: Optional[str] = None,
+    ) -> EducationalStoryboard:
+        """
+        Creates a grounded, deterministic fallback EducationalStoryboard when Gemini API calls
+        fail, time out, or quota is exhausted.
+
+        Guarantees:
+        - 100% script section coverage with contiguous scene numbers.
+        - Exact duration synchronization matching script sections and total script duration.
+        - Appropriate pedagogical visual types mapped from section purposes.
+        - Distinct, non-overlapping spoken narration excerpts.
+        - Verified grounding in repository files, components, and static relationships.
+        - Provenance metadata clearly identifying 'deterministic_fallback' and 'rule_based_synthesis'
+          so fallback content is never silently presented as Gemini-generated.
+        """
+        repo_name = knowledge.repository.name if knowledge and knowledge.repository else script.repository_name
+        total_sections = len(script.sections)
+        scenes_list: List[Dict[str, Any]] = []
+
+        for idx, sec in enumerate(script.sections):
+            scene_num = idx + 1
+            scene_id = f"scene-{scene_num}"
+
+            # Purpose-to-visual type mapping
+            sec_p = sec.purpose.value if hasattr(sec.purpose, "value") else str(sec.purpose).lower()
+            if sec_p in ("hook", "introduction", "problem"):
+                visual_type = VisualType.TITLE_CARD.value
+                layout_hint = "centered_hero"
+                vis_desc = (
+                    f"Title card displaying repository name '{repo_name}' with primary language badge "
+                    f"and concise purpose statement."
+                )
+            elif sec_p in ("architecture_overview", "architecture"):
+                visual_type = VisualType.ARCHITECTURE_DIAGRAM.value
+                layout_hint = "diagram_flow"
+                comp_count = len(knowledge.architecture.components) if knowledge and knowledge.architecture else len(sec.related_components)
+                vis_desc = (
+                    f"Architecture diagram displaying high-level system boundary and {max(1, comp_count)} "
+                    f"verified architectural components with dependency connections."
+                )
+            elif sec_p in ("technology_overview",):
+                visual_type = VisualType.TECHNOLOGY_OVERVIEW.value
+                layout_hint = "split_screen"
+                vis_desc = f"Technology overview displaying programming languages, frameworks, and key runtime dependencies for {repo_name}."
+            elif sec_p in ("component_deep_dive",):
+                visual_type = VisualType.COMPONENT_DIAGRAM.value
+                layout_hint = "split_screen"
+                vis_desc = f"Component diagram illustrating modules and primary responsibilities for {sec.title}."
+            elif sec_p in ("workflow",):
+                visual_type = VisualType.WORKFLOW_DIAGRAM.value
+                layout_hint = "diagram_flow"
+                vis_desc = f"Workflow sequence diagram tracing execution flow and component interfaces for {sec.title}."
+            elif sec_p in ("data_flow",):
+                visual_type = VisualType.DATA_FLOW_VISUALIZATION.value
+                layout_hint = "diagram_flow"
+                vis_desc = f"Data flow diagram tracing inputs, transformations, and outputs across components for {sec.title}."
+            elif sec_p in ("conclusion", "outro"):
+                visual_type = VisualType.SUMMARY_CARD.value
+                layout_hint = "centered_hero"
+                vis_desc = f"Summary card recapping key architectural strengths, modular patterns, and takeaways for {repo_name}."
+            else:
+                visual_type = VisualType.COMPONENT_DIAGRAM.value
+                layout_hint = "split_screen"
+                vis_desc = f"Component diagram illustrating modules and primary responsibilities for {sec.title}."
+
+            on_screen = [c.statement[:45] for c in sec.claims[:2]] if sec.claims else [sec.title[:45]]
+            transition = sec.transition_to_next or ("Crossfade to next scene" if scene_num < total_sections else None)
+
+            # Files and components
+            rel_files = [c.file_path for c in sec.related_components if c.file_path] or [e.file_path for e in sec.evidence if e.file_path]
+            rel_comps = [c.model_dump() for c in sec.related_components]
+            rel_wf = [w.model_dump() for w in sec.related_workflow_steps]
+            ev_list = [e.model_dump() for e in sec.evidence]
+
+            scenes_list.append({
+                "scene_id": scene_id,
+                "scene_number": scene_num,
+                "script_section_id": sec.section_id,
+                "title": sec.title,
+                "purpose": sec.purpose_description or f"Explain {sec.title}",
+                "estimated_duration_seconds": sec.estimated_duration_seconds,
+                "visual_type": visual_type,
+                "visual_description": vis_desc,
+                "on_screen_text": on_screen,
+                "narration": {
+                    "script_section_id": sec.section_id,
+                    "excerpt": sec.narration_text,
+                },
+                "layout_hint": layout_hint,
+                "related_files": rel_files,
+                "related_components": rel_comps,
+                "related_workflow_steps": rel_wf,
+                "evidence": ev_list,
+                "transition_to_next": transition,
+            })
+
+        fallback_dict = {
+            "storyboard_id": f"sb-{script.script_id}-fallback",
+            "script_id": script.script_id,
+            "title": f"{script.title} Storyboard (Deterministic Fallback)",
+            "total_estimated_duration_seconds": script.total_estimated_duration_seconds,
+            "video_format": {
+                "orientation": script.video_format.orientation if script.video_format else "landscape",
+                "aspect_ratio": script.video_format.aspect_ratio if script.video_format else "16:9",
+            },
+            "scenes": scenes_list,
+            "validation_warnings": [
+                f"Deterministic fallback triggered: {reason or 'Gemini LLM unavailable or quota exhausted'}."
+            ],
+        }
+
+        normalized = self.validator.normalize_and_reconcile_raw_storyboard(
+            raw_dict=fallback_dict,
+            script=script,
+            knowledge=knowledge,
+            evidence_package=evidence_package,
+            local_path=local_path,
+        )
+
+        sources = list(evidence_package.available_sources) if evidence_package else []
+        missing = list(evidence_package.missing_sources) if evidence_package else []
+        chars = evidence_package.used_chars if evidence_package else 0
+
+        normalized["metadata"] = StoryboardGenerationMetadata(
+            generated_at=datetime.now(timezone.utc),
+            provider="deterministic_fallback",
+            model="rule_based_synthesis",
+            is_fallback=True,
+            latency_ms=0.0,
+            token_usage=None,
+            source_understandings=sources,
+            missing_understandings=missing,
+            llm_call_count=0,
+            revision_attempted=False,
+            evidence_package_chars=chars,
+        ).model_dump()
+
+        storyboard = EducationalStoryboard.model_validate(normalized)
+        return self.validator.validate_storyboard(
+            storyboard=storyboard,
+            script=script,
+            knowledge=knowledge,
+            local_path=local_path,
+        )
+
     async def generate_storyboard(
         self,
         job_id: str,
@@ -220,17 +375,30 @@ class EducationalStoryboardAnalyzer:
         provider_name: Optional[str] = None,
         local_path: Optional[str] = None,
         max_evidence_chars: Optional[int] = None,
+        allow_fallback: bool = True,
     ) -> EducationalStoryboard:
         """
         Generates and validates an ``EducationalStoryboard`` matching ``script``.
+        Uses Gemini as the dedicated LLM provider.
 
-        Raises ``StoryboardGenerationError`` (which is also an ``AIError``) if
-        generation or validation fails.
+        If Gemini generation fails or quota is exhausted:
+        - When allow_fallback=True: returns a validated deterministic fallback storyboard.
+        - When allow_fallback=False: raises StoryboardGenerationError (AIError).
         """
         if script is None:
             raise ValueError("EducationalScript is required to generate a storyboard.")
         if knowledge is None:
             raise ValueError("RepositoryKnowledge is required to generate a storyboard.")
+
+        # Dedicated provider enforcement: Gemini is the dedicated provider for storyboard generation.
+        # Groq is strictly prohibited for storyboard generation.
+        effective_provider = (provider_name or "gemini").lower().strip()
+        if effective_provider == "groq":
+            raise StoryboardGenerationError(
+                "Groq is not permitted for educational storyboard generation. Gemini is the dedicated provider.",
+                provider="groq",
+            )
+        target_provider = "gemini"
 
         # 1. Build compact, grounded storyboard context
         evidence_package = self.evidence_builder.build_evidence_package(
@@ -247,9 +415,10 @@ class EducationalStoryboardAnalyzer:
         user_prompt = build_storyboard_user_prompt(evidence_package)
         prompt_chars = len(SYSTEM_PROMPT) + len(user_prompt)
         logger.info(
-            "Job %s: Starting educational storyboard generation for %s (~%d prompt chars)",
+            "Job %s: Starting educational storyboard generation for %s using %s (~%d prompt chars)",
             job_id,
             script.repository_name,
+            target_provider,
             prompt_chars,
         )
 
@@ -260,20 +429,36 @@ class EducationalStoryboardAnalyzer:
             system_instruction=SYSTEM_PROMPT,
         )
 
-        # 3. Call LLM provider
+        # 3. Call Gemini LLM provider
         llm_call_count = 0
         try:
             llm_call_count += 1
             response: LLMResponse = await self.llm_manager.generate(
                 prompt=user_prompt,
                 options=options,
-                provider_name=provider_name,
+                provider_name=target_provider,
                 operation="storyboard_generation",
                 job_id=job_id,
             )
         except Exception as exc:
-            logger.error("Job %s: Storyboard LLM call failed: %s", job_id, exc)
-            raise _wrap_ai_error(exc, default_provider=provider_name or self.llm_manager.active_provider_name) from exc
+            logger.error("Job %s: Storyboard Gemini LLM call failed: %s", job_id, exc)
+            if allow_fallback:
+                logger.warning(
+                    "Job %s: Gemini storyboard generation failed (%s). Triggering deterministic fallback.",
+                    job_id,
+                    exc,
+                )
+                return self.create_deterministic_fallback(
+                    script=script,
+                    knowledge=knowledge,
+                    project_understanding=project_understanding,
+                    code_understanding=code_understanding,
+                    workflow_understanding=workflow_understanding,
+                    local_path=local_path,
+                    evidence_package=evidence_package,
+                    reason=f"Gemini LLM failure: {exc}",
+                )
+            raise _wrap_ai_error(exc, default_provider=target_provider) from exc
 
         total_latency_ms = float(response.latency_ms or 0.0)
         combined_usage = response.token_usage.model_copy(deep=True) if response.token_usage else None
@@ -308,7 +493,7 @@ class EducationalStoryboardAnalyzer:
                 repair_resp: LLMResponse = await self.llm_manager.generate(
                     prompt=repair_prompt,
                     options=repair_options,
-                    provider_name=provider_name,
+                    provider_name=target_provider,
                     operation="storyboard_generation_repair",
                     job_id=job_id,
                 )
@@ -318,6 +503,22 @@ class EducationalStoryboardAnalyzer:
                 logger.info("Job %s: JSON repair succeeded for storyboard generation.", job_id)
             except Exception as repair_exc:
                 logger.error("Job %s: Storyboard JSON repair failed: %s", job_id, repair_exc)
+                if allow_fallback:
+                    logger.warning(
+                        "Job %s: Storyboard JSON repair failed (%s). Triggering deterministic fallback.",
+                        job_id,
+                        repair_exc,
+                    )
+                    return self.create_deterministic_fallback(
+                        script=script,
+                        knowledge=knowledge,
+                        project_understanding=project_understanding,
+                        code_understanding=code_understanding,
+                        workflow_understanding=workflow_understanding,
+                        local_path=local_path,
+                        evidence_package=evidence_package,
+                        reason=f"JSON repair failed: {repair_exc}",
+                    )
                 err = AIInvalidResponseError(
                     f"Educational storyboard LLM output was malformed JSON and repair failed: {repair_exc}",
                     provider=response.provider,
@@ -367,6 +568,22 @@ class EducationalStoryboardAnalyzer:
             return storyboard
         except Exception as val_exc:
             logger.error("Job %s: EducationalStoryboard validation failed: %s", job_id, val_exc)
+            if allow_fallback:
+                logger.warning(
+                    "Job %s: Storyboard validation failed (%s). Triggering deterministic fallback.",
+                    job_id,
+                    val_exc,
+                )
+                return self.create_deterministic_fallback(
+                    script=script,
+                    knowledge=knowledge,
+                    project_understanding=project_understanding,
+                    code_understanding=code_understanding,
+                    workflow_understanding=workflow_understanding,
+                    local_path=local_path,
+                    evidence_package=evidence_package,
+                    reason=f"Validation failed: {val_exc}",
+                )
             err = AIInvalidResponseError(
                 f"Educational storyboard failed schema or synchronization validation: {val_exc}",
                 provider=response.provider,

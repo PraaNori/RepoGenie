@@ -24,15 +24,20 @@ Covers:
 from __future__ import annotations
 
 import json
+from typing import Any, Dict, List, Optional
 from unittest.mock import AsyncMock
 
 import pytest
 
+from app.core.config import settings
 from app.services.ai.exceptions import (
+    AIAuthenticationError,
     AIConfigurationError,
     AIError,
     AIInvalidResponseError,
     AIProviderUnavailableError,
+    AIQuotaExhaustedError,
+    AIRateLimitError,
     AITimeoutError,
 )
 from app.services.ai.llm_manager import LLMManager
@@ -251,21 +256,26 @@ def make_valid_llm_storyboard_dict(script_id: str = "script-click-75s") -> dict:
     }
 
 
-def make_mock_llm(response_text: str, provider: str = "groq", model: str = "openai/gpt-oss-120b") -> AsyncMock:
+def make_mock_llm(
+    response_text: str,
+    provider: str = "gemini",
+    model: Optional[str] = None,
+) -> AsyncMock:
+    resolved_model = model or settings.GEMINI_MODEL
     mock_llm = AsyncMock(spec=LLMManager)
     mock_llm.active_provider_name = provider
     mock_llm.generate = AsyncMock(
         return_value=LLMResponse(
             text=response_text,
             provider=provider,
-            model=model,
+            model=resolved_model,
             latency_ms=350.0,
             token_usage=TokenUsageRecord(
                 prompt_tokens=850,
                 completion_tokens=420,
                 total_tokens=1270,
                 provider=provider,
-                model=model,
+                model=resolved_model,
                 operation="storyboard_generation",
                 job_id="job-test-sb",
             ),
@@ -691,12 +701,12 @@ async def test_unrecoverable_malformed_json_raises_clear_failure():
     knowledge = make_repository_knowledge()
 
     mock_llm = AsyncMock(spec=LLMManager)
-    mock_llm.active_provider_name = "groq"
+    mock_llm.active_provider_name = "gemini"
     mock_llm.generate = AsyncMock(
         return_value=LLMResponse(
             text="not json at all",
-            provider="groq",
-            model="openai/gpt-oss-120b",
+            provider="gemini",
+            model=settings.GEMINI_MODEL,
             latency_ms=100.0,
         )
     )
@@ -707,6 +717,7 @@ async def test_unrecoverable_malformed_json_raises_clear_failure():
             job_id="job-unrec-sb",
             script=script,
             knowledge=knowledge,
+            allow_fallback=False,
         )
     assert mock_llm.generate.call_count == 2
 
@@ -720,9 +731,10 @@ async def test_unrecoverable_malformed_json_raises_clear_failure():
 @pytest.mark.parametrize(
     "raised_exc",
     [
-        AIProviderUnavailableError("Groq service temporarily down", provider="groq"),
-        AIConfigurationError("GROQ_API_KEY is missing", provider="groq"),
-        AITimeoutError("Request timed out after 60s", provider="groq"),
+        AIProviderUnavailableError("Gemini service temporarily down", provider="gemini"),
+        AIConfigurationError("GEMINI_API_KEY is missing", provider="gemini"),
+        AITimeoutError("Request timed out after 60s", provider="gemini"),
+        AIQuotaExhaustedError("Gemini quota exhausted", provider="gemini"),
     ],
 )
 async def test_provider_errors_raise_clear_failure_without_fabricating_storyboard(raised_exc):
@@ -730,7 +742,7 @@ async def test_provider_errors_raise_clear_failure_without_fabricating_storyboar
     knowledge = make_repository_knowledge()
 
     mock_llm = AsyncMock(spec=LLMManager)
-    mock_llm.active_provider_name = "groq"
+    mock_llm.active_provider_name = "gemini"
     mock_llm.generate = AsyncMock(side_effect=raised_exc)
 
     analyzer = EducationalStoryboardAnalyzer(llm_manager=mock_llm)
@@ -739,9 +751,100 @@ async def test_provider_errors_raise_clear_failure_without_fabricating_storyboar
             job_id="job-fail-sb",
             script=script,
             knowledge=knowledge,
+            allow_fallback=False,
         )
     assert isinstance(exc_info.value, AIError)
     assert isinstance(exc_info.value, type(raised_exc))
+
+
+# ---------------------------------------------------------------------------
+# 11b. Gemini Provider Selection and Fallback Verification
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_gemini_dedicated_provider_selection_and_groq_not_called():
+    """Verifies that storyboard generation explicitly calls Gemini, never Groq."""
+    script = make_test_script()
+    knowledge = make_repository_knowledge()
+    raw_payload = make_valid_llm_storyboard_dict(script.script_id)
+
+    mock_llm = make_mock_llm(json.dumps(raw_payload), provider="gemini", model=settings.GEMINI_MODEL)
+    analyzer = EducationalStoryboardAnalyzer(llm_manager=mock_llm)
+
+    storyboard = await analyzer.generate_storyboard(
+        job_id="job-gemini-prov",
+        script=script,
+        knowledge=knowledge,
+    )
+
+    assert mock_llm.generate.call_count == 1
+    call_kwargs = mock_llm.generate.call_args.kwargs
+    assert call_kwargs.get("provider_name") == "gemini"
+    assert call_kwargs.get("provider_name") != "groq"
+    assert storyboard.metadata.provider == "gemini"
+
+
+@pytest.mark.anyio
+async def test_groq_explicitly_rejected_for_storyboard_generation():
+    """Passing provider_name='groq' must be rejected to enforce Gemini dedication."""
+    script = make_test_script()
+    knowledge = make_repository_knowledge()
+
+    mock_llm = AsyncMock(spec=LLMManager)
+    analyzer = EducationalStoryboardAnalyzer(llm_manager=mock_llm)
+
+    with pytest.raises(StoryboardGenerationError) as exc_info:
+        await analyzer.generate_storyboard(
+            job_id="job-reject-groq",
+            script=script,
+            knowledge=knowledge,
+            provider_name="groq",
+        )
+    assert "Groq is not permitted" in str(exc_info.value)
+    assert mock_llm.generate.call_count == 0
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "error_exc",
+    [
+        AIQuotaExhaustedError("Gemini quota exhausted (Status 429)", provider="gemini"),
+        AIRateLimitError("Gemini rate limit exceeded", provider="gemini"),
+        AIProviderUnavailableError("Gemini service unavailable (Status 503)", provider="gemini"),
+        AITimeoutError("Gemini request timed out after 60s", provider="gemini"),
+    ],
+)
+async def test_gemini_errors_and_quota_exhaustion_trigger_documented_fallback(error_exc):
+    """Verifies that Gemini errors/quota exhaustion trigger the documented deterministic fallback."""
+    script = make_test_script()
+    knowledge = make_repository_knowledge()
+
+    mock_llm = AsyncMock(spec=LLMManager)
+    mock_llm.generate = AsyncMock(side_effect=error_exc)
+
+    analyzer = EducationalStoryboardAnalyzer(llm_manager=mock_llm)
+    storyboard = await analyzer.generate_storyboard(
+        job_id="job-gemini-fallback",
+        script=script,
+        knowledge=knowledge,
+        allow_fallback=True,
+    )
+
+    assert isinstance(storyboard, EducationalStoryboard)
+    assert storyboard.metadata.is_fallback is True
+    assert storyboard.metadata.provider == "deterministic_fallback"
+    assert storyboard.metadata.model == "rule_based_synthesis"
+    # Never silently present deterministic fallback as Gemini-generated content
+    assert storyboard.metadata.provider != "gemini"
+
+    # All script sections must be covered
+    covered_sections = {scene.script_section_id for scene in storyboard.scenes}
+    for sec in script.sections:
+        assert sec.section_id in covered_sections
+
+    # Total duration must equal script duration exactly
+    assert round(storyboard.total_estimated_duration_seconds, 2) == round(script.total_estimated_duration_seconds, 2)
 
 
 # ---------------------------------------------------------------------------

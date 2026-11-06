@@ -135,6 +135,21 @@ class StoryboardEvidencePackage(BaseModel):
             "architecture_interactions": [i.model_dump() for i in self.interactions],
             "workflows": [w.model_dump() for w in self.workflows],
             "technologies": self.technologies,
+            "visual_generation_capabilities": {
+                "supported_scene_types": [
+                    "title_card",
+                    "architecture_diagram",
+                    "component_diagram",
+                    "code_walkthrough",
+                    "workflow_diagram",
+                    "data_flow_visualization",
+                    "technology_overview",
+                    "summary_card",
+                ],
+                "diagram_rendering": "Statically verified boxes, labels, and directional connections",
+                "code_rendering": "Syntax-highlighted code panels with symbol callouts and line highlights",
+                "card_rendering": "Clean hero layouts, key badges, bullet callouts, and summary metrics",
+            },
             "missing_sources": [s.value for s in self.missing_sources],
         }
 
