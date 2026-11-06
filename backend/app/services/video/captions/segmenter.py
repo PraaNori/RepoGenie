@@ -135,6 +135,11 @@ def generate_scene_captions(
     the measured audio duration proportionally across all cues.
     
     Timestamps in the returned Captions are relative to the scene (start_seconds starting at 0.0).
+    Guarantees:
+    - Every cue has start_seconds < end_seconds (strictly positive duration).
+    - No cue extends beyond audio_duration_seconds.
+    - Cues do not overlap.
+    - Warns if duration is rushed or too tight for comfortable reading.
     """
     if not narration_text or not narration_text.strip():
         return []
@@ -143,20 +148,27 @@ def generate_scene_captions(
     if not cues:
         return []
 
-    duration = max(audio_duration_seconds, 0.5)
+    duration = round(audio_duration_seconds, 3) if audio_duration_seconds > 0 else 3.0
     num_cues = len(cues)
+
+    # Detect rushed / tight timing
+    cue_warnings: List[str] = []
+    if audio_duration_seconds > 0 and (audio_duration_seconds < num_cues * 0.8 or audio_duration_seconds < 1.0):
+        cue_warnings.append(
+            f"Scene audio duration ({audio_duration_seconds:.2f}s) is short for {num_cues} caption cue(s); reading speed may be hurried."
+        )
 
     # Calculate weights
     weights = [calculate_cue_weight(c) for c in cues]
     total_weight = sum(weights)
 
     # Determine lead-in and inter-cue separation
-    lead_in = 0.05 if duration >= 1.0 else 0.0
+    lead_in = 0.05 if duration >= 1.2 else 0.0
     total_gaps = (num_cues - 1) * INTER_CUE_GAP_SECONDS if num_cues > 1 else 0.0
 
     # Ensure active spoken time fits within measured duration
     available_time = duration - lead_in - total_gaps
-    if available_time <= 0.2:
+    if available_time <= (num_cues * 0.1):
         # Fallback for very short clips: eliminate gaps and lead-in
         lead_in = 0.0
         total_gaps = 0.0
@@ -171,18 +183,25 @@ def generate_scene_captions(
 
     for idx, (cue_text, weight) in enumerate(zip(cues, weights)):
         seq = idx + 1
-        cue_duration = (weight / total_weight) * available_time
+        raw_cue_duration = (weight / total_weight) * available_time
+        cue_duration = max(raw_cue_duration, 0.05)
 
-        # Ensure cue duration is reasonable
-        cue_duration = max(cue_duration, 0.2)
         start_sec = round(current_time, 3)
-        end_sec = round(start_sec + cue_duration, 3)
+        end_sec = round(min(start_sec + cue_duration, duration), 3)
 
-        # Clamp final cue so it does not exceed measured scene audio duration
+        # Guarantee strictly positive duration
+        if end_sec <= start_sec:
+            if start_sec + 0.05 <= duration:
+                end_sec = round(start_sec + 0.05, 3)
+            else:
+                start_sec = max(0.0, round(duration - 0.05, 3))
+                end_sec = round(duration, 3)
+
+        # Clamp final cue so it never exceeds measured scene audio duration
         if idx == num_cues - 1:
-            end_sec = min(end_sec, round(duration, 3))
+            end_sec = round(min(end_sec, duration), 3)
             if end_sec <= start_sec:
-                end_sec = round(start_sec + 0.2, 3)
+                start_sec = max(0.0, round(end_sec - 0.05, 3))
 
         # Generate clean SRT and VTT timestamps
         start_srt = seconds_to_srt_timestamp(start_sec)
@@ -206,6 +225,7 @@ def generate_scene_captions(
                 end_timestamp_vtt=end_vtt,
                 text=cue_text,
                 timing_provenance=timing_provenance,
+                warnings=list(cue_warnings),
             )
         )
 

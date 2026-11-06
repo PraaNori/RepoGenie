@@ -562,3 +562,334 @@ def test_api_full_caption_generation_and_file_streaming(
     finally:
         caption_storage_manager.delete_job_captions(job_id)
         job_store._jobs.pop(job_id, None)
+
+
+# ---------------------------------------------------------------------------
+# Phase 5.5 Audit: Multi-Scene Timeline and Edge Case Verification
+# ---------------------------------------------------------------------------
+
+def test_three_scene_timeline_cumulative_offsets_with_skipped_scene(tmp_path: Path):
+    """
+    Verify full-video cumulative offsets across three scenes with different durations,
+    including a silent/skipped scene in the middle.
+    Guarantees later scenes never restart at 0.0s and account for preceding scene durations.
+    """
+    storage = CaptionAssetStorageManager(base_dir=tmp_path)
+    svc = CaptionService(storage=storage)
+    job_id = "job-audit-three-scenes"
+
+    # Storyboard: Scene 1 (4.0s), Scene 2 (silent, 3.0s), Scene 3 (5.0s)
+    scenes = [
+        StoryboardScene(
+            scene_id="scene-intro-1",
+            scene_number=1,
+            script_section_id="sec-1",
+            title="Introduction",
+            purpose="Welcome",
+            estimated_duration_seconds=4.0,
+            visual_type=VisualType.TITLE_CARD,
+            visual_description="Intro Card",
+            narration=NarrationReference(
+                script_section_id="sec-1",
+                excerpt="Welcome to RepoGenie.",
+            ),
+        ),
+        StoryboardScene(
+            scene_id="scene-pause-2",
+            scene_number=2,
+            script_section_id="sec-2",
+            title="Visual Pause",
+            purpose="Pause",
+            estimated_duration_seconds=3.0,
+            visual_type=VisualType.OTHER,
+            visual_description="Pause without spoken narration",
+            narration=NarrationReference(
+                script_section_id="sec-2",
+                excerpt="",
+            ),
+        ),
+        StoryboardScene(
+            scene_id="scene-arch-3",
+            scene_number=3,
+            script_section_id="sec-3",
+            title="Architecture",
+            purpose="Architecture overview",
+            estimated_duration_seconds=5.0,
+            visual_type=VisualType.ARCHITECTURE_DIAGRAM,
+            visual_description="Architecture diagram",
+            narration=NarrationReference(
+                script_section_id="sec-3",
+                excerpt="This is the architecture diagram. It demonstrates modular components.",
+            ),
+        ),
+    ]
+    storyboard = EducationalStoryboard(
+        storyboard_id="sb-three-scenes",
+        script_id="sc-three-scenes",
+        title="Three Scene Test",
+        scenes=scenes,
+        total_estimated_duration_seconds=12.0,
+    )
+
+    narration_result = NarrationGenerationResult(
+        job_id=job_id,
+        status=NarrationAssetStatus.COMPLETED,
+        total_scenes=3,
+        scenes_completed=2,
+        scenes_skipped=1,
+        total_assets=3,
+        assets_completed=2,
+        assets_skipped=1,
+        assets=[
+            NarrationAsset(
+                asset_id="audio_1",
+                job_id=job_id,
+                scene_id="scene-intro-1",
+                scene_number=1,
+                script_section_id="sec-1",
+                status=NarrationAssetStatus.COMPLETED,
+                duration_seconds=4.0,
+                narration_text="Welcome to RepoGenie.",
+            ),
+            NarrationAsset(
+                asset_id="audio_2",
+                job_id=job_id,
+                scene_id="scene-pause-2",
+                scene_number=2,
+                script_section_id="sec-2",
+                status=NarrationAssetStatus.SKIPPED,
+                duration_seconds=0.0,
+                narration_text="",
+            ),
+            NarrationAsset(
+                asset_id="audio_3",
+                job_id=job_id,
+                scene_id="scene-arch-3",
+                scene_number=3,
+                script_section_id="sec-3",
+                status=NarrationAssetStatus.COMPLETED,
+                duration_seconds=5.0,
+                narration_text="This is the architecture diagram. It demonstrates modular components.",
+            ),
+        ],
+    )
+
+    result = svc.generate_captions_for_job(job_id=job_id, storyboard=storyboard, narration=narration_result)
+
+    assert result.status == CaptionStatus.COMPLETED
+    assert result.total_scenes == 3
+    assert len(result.scene_assets) == 3
+
+    asset1 = result.scene_assets[0]
+    asset2 = result.scene_assets[1]
+    asset3 = result.scene_assets[2]
+
+    # Verify Scene 1: [0.0, 4.0]
+    assert asset1.cumulative_start_seconds == 0.0
+    assert asset1.cumulative_end_seconds == 4.0
+    assert asset1.captions[0].start_seconds >= 0.0
+    assert asset1.captions[0].end_seconds <= 4.0
+
+    # Verify Scene 2 (Silent): [4.0, 7.0]
+    assert asset2.status == CaptionStatus.SKIPPED
+    assert asset2.cumulative_start_seconds == 4.0
+    assert asset2.cumulative_end_seconds == 7.0
+    assert len(asset2.captions) == 0
+
+    # Verify Scene 3 (Narrated): [7.0, 12.0]
+    assert asset3.status == CaptionStatus.COMPLETED
+    assert asset3.cumulative_start_seconds == 7.0
+    assert asset3.cumulative_end_seconds == 12.0
+
+    # Read composite full-video SRT and verify exact cumulative timestamps
+    full_srt = storage.read_caption_file(job_id, "full", format="srt")
+    assert validate_srt_content(full_srt) is True
+
+    # Scene 1 cue: starts near 00:00:00,050
+    assert "00:00:00,050 -->" in full_srt
+    assert "Welcome to RepoGenie." in full_srt
+
+    # Scene 3 cue: MUST start after 7.0s (00:00:07,050), NEVER restarting at 0 or 4
+    assert "00:00:07,050 -->" in full_srt
+    assert "This is the architecture diagram." in full_srt
+
+    # WebVTT full track has equivalent timing
+    full_vtt = storage.read_caption_file(job_id, "full", format="vtt")
+    assert validate_vtt_content(full_vtt) is True
+    assert "00:00:07.050 -->" in full_vtt
+
+
+def test_three_scene_timeline_cumulative_offsets_with_failed_scene(tmp_path: Path):
+    """
+    Verify that a failed narration scene does not cause subsequent scenes to shift left
+    or overwrite timestamps.
+    """
+    storage = CaptionAssetStorageManager(base_dir=tmp_path)
+    svc = CaptionService(storage=storage)
+    job_id = "job-audit-failed-scene"
+
+    scenes = [
+        StoryboardScene(
+            scene_id="scene-intro-1",
+            scene_number=1,
+            script_section_id="sec-1",
+            title="Scene 1",
+            purpose="Welcome",
+            estimated_duration_seconds=4.0,
+            visual_type=VisualType.TITLE_CARD,
+            visual_description="Intro",
+            narration=NarrationReference(script_section_id="sec-1", excerpt="First scene narration."),
+        ),
+        StoryboardScene(
+            scene_id="scene-failed-2",
+            scene_number=2,
+            script_section_id="sec-2",
+            title="Scene 2 Failed",
+            purpose="Failed",
+            estimated_duration_seconds=3.5,
+            visual_type=VisualType.OTHER,
+            visual_description="Failed narration",
+            narration=NarrationReference(script_section_id="sec-2", excerpt="Broken audio."),
+        ),
+        StoryboardScene(
+            scene_id="scene-third-3",
+            scene_number=3,
+            script_section_id="sec-3",
+            title="Scene 3",
+            purpose="Resume",
+            estimated_duration_seconds=5.0,
+            visual_type=VisualType.SUMMARY_CARD,
+            visual_description="Summary",
+            narration=NarrationReference(script_section_id="sec-3", excerpt="Third scene narration resumes."),
+        ),
+    ]
+    storyboard = EducationalStoryboard(
+        storyboard_id="sb-failed-scene",
+        script_id="sc-failed-scene",
+        title="Failed Scene Test",
+        scenes=scenes,
+        total_estimated_duration_seconds=12.5,
+    )
+
+    narration_result = NarrationGenerationResult(
+        job_id=job_id,
+        status=NarrationAssetStatus.FAILED,
+        total_scenes=3,
+        scenes_completed=2,
+        scenes_failed=1,
+        total_assets=3,
+        assets_completed=2,
+        assets_failed=1,
+        assets=[
+            NarrationAsset(
+                asset_id="a1",
+                job_id=job_id,
+                scene_id="scene-intro-1",
+                scene_number=1,
+                script_section_id="sec-1",
+                status=NarrationAssetStatus.COMPLETED,
+                duration_seconds=4.0,
+                narration_text="First scene narration.",
+            ),
+            NarrationAsset(
+                asset_id="a2",
+                job_id=job_id,
+                scene_id="scene-failed-2",
+                scene_number=2,
+                script_section_id="sec-2",
+                status=NarrationAssetStatus.FAILED,
+                error_message="TTS Network Timeout",
+            ),
+            NarrationAsset(
+                asset_id="a3",
+                job_id=job_id,
+                scene_id="scene-third-3",
+                scene_number=3,
+                script_section_id="sec-3",
+                status=NarrationAssetStatus.COMPLETED,
+                duration_seconds=5.0,
+                narration_text="Third scene narration resumes.",
+            ),
+        ],
+    )
+
+    result = svc.generate_captions_for_job(job_id=job_id, storyboard=storyboard, narration=narration_result)
+
+    assert result.status == CaptionStatus.FAILED
+    assert result.scenes_failed == 1
+
+    asset2 = result.get_asset_by_scene_id("scene-failed-2")
+    asset3 = result.get_asset_by_scene_id("scene-third-3")
+
+    # Scene 2 failed: occupied planned 3.5s [4.0, 7.5]
+    assert asset2.status == CaptionStatus.FAILED
+    assert asset2.cumulative_start_seconds == 4.0
+    assert asset2.cumulative_end_seconds == 7.5
+
+    # Scene 3: starts at 7.5s, not 4.0s!
+    assert asset3.status == CaptionStatus.COMPLETED
+    assert asset3.cumulative_start_seconds == 7.5
+    assert asset3.cumulative_end_seconds == 12.5
+
+    full_srt = storage.read_caption_file(job_id, "full", format="srt")
+    assert "00:00:07,550 -->" in full_srt
+    assert "Third scene narration resumes." in full_srt
+
+
+def test_timing_and_segmentation_edge_cases():
+    """
+    Verify segmentation and timing across edge cases:
+    - Very short text
+    - Long sentence with clauses
+    - Abbreviations and decimal numbers
+    - Multiple punctuation marks
+    - Text without terminal punctuation
+    - Extremely tight / rushed audio duration
+    """
+    # 1. Very short narration
+    c1 = generate_scene_captions("s1", "Hello.", 2.0)
+    assert len(c1) == 1
+    assert c1[0].text == "Hello."
+    assert c1[0].start_seconds >= 0.0
+    assert c1[0].end_seconds <= 2.0
+    assert c1[0].end_seconds > c1[0].start_seconds
+
+    # 2. Narration with no terminal punctuation
+    c2 = generate_scene_captions("s2", "Command line interface walkthrough", 3.0)
+    assert len(c2) == 1
+    assert c2[0].text == "Command line interface walkthrough"
+    assert c2[0].end_seconds <= 3.0
+
+    # 3. Abbreviations, decimals, and special characters
+    c3 = generate_scene_captions("s3", "RepoGenie v1.2 runs on Python 3.12, e.g. FastAPI & Starlette.", 6.0)
+    assert len(c3) >= 1
+    full_text = " ".join(c.text for c in c3)
+    assert "3.12" in full_text
+    assert "v1.2" in full_text
+    assert "&" in full_text
+
+    # 4. Long sentence (> 30 words) split into readable cues
+    long_text = (
+        "The architecture decomposes repository structures into deterministic AST parse trees, "
+        "enabling static dependency analysis, technology detection, and educational script generation "
+        "without requiring live execution of untrusted codebase instructions."
+    )
+    c4 = generate_scene_captions("s4", long_text, 14.0)
+    assert len(c4) >= 3
+    # Check bounds and monotonicity
+    last_end = 0.0
+    for cue in c4:
+        assert cue.start_seconds >= last_end - 1e-4
+        assert cue.end_seconds > cue.start_seconds
+        assert cue.end_seconds <= 14.05
+        last_end = cue.end_seconds
+    assert "untrusted codebase instructions." in c4[-1].text
+
+    # 5. Rushed duration (0.4s for 12 words) surfaces warning and maintains strict boundaries
+    rushed_text = "This is a hurried sentence with many words packed into a short time."
+    c5 = generate_scene_captions("s5", rushed_text, 0.4)
+    assert len(c5) >= 1
+    assert c5[0].end_seconds <= 0.45
+    assert c5[0].end_seconds > c5[0].start_seconds
+    assert any("hurried" in w or "short" in w for w in c5[0].warnings)
+

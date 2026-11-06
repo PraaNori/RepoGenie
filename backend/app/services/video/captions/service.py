@@ -74,11 +74,25 @@ class CaptionService:
         total_captions_count = 0
         all_warnings: List[str] = []
 
-        for scene in storyboard.scenes:
+        # Enforce strict scene sequence order based on storyboard scene numbers
+        ordered_scenes = sorted(storyboard.scenes, key=lambda s: s.scene_number)
+
+        for scene in ordered_scenes:
             scene_asset_id = f"caption_{scene.scene_id.replace('-', '_')}"
             narration_asset = narration_by_scene_id.get(scene.scene_id) or narration_by_scene_num.get(scene.scene_number)
 
-            # 1. Check if narration asset exists and its status
+            # Determine the effective timeline duration occupied by this scene on the video track:
+            # - If narration is completed with measured duration > 0, the audio dictates the scene length.
+            # - If narration was skipped, silent, or failed, the scene occupies its storyboard planned duration.
+            if narration_asset and narration_asset.status == NarrationAssetStatus.COMPLETED and narration_asset.duration_seconds > 0:
+                scene_duration = narration_asset.duration_seconds
+            else:
+                scene_duration = scene.estimated_duration_seconds or 3.0
+
+            scene_start = round(cumulative_time, 3)
+            scene_end = round(cumulative_time + scene_duration, 3)
+
+            # 1. Missing narration asset check
             if not narration_asset:
                 scene_assets.append(
                     SceneCaptionAsset(
@@ -88,11 +102,16 @@ class CaptionService:
                         scene_number=scene.scene_number,
                         script_section_id=scene.script_section_id or "",
                         status=CaptionStatus.FAILED,
+                        duration_seconds=scene_duration,
+                        cumulative_start_seconds=scene_start,
+                        cumulative_end_seconds=scene_end,
                         error_message=f"No narration asset found for scene {scene.scene_number} ({scene.scene_id}).",
                     )
                 )
+                cumulative_time = scene_end
                 continue
 
+            # 2. Failed narration asset check
             if narration_asset.status == NarrationAssetStatus.FAILED:
                 scene_assets.append(
                     SceneCaptionAsset(
@@ -102,12 +121,16 @@ class CaptionService:
                         scene_number=scene.scene_number,
                         script_section_id=scene.script_section_id or "",
                         status=CaptionStatus.FAILED,
+                        duration_seconds=scene_duration,
+                        cumulative_start_seconds=scene_start,
+                        cumulative_end_seconds=scene_end,
                         error_message=f"Narration generation failed for scene {scene.scene_number}: {narration_asset.error_message}",
                     )
                 )
+                cumulative_time = scene_end
                 continue
 
-            # 2. Check if scene is skipped or has no spoken narration
+            # 3. Check if scene is skipped or has no spoken narration
             narration_text = (narration_asset.narration_text or "").strip()
             if narration_asset.status == NarrationAssetStatus.SKIPPED or not narration_text:
                 scene_assets.append(
@@ -118,27 +141,16 @@ class CaptionService:
                         scene_number=scene.scene_number,
                         script_section_id=scene.script_section_id or "",
                         status=CaptionStatus.SKIPPED,
-                        duration_seconds=0.0,
-                        cumulative_start_seconds=cumulative_time,
-                        cumulative_end_seconds=cumulative_time,
+                        duration_seconds=scene_duration,
+                        cumulative_start_seconds=scene_start,
+                        cumulative_end_seconds=scene_end,
                         captions=[],
                     )
                 )
+                cumulative_time = scene_end
                 continue
 
-            # 3. Process completed narration scene
-            scene_duration = narration_asset.duration_seconds
-            if scene_duration <= 0.0:
-                # Fallback to expected scene duration if audio measurement was somehow 0
-                scene_duration = scene.estimated_duration_seconds or 3.0
-
-            scene_start = round(cumulative_time, 3)
-            scene_end = round(cumulative_time + scene_duration, 3)
-
-            # Check for cache reuse
-            srt_exists = self._storage.caption_file_exists(job_id, scene_asset_id, format="srt")
-            vtt_exists = self._storage.caption_file_exists(job_id, scene_asset_id, format="vtt")
-
+            # 4. Process completed narration scene
             try:
                 # Segment narration text into timed subtitle cues
                 captions = generate_scene_captions(
@@ -147,6 +159,15 @@ class CaptionService:
                     audio_duration_seconds=scene_duration,
                     timing_provenance=TimingProvenance.ESTIMATED,
                 )
+
+                # Collect any timing warnings from cues
+                scene_warnings: List[str] = []
+                for c in captions:
+                    for w in c.warnings:
+                        if w not in scene_warnings:
+                            scene_warnings.append(w)
+                        if f"Scene {scene.scene_number}: {w}" not in all_warnings:
+                            all_warnings.append(f"Scene {scene.scene_number}: {w}")
 
                 # Format scene SRT and WebVTT
                 cues_tuples = [(c.start_seconds, c.end_seconds, c.text) for c in captions]
@@ -186,6 +207,7 @@ class CaptionService:
                     srt_file_size_bytes=srt_size,
                     vtt_file_size_bytes=vtt_size,
                     timing_provenance=TimingProvenance.ESTIMATED,
+                    warnings=scene_warnings,
                 )
                 scene_assets.append(scene_asset)
                 total_captions_count += len(captions)
@@ -200,6 +222,9 @@ class CaptionService:
                         scene_number=scene.scene_number,
                         script_section_id=scene.script_section_id or "",
                         status=CaptionStatus.FAILED,
+                        duration_seconds=scene_duration,
+                        cumulative_start_seconds=scene_start,
+                        cumulative_end_seconds=scene_end,
                         error_message=str(e),
                     )
                 )
