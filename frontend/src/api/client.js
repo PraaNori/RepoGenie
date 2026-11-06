@@ -922,4 +922,118 @@ export async function getJobRender(jobId) {
   }
 }
 
+// ==============================================================================
+// Milestone 6.2: Scene Video Rendering API Client Methods
+// ==============================================================================
+
+export async function getSceneRenders(jobId) {
+  try {
+    const response = await fetch(`${API_BASE_URL}/api/v1/jobs/${jobId}/render-scenes`, {
+      method: 'GET',
+      headers: {
+        'Accept': 'application/json',
+      },
+    });
+
+    let data;
+    try {
+      data = await response.json();
+    } catch {
+      data = null;
+    }
+
+    if (!response.ok) {
+      return {
+        success: false,
+        status: response.status,
+        error: (data && data.detail) || `Failed to fetch scene renders (${response.status})`,
+      };
+    }
+
+    return { success: true, status: response.status, data };
+  } catch (error) {
+    return {
+      success: false,
+      status: 0,
+      error: error.message || 'Error checking scene renders',
+    };
+  }
+}
+
+export async function renderScenes(jobId, refresh = false) {
+  try {
+    const params = new URLSearchParams();
+    if (refresh) params.append('refresh', 'true');
+    const queryString = params.toString() ? `?${params.toString()}` : '';
+
+    const response = await fetch(`${API_BASE_URL}/api/v1/jobs/${jobId}/render-scenes${queryString}`, {
+      method: 'POST',
+      headers: {
+        'Accept': 'application/json',
+      },
+    });
+
+    let data;
+    try {
+      data = await response.json();
+    } catch {
+      data = null;
+    }
+
+    if (!response.ok) {
+      return {
+        success: false,
+        status: response.status,
+        error: (data && data.detail) || `Failed to render scenes (${response.status})`,
+      };
+    }
+
+    return { success: true, status: response.status, data };
+  } catch (error) {
+    return {
+      success: false,
+      status: 0,
+      error: error.message || 'Error executing scene rendering',
+    };
+  }
+}
+
+export async function getSingleSceneRender(jobId, sceneId) {
+  try {
+    const response = await fetch(`${API_BASE_URL}/api/v1/jobs/${jobId}/render-scenes/${sceneId}`, {
+      method: 'GET',
+      headers: {
+        'Accept': 'application/json',
+      },
+    });
+
+    let data;
+    try {
+      data = await response.json();
+    } catch {
+      data = null;
+    }
+
+    if (!response.ok) {
+      return {
+        success: false,
+        status: response.status,
+        error: (data && data.detail) || `Failed to fetch scene ${sceneId} (${response.status})`,
+      };
+    }
+
+    return { success: true, status: response.status, data };
+  } catch (error) {
+    return {
+      success: false,
+      status: 0,
+      error: error.message || `Error checking scene ${sceneId}`,
+    };
+  }
+}
+
+export function getSceneRenderFileUrl(jobId, sceneId) {
+  return `${API_BASE_URL}/api/v1/jobs/${jobId}/render-scenes/${sceneId}/file`;
+}
+
 

@@ -198,3 +198,139 @@ class VideoAssemblySystemStatus(BaseModel):
     is_ready: bool = False
     default_configuration: VideoRenderConfiguration = Field(default_factory=VideoRenderConfiguration)
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+# ==============================================================================
+# Phase 6.2: Scene Video Rendering Schemas
+# ==============================================================================
+
+class SceneRenderStatus(str, Enum):
+    """Status of an individual scene video render."""
+    PENDING = "pending"
+    RENDERING = "rendering"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    SKIPPED = "skipped"
+
+
+class SceneRenderConfiguration(BaseModel):
+    """Rendering parameters for individual scene segments."""
+    resolution_width: int = Field(default=1920, ge=320, le=7680, description="Video width in pixels (even integer)")
+    resolution_height: int = Field(default=1080, ge=180, le=4320, description="Video height in pixels (even integer)")
+    aspect_ratio: str = Field(default="16:9", description="Standard target aspect ratio")
+    fps: int = Field(default=30, ge=1, le=120, description="Frame rate per second")
+
+    video_codec: str = Field(default="libx264", description="FFmpeg video encoder codec name")
+    pixel_format: str = Field(default="yuv420p", description="Pixel format for universal web playback compatibility")
+    crf: Optional[int] = Field(default=23, ge=0, le=51, description="Constant Rate Factor for x264 quality")
+    preset: str = Field(default="medium", description="FFmpeg x264 preset")
+
+    audio_codec: str = Field(default="aac", description="FFmpeg audio encoder codec name")
+    audio_sample_rate: int = Field(default=44100, ge=8000, le=192000, description="Audio sample rate in Hz")
+    audio_channels: int = Field(default=2, ge=1, le=8, description="Number of audio channels (1=mono, 2=stereo)")
+    audio_bitrate: str = Field(default="192k", description="Audio bitrate")
+
+    faststart: bool = Field(default=True, description="Enable movflags +faststart for progressive web playback")
+    container_format: str = Field(default="mp4", description="Output container format")
+
+    @field_validator("video_codec")
+    @classmethod
+    def _validate_video_codec(cls, v: str) -> str:
+        clean = v.strip().lower()
+        if clean not in SUPPORTED_VIDEO_CODECS:
+            raise ValueError(f"Unsupported video codec '{v}'. Allowed: {sorted(SUPPORTED_VIDEO_CODECS)}")
+        return clean
+
+    @field_validator("audio_codec")
+    @classmethod
+    def _validate_audio_codec(cls, v: str) -> str:
+        clean = v.strip().lower()
+        if clean not in SUPPORTED_AUDIO_CODECS:
+            raise ValueError(f"Unsupported audio codec '{v}'. Allowed: {sorted(SUPPORTED_AUDIO_CODECS)}")
+        return clean
+
+    @field_validator("pixel_format")
+    @classmethod
+    def _validate_pix_fmt(cls, v: str) -> str:
+        clean = v.strip().lower()
+        if clean not in SUPPORTED_PIXEL_FORMATS:
+            raise ValueError(f"Unsupported pixel format '{v}'. Allowed: {sorted(SUPPORTED_PIXEL_FORMATS)}")
+        return clean
+
+
+class SceneRenderAsset(BaseModel):
+    """Rendered or in-progress MP4 segment asset for an individual scene."""
+    scene_id: str = Field(..., description="Unique scene identifier")
+    scene_number: int = Field(..., ge=1, description="1-indexed monotonic scene order in the storyboard")
+    title: str = Field(default="", description="Scene title or header")
+
+    source_visual_path: Optional[str] = Field(default=None, description="Relative path to source SVG/image asset")
+    source_narration_path: Optional[str] = Field(default=None, description="Relative path to source narration MP3 audio")
+    prepared_visual_path: Optional[str] = Field(default=None, description="Relative path to rasterized 1920x1080 PNG")
+
+    expected_duration_seconds: float = Field(default=0.0, ge=0.0, description="Planned storyboard duration in seconds")
+    actual_duration_seconds: Optional[float] = Field(default=None, ge=0.0, description="Actual probed MP4 duration in seconds")
+
+    output_relative_path: Optional[str] = Field(default=None, description="Relative path to rendered scene MP4 file")
+    file_size_bytes: int = Field(default=0, ge=0, description="Size of rendered MP4 file on disk")
+    status: SceneRenderStatus = Field(default=SceneRenderStatus.PENDING, description="Current scene render status")
+
+    is_silent: bool = Field(default=False, description="Whether this scene is silent (video-only MP4 segment)")
+    width: int = Field(default=1920, ge=1)
+    height: int = Field(default=1080, ge=1)
+    fps: int = Field(default=30, ge=1)
+    video_codec: str = Field(default="libx264")
+    audio_codec: Optional[str] = Field(default=None)
+
+    error: Optional[str] = Field(default=None, description="Detailed error message if scene rendering failed")
+    warnings: List[str] = Field(default_factory=list, description="Advisory warnings encountered during rendering")
+
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    completed_at: Optional[datetime] = Field(default=None, description="Timestamp of successful render completion")
+
+    @field_validator("scene_id")
+    @classmethod
+    def _validate_safe_id(cls, v: str) -> str:
+        if not v or not SAFE_ID_REGEX.match(v):
+            raise ValueError(f"Scene ID '{v}' contains invalid characters.")
+        return v
+
+
+class SceneRenderProgress(BaseModel):
+    """Progress tracking for overall scene rendering execution."""
+    job_id: str
+    status: SceneRenderStatus = SceneRenderStatus.PENDING
+    progress_percentage: int = Field(default=0, ge=0, le=100)
+    current_scene_index: int = 0
+    total_scenes: int = 0
+    completed_scenes: int = 0
+    failed_scenes: int = 0
+    current_scene_id: Optional[str] = None
+    stage_detail: str = "Ready for scene rendering"
+
+    @field_validator("job_id")
+    @classmethod
+    def _validate_safe_id(cls, v: str) -> str:
+        if not v or not SAFE_ID_REGEX.match(v):
+            raise ValueError(f"Job ID '{v}' contains invalid characters.")
+        return v
+
+
+class SceneRenderResult(BaseModel):
+    """Aggregate result of rendering all scenes for a job."""
+    job_id: str
+    total_scenes: int = 0
+    completed_scenes: int = 0
+    failed_scenes: int = 0
+    is_complete: bool = False
+    render_duration_seconds: float = 0.0
+    scenes: List[SceneRenderAsset] = Field(default_factory=list)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    completed_at: Optional[datetime] = None
+
+    @field_validator("job_id")
+    @classmethod
+    def _validate_safe_id(cls, v: str) -> str:
+        if not v or not SAFE_ID_REGEX.match(v):
+            raise ValueError(f"Job ID '{v}' contains invalid characters.")
+        return v

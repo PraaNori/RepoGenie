@@ -28,6 +28,9 @@ from ..video.captions.schemas import CaptionGenerationResult, CaptionStatus
 from ..video.captions.caption_storage import caption_storage_manager
 from ..video.assembly_input.schemas import VideoAssemblyInput
 from ..video.assembly.schemas import (
+    SceneRenderProgress,
+    SceneRenderResult,
+    SceneRenderStatus,
     VideoRenderConfiguration,
     VideoRenderJob,
     VideoRenderProgress,
@@ -79,6 +82,7 @@ class JobInternal(BaseModel):
     assembly_input: Optional[VideoAssemblyInput] = None
     render_config: Optional[VideoRenderConfiguration] = None
     render_job: Optional[VideoRenderJob] = None
+    scene_renders: Optional[SceneRenderResult] = None
     result: Optional[VideoResult] = None
     error: Optional[str] = None
 
@@ -112,6 +116,7 @@ class JobInternal(BaseModel):
             has_captions=bool(self.captions is not None),
             has_assembly_input=bool(self.assembly_input is not None),
             has_video_render=bool(self.render_job is not None),
+            has_scene_renders=bool(self.scene_renders is not None and len(self.scene_renders.scenes) > 0),
             educational_script=self.educational_script,
             educational_storyboard=self.educational_storyboard,
             visual_generation=self.visual_generation,
@@ -120,6 +125,7 @@ class JobInternal(BaseModel):
             assembly_input=self.assembly_input,
             render_config=self.render_config,
             render_job=self.render_job,
+            scene_renders=self.scene_renders,
             result=self.result,
             error=self.error,
         )
@@ -1168,12 +1174,88 @@ class JobStore:
         job.updated_at = now
         return job
 
+    def get_job_scene_renders(self, job_id: str) -> Optional[SceneRenderResult]:
+        job = self._jobs.get(job_id)
+        if not job:
+            return None
+        return job.scene_renders
+
+    def update_job_scene_renders_started(self, job_id: str, total_scenes: int) -> Optional[JobInternal]:
+        job = self._jobs.get(job_id)
+        if not job:
+            return None
+        now = datetime.now(timezone.utc)
+        job.stages[8].status = StatusEnum.IN_PROGRESS
+        job.stages[8].started_at = now
+        job.stages[8].completed_at = None
+        job.stages[8].detail = f"Rendering scene clips (0/{total_scenes})..."
+        job.current_stage = PIPELINE_STAGES[8]
+        job.progress_percentage = 91
+        job.updated_at = now
+        return job
+
+    def update_job_scene_render_progress(
+        self,
+        job_id: str,
+        progress: SceneRenderProgress,
+    ) -> Optional[JobInternal]:
+        job = self._jobs.get(job_id)
+        if not job:
+            return None
+        now = datetime.now(timezone.utc)
+        job.stages[8].detail = progress.stage_detail
+        if progress.total_scenes > 0:
+            done_count = progress.completed_scenes + progress.failed_scenes
+            job.progress_percentage = min(95, 91 + int(4 * (done_count / progress.total_scenes)))
+        job.updated_at = now
+        return job
+
+    def update_job_scene_renders_completed(
+        self,
+        job_id: str,
+        result: SceneRenderResult,
+    ) -> Optional[JobInternal]:
+        job = self._jobs.get(job_id)
+        if not job:
+            return None
+        now = datetime.now(timezone.utc)
+        job.scene_renders = result
+        # Stage 09 remains IN_PROGRESS: individual scenes are rendered, but final video assembly is not completed yet
+        if result.is_complete:
+            job.stages[8].status = StatusEnum.IN_PROGRESS
+            job.stages[8].detail = (
+                f"Scene rendering complete ({result.completed_scenes}/{result.total_scenes} scenes ready for video assembly)"
+            )
+            job.progress_percentage = 95
+        else:
+            job.stages[8].status = StatusEnum.IN_PROGRESS
+            job.stages[8].detail = (
+                f"Scene rendering partial ({result.completed_scenes}/{result.total_scenes} completed, {result.failed_scenes} failed)"
+            )
+            job.progress_percentage = 92
+        job.updated_at = now
+        return job
+
+    def invalidate_job_scene_renders(self, job_id: str) -> Optional[JobInternal]:
+        job = self._jobs.get(job_id)
+        if not job:
+            return None
+        now = datetime.now(timezone.utc)
+        job.scene_renders = None
+        try:
+            video_storage_manager.delete_job_scenes(job_id)
+        except Exception as e:
+            logger.warning("Failed to clean scene storage for job %s: %s", job_id, e)
+        job.updated_at = now
+        return job
+
     def invalidate_job_render(self, job_id: str) -> Optional[JobInternal]:
         job = self._jobs.get(job_id)
         if not job:
             return None
         now = datetime.now(timezone.utc)
         job.render_job = None
+        self.invalidate_job_scene_renders(job_id)
         try:
             video_storage_manager.delete_job_video(job_id)
         except Exception as e:

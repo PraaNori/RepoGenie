@@ -51,6 +51,12 @@ class VideoStorageManager:
             raise VideoStorageError(f"Security: Invalid or prohibited job ID '{job_id}'")
         return job_id
 
+    def assert_safe_scene_id(self, scene_id: str) -> str:
+        """Validates scene ID syntax against directory traversal attempts."""
+        if not scene_id or not SAFE_ID_REGEX.match(scene_id):
+            raise VideoStorageError(f"Security: Invalid or prohibited scene ID '{scene_id}'")
+        return scene_id
+
     def assert_safe_path(self, path: Path) -> Path:
         """
         Ensures that target path is safely contained within base storage directory.
@@ -104,6 +110,109 @@ class VideoStorageManager:
         ext = extension.lstrip(".")
         temp_file = video_dir / f"render_{token}.tmp.{ext}"
         return self.assert_safe_path(temp_file)
+
+    def get_job_scenes_dir(self, job_id: str) -> Path:
+        """Returns the isolated directory for individual rendered scene MP4s: jobs/{job_id}/video/scenes/"""
+        video_dir = self.get_job_video_dir(job_id)
+        scenes_dir = video_dir / "scenes"
+        safe_path = self.assert_safe_path(scenes_dir)
+        safe_path.mkdir(parents=True, exist_ok=True)
+        return safe_path
+
+    def get_job_raster_dir(self, job_id: str) -> Path:
+        """Returns the isolated directory for rasterized scene images: jobs/{job_id}/video/scenes/raster/"""
+        scenes_dir = self.get_job_scenes_dir(job_id)
+        raster_dir = scenes_dir / "raster"
+        safe_path = self.assert_safe_path(raster_dir)
+        safe_path.mkdir(parents=True, exist_ok=True)
+        return safe_path
+
+    def get_scene_output_path(self, job_id: str, scene_number: int, scene_id: str) -> Path:
+        """Returns the absolute path to a completed scene MP4: scene_{number:02d}_{scene_id}.mp4"""
+        scenes_dir = self.get_job_scenes_dir(job_id)
+        clean_sid = self.assert_safe_scene_id(scene_id)
+        target = scenes_dir / f"scene_{scene_number:02d}_{clean_sid}.mp4"
+        return self.assert_safe_path(target)
+
+    def get_relative_scene_path(self, job_id: str, scene_number: int, scene_id: str) -> str:
+        """Returns the sanitized relative path for API responses: jobs/{job_id}/video/scenes/scene_{num}_{sid}.mp4"""
+        clean_id = self.assert_safe_job_id(job_id)
+        clean_sid = self.assert_safe_scene_id(scene_id)
+        return f"jobs/{clean_id}/video/scenes/scene_{scene_number:02d}_{clean_sid}.mp4"
+
+    def get_raster_output_path(self, job_id: str, scene_number: int, scene_id: str) -> Path:
+        """Returns the absolute path to a rasterized scene PNG: raster/scene_{number:02d}_{scene_id}.png"""
+        raster_dir = self.get_job_raster_dir(job_id)
+        clean_sid = self.assert_safe_scene_id(scene_id)
+        target = raster_dir / f"scene_{scene_number:02d}_{clean_sid}.png"
+        return self.assert_safe_path(target)
+
+    def get_relative_raster_path(self, job_id: str, scene_number: int, scene_id: str) -> str:
+        """Returns relative path to rasterized scene PNG: jobs/{job_id}/video/scenes/raster/scene_{num}_{sid}.png"""
+        clean_id = self.assert_safe_job_id(job_id)
+        clean_sid = self.assert_safe_scene_id(scene_id)
+        return f"jobs/{clean_id}/video/scenes/raster/scene_{scene_number:02d}_{clean_sid}.png"
+
+    def create_temp_scene_render_path(self, job_id: str, scene_id: str, extension: str = "mp4") -> Path:
+        """Creates a unique temporary render path for an in-flight scene encode."""
+        scenes_dir = self.get_job_scenes_dir(job_id)
+        clean_sid = self.assert_safe_scene_id(scene_id)
+        token = uuid.uuid4().hex[:10]
+        ext = extension.lstrip(".")
+        temp_file = scenes_dir / f"temp_{clean_sid}_{token}.tmp.{ext}"
+        return self.assert_safe_path(temp_file)
+
+    def finalize_scene_render_output(
+        self,
+        job_id: str,
+        temp_render_path: Path,
+        scene_number: int,
+        scene_id: str,
+        overwrite: bool = False,
+    ) -> Path:
+        """
+        Atomically promotes temp_render_path to the canonical scene output path:
+        scene_{scene_number:02d}_{scene_id}.mp4
+        """
+        lock = _get_job_lock(job_id)
+        with lock:
+            safe_temp = self.assert_safe_path(temp_render_path)
+            if not safe_temp.exists() or not safe_temp.is_file():
+                raise VideoStorageError(f"Rendered scene temporary file does not exist: {safe_temp}")
+
+            size = safe_temp.stat().st_size
+            if size == 0:
+                self.cleanup_file(safe_temp)
+                raise VideoStorageError(f"Rendered scene video output is empty (0 bytes): {safe_temp}")
+
+            target_path = self.get_scene_output_path(job_id, scene_number, scene_id)
+            if target_path.exists() and not overwrite:
+                self.cleanup_file(safe_temp)
+                raise VideoStorageError(
+                    f"Scene video output already exists: {target_path}. Pass overwrite=True to replace."
+                )
+
+            try:
+                safe_temp.replace(target_path)
+                logger.info(
+                    "Finalized scene video output for job %s scene %d (%s): %s (%d bytes)",
+                    job_id,
+                    scene_number,
+                    scene_id,
+                    target_path,
+                    size,
+                )
+                return target_path
+            except Exception as exc:
+                self.cleanup_file(safe_temp)
+                raise VideoStorageError(f"Failed to finalize scene render output: {exc}") from exc
+
+    def delete_job_scenes(self, job_id: str) -> None:
+        """Cleans up all rendered scene assets for a job."""
+        clean_id = self.assert_safe_job_id(job_id)
+        scenes_dir = self.get_job_scenes_dir(clean_id)
+        if scenes_dir.exists():
+            shutil.rmtree(scenes_dir, ignore_errors=True)
 
     def create_concat_manifest(self, job_id: str, scene_files: List[Path]) -> Path:
         """

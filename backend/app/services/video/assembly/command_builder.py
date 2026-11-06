@@ -32,10 +32,12 @@ class FFmpegCommandBuilder:
         output_path: Path,
         duration_seconds: float,
         config: VideoRenderConfiguration,
+        is_silent: bool = False,
     ) -> List[str]:
         """
-        Builds the argument array to render a single scene (still image + audio or silence).
-        Uses loop 1 on the still image, sets frame rate, pixel format, and codec parameters.
+        Builds the argument array to render a single scene MP4 segment.
+        - For narrated scenes: includes audio stream, encodes with AAC 44.1 kHz.
+        - For silent scenes: uses -an to generate a valid video-only MP4 segment without inventing audio.
         """
         cmd: List[str] = [
             self.ffmpeg_executable,
@@ -45,14 +47,9 @@ class FFmpegCommandBuilder:
             "-i", str(image_path.resolve()),
         ]
 
-        if audio_path and audio_path.exists():
+        has_audio = (not is_silent) and audio_path is not None
+        if has_audio:
             cmd.extend(["-i", str(audio_path.resolve())])
-        else:
-            # Generate silent audio track for silent scenes
-            cmd.extend([
-                "-f", "lavfi",
-                "-i", f"anullsrc=channel_layout={'stereo' if config.audio_channels == 2 else 'mono'}:sample_rate={config.audio_sample_rate}",
-            ])
 
         # Video filters: scale to exact dimensions with padding/letterboxing if necessary
         # Force exact resolution and even width/height
@@ -77,14 +74,21 @@ class FFmpegCommandBuilder:
         if config.video_bitrate:
             cmd.extend(["-b:v", config.video_bitrate])
 
-        cmd.extend([
-            "-c:a", config.audio_codec,
-            "-b:a", config.audio_bitrate,
-            "-ar", str(config.audio_sample_rate),
-            "-ac", str(config.audio_channels),
-            "-t", f"{duration_seconds:.3f}",
-            "-shortest",
-        ])
+        if has_audio:
+            cmd.extend([
+                "-c:a", config.audio_codec,
+                "-b:a", config.audio_bitrate,
+                "-ar", str(config.audio_sample_rate),
+                "-ac", str(config.audio_channels),
+                "-t", f"{duration_seconds:.3f}",
+                "-shortest",
+            ])
+        else:
+            # Video-only MP4 for silent scenes
+            cmd.extend([
+                "-an",
+                "-t", f"{duration_seconds:.3f}",
+            ])
 
         if config.faststart and config.container_format == "mp4":
             cmd.extend(["-movflags", "+faststart"])

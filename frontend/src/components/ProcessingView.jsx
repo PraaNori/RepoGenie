@@ -1466,11 +1466,12 @@ export default function ProcessingView({
         />
       )}
 
-      {/* Milestone 6: FFmpeg Video Assembly Foundation (Phase 6.1) */}
+      {/* Milestone 6: FFmpeg Video Assembly Foundation & Scene Rendering (Phase 6.2) */}
       {(knowledge || job?.has_educational_storyboard || educationalStoryboard || job?.has_assembly_input || assemblyInput) && (
         <VideoAssemblyCard
           jobId={job.job_id}
           renderJob={job?.render_job}
+          sceneRenders={job?.scene_renders}
         />
       )}
 

@@ -441,12 +441,13 @@ export default function VideoResultView({ job, onReset }) {
         </div>
       )}
 
-      {/* Video Assembly Foundation (Phase 6.1) */}
+      {/* Video Assembly Foundation & Scene Rendering (Phase 6.2) */}
       {assemblyInput && (
         <div className="mt-8 pt-6 border-t border-slate-200">
           <VideoAssemblyCard
             jobId={job?.job_id}
             renderJob={job?.render_job}
+            sceneRenders={job?.scene_renders}
             readOnly
           />
         </div>

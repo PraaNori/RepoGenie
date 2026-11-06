@@ -67,8 +67,16 @@ from ...services.video.assembly_input import (
     assembly_input_service,
 )
 from ...services.video.assembly import (
+    FFmpegNotFoundError,
+    JobRenderConcurrencyError,
+    SceneRenderAsset,
+    SceneRenderError,
+    SceneRenderResult,
+    VideoAssemblyError,
     VideoRenderConfiguration,
     VideoRenderJob,
+    VideoStorageError,
+    scene_render_service,
     video_assembly_service,
 )
 from ...services.repo.analyzer import repo_analyzer_service
@@ -1774,6 +1782,123 @@ def get_job_render_status(job_id: str):
             detail=f"Job with ID '{job_id}' not found",
         )
     return video_assembly_service.get_job_render(job_id)
+
+
+# ==============================================================================
+# Phase 6.2: Scene Video Rendering Endpoints
+# ==============================================================================
+
+@router.post("/{job_id}/render-scenes", response_model=SceneRenderResult)
+def render_scenes_endpoint(
+    job_id: str,
+    refresh: bool = Query(default=False, description="Force re-rendering of existing scenes"),
+):
+    """
+    Renders all storyboard scenes into individual standardized MP4 video segments.
+    Preserves audio duration for narrated scenes and visual duration for silent scenes.
+    """
+    internal = job_store.get_internal_job(job_id)
+    if not internal:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Job with ID '{job_id}' not found",
+        )
+
+    try:
+        return scene_render_service.render_scenes(job_id=job_id, refresh=refresh)
+    except JobRenderConcurrencyError as jce:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(jce),
+        )
+    except FFmpegNotFoundError as fnf:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(fnf),
+        )
+    except SceneRenderError as sre:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(sre),
+        )
+    except (VideoStorageError, VideoAssemblyError) as vae:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(vae),
+        )
+    except Exception as exc:
+        logger.error("Unexpected error in render_scenes_endpoint for job %s: %s", job_id, exc)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Scene rendering failed unexpectedly: {exc}",
+        )
+
+
+@router.get("/{job_id}/render-scenes", response_model=SceneRenderResult)
+def get_rendered_scenes_endpoint(job_id: str):
+    """Retrieves the cached scene rendering result and per-scene assets for a job."""
+    internal = job_store.get_internal_job(job_id)
+    if not internal:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Job with ID '{job_id}' not found",
+        )
+
+    result = scene_render_service.get_scene_renders(job_id)
+    if not result:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Scene renders have not been generated yet for job '{job_id}'",
+        )
+    return result
+
+
+@router.get("/{job_id}/render-scenes/{scene_id}", response_model=SceneRenderAsset)
+def get_single_rendered_scene_endpoint(job_id: str, scene_id: str):
+    """Retrieves rendering metadata for an individual scene."""
+    internal = job_store.get_internal_job(job_id)
+    if not internal:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Job with ID '{job_id}' not found",
+        )
+
+    asset = scene_render_service.get_single_scene_render(job_id, scene_id)
+    if not asset:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Scene render '{scene_id}' not found for job '{job_id}'",
+        )
+    return asset
+
+
+@router.get("/{job_id}/render-scenes/{scene_id}/file")
+def get_rendered_scene_file_endpoint(job_id: str, scene_id: str):
+    """Streams or downloads the completed MP4 clip for an individual scene."""
+    internal = job_store.get_internal_job(job_id)
+    if not internal:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Job with ID '{job_id}' not found",
+        )
+
+    try:
+        file_path = scene_render_service.get_scene_render_file_path(job_id, scene_id)
+        return FileResponse(
+            path=file_path,
+            media_type="video/mp4",
+            filename=file_path.name,
+        )
+    except VideoStorageError as vse:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(vse),
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        )
 
 
 @router.post("/{job_id}/simulate-step", response_model=JobResponse)

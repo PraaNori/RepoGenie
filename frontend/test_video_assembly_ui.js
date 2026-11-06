@@ -94,6 +94,10 @@ test('Video Assembly API Client exports expected methods', () => {
   assert.equal(typeof apiClient.getJobRenderConfig, 'function');
   assert.equal(typeof apiClient.updateJobRenderConfig, 'function');
   assert.equal(typeof apiClient.getJobRender, 'function');
+  assert.equal(typeof apiClient.getSceneRenders, 'function');
+  assert.equal(typeof apiClient.renderScenes, 'function');
+  assert.equal(typeof apiClient.getSingleSceneRender, 'function');
+  assert.equal(typeof apiClient.getSceneRenderFileUrl, 'function');
 });
 
 test('VideoAssemblyCard renders FFMPEG READY status badge and versions', () => {
@@ -104,7 +108,7 @@ test('VideoAssemblyCard renders FFMPEG READY status badge and versions', () => {
     })
   );
 
-  assert.ok(html.includes('Video Assembly Foundation'));
+  assert.ok(html.includes('Video Assembly'));
   assert.ok(html.includes('FFMPEG READY'));
   assert.ok(html.includes('v6.1.1'));
   assert.ok(html.includes('1920 × 1080'));
@@ -134,7 +138,7 @@ test('VideoAssemblyCard supports readOnly mode without refresh button', () => {
       readOnly: false,
     })
   );
-  assert.ok(normalHtml.includes('title="Refresh executable status"'));
+  assert.ok(normalHtml.includes('title="Refresh status"'));
 
   const readOnlyHtml = renderToString(
     React.createElement(VideoAssemblyCard, {
@@ -143,7 +147,7 @@ test('VideoAssemblyCard supports readOnly mode without refresh button', () => {
       readOnly: true,
     })
   );
-  assert.ok(!readOnlyHtml.includes('title="Refresh executable status"'));
+  assert.ok(!readOnlyHtml.includes('title="Refresh status"'));
 });
 
 test('VideoAssemblyCard re-export alias functions identically', () => {
@@ -153,7 +157,7 @@ test('VideoAssemblyCard re-export alias functions identically', () => {
       systemStatus: mockSystemStatusAvailable,
     })
   );
-  assert.ok(html.includes('Video Assembly Foundation'));
+  assert.ok(html.includes('Video Assembly'));
   assert.ok(html.includes('FFMPEG READY'));
 });
 
@@ -177,7 +181,7 @@ test('ProcessingView renders VideoAssemblyCard when assembly input or storyboard
     })
   );
 
-  assert.ok(html.includes('Video Assembly Foundation'));
+  assert.ok(html.includes('Video Assembly'));
 });
 
 test('VideoResultView renders VideoAssemblyCard in readOnly mode', () => {
@@ -200,7 +204,90 @@ test('VideoResultView renders VideoAssemblyCard in readOnly mode', () => {
     })
   );
 
-  assert.ok(html.includes('Video Assembly Foundation'));
+  assert.ok(html.includes('Video Assembly'));
+});
+
+// ==============================================================================
+// Phase 6.2: Scene Rendering Frontend Tests
+// ==============================================================================
+
+test('VideoAssemblyCard renders Phase 6.2 scene rendering section and Render Scenes action', () => {
+  const html = renderToString(
+    React.createElement(VideoAssemblyCard, {
+      jobId: 'job-scene-1',
+      systemStatus: mockSystemStatusAvailable,
+      readOnly: false,
+    })
+  );
+
+  assert.ok(html.includes('Scene Video Segments (Phase 6.2)'));
+  assert.ok(html.includes('Render Scenes'));
+  assert.ok(html.includes('Force Refresh'));
+  assert.ok(html.includes('NOT RENDERED'));
+});
+
+test('VideoAssemblyCard renders completed scene list, metrics, and download links', () => {
+  const mockSceneResult = {
+    job_id: 'job-scene-2',
+    total_scenes: 2,
+    completed_scenes: 2,
+    failed_scenes: 0,
+    is_complete: true,
+    render_duration_seconds: 4.5,
+    scenes: [
+      {
+        scene_id: 'sc-1',
+        scene_number: 1,
+        title: 'Project Architecture',
+        status: 'completed',
+        is_silent: false,
+        actual_duration_seconds: 6.2,
+        expected_duration_seconds: 6.0,
+        output_relative_path: 'jobs/job-scene-2/video/scenes/scene_01_sc-1.mp4',
+      },
+      {
+        scene_id: 'sc-2',
+        scene_number: 2,
+        title: 'Summary Card',
+        status: 'completed',
+        is_silent: true,
+        actual_duration_seconds: 4.0,
+        expected_duration_seconds: 4.0,
+        output_relative_path: 'jobs/job-scene-2/video/scenes/scene_02_sc-2.mp4',
+      },
+    ],
+  };
+
+  const html = renderToString(
+    React.createElement(VideoAssemblyCard, {
+      jobId: 'job-scene-2',
+      systemStatus: mockSystemStatusAvailable,
+      sceneRenders: mockSceneResult,
+      readOnly: false,
+    })
+  );
+
+  assert.ok(html.includes('ALL SCENES RENDERED'));
+  assert.ok(html.includes('Project Architecture'));
+  assert.ok(html.includes('Summary Card'));
+  assert.ok(html.includes('6.2s'));
+  assert.ok(html.includes('4.0s'));
+  assert.ok(html.includes('Narrated'));
+  assert.ok(html.includes('Silent'));
+  assert.ok(html.includes('/api/v1/jobs/job-scene-2/render-scenes/sc-1/file'));
+});
+
+test('VideoAssemblyCard hides Render Scenes button in readOnly mode', () => {
+  const html = renderToString(
+    React.createElement(VideoAssemblyCard, {
+      jobId: 'job-scene-ro',
+      systemStatus: mockSystemStatusAvailable,
+      readOnly: true,
+    })
+  );
+
+  assert.ok(!html.includes('Render Scenes'));
+  assert.ok(!html.includes('Force Refresh'));
 });
 
 // Close Vite SSR server after tests complete

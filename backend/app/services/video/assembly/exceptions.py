@@ -48,6 +48,19 @@ class VideoStorageError(VideoAssemblyError):
     pass
 
 
+class VisualPreparationError(VideoAssemblyError):
+    """Raised when visual asset rasterization or SVG security validation fails."""
+    pass
+
+
+class SceneRenderError(VideoAssemblyError):
+    """Raised when rendering an individual scene clip fails."""
+    def __init__(self, message: str, scene_id: str = "", scene_number: int = 0):
+        super().__init__(message)
+        self.scene_id = scene_id
+        self.scene_number = scene_number
+
+
 class JobRenderConcurrencyError(VideoAssemblyError):
     """Raised when an operation conflicts with an ongoing render operation on the same job."""
     pass
