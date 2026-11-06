@@ -92,22 +92,28 @@ class ComponentDiagramGenerator(BaseDiagramGenerator):
                 })
 
         # 2. Derive relationships / edges
-        edges: List[Dict[str, str]] = []
+        edges: List[Dict[str, Any]] = []
         for i, c1 in enumerate(component_cards):
             for j, c2 in enumerate(component_cards):
-                if i != j and any(c2["name"].lower() in d.lower() for d in c1.get("dependencies", [])):
+                if i != j and any(
+                    c2["name"].lower() in d.lower() or c2["file"].lower() in d.lower()
+                    for d in c1.get("dependencies", [])
+                ):
                     edges.append({
                         "from": c1["id"],
                         "to": c2["id"],
                         "label": "uses",
+                        "is_confirmed": True,
                     })
 
         if not edges and len(component_cards) > 1:
+            warnings.append("No explicit dependency evidence found between classes; connecting inferred sequential flow.")
             for i in range(len(component_cards) - 1):
                 edges.append({
                     "from": component_cards[i]["id"],
                     "to": component_cards[i + 1]["id"],
                     "label": "delegates to",
+                    "is_confirmed": False,
                 })
 
         # 3. Generate Graphviz DOT source
@@ -130,7 +136,10 @@ class ComponentDiagramGenerator(BaseDiagramGenerator):
 
         dot_lines.append("")
         for e in edges:
-            dot_lines.append(f'  {e["from"]} -> {e["to"]} [label=" {e["label"]} "];')
+            if e.get("is_confirmed", True):
+                dot_lines.append(f'  {e["from"]} -> {e["to"]} [label=" {e["label"]} ", style="solid", color="#64748B"];')
+            else:
+                dot_lines.append(f'  {e["from"]} -> {e["to"]} [label=" {e["label"]} (inferred) ", style="dashed", color="#94A3B8"];')
         dot_lines.append("}")
         dot_source = "\n".join(dot_lines)
 

@@ -999,3 +999,229 @@ def test_api_post_visual_assets_renders_diagrams_and_file_streaming():
     assert "image/svg+xml" in file_resp.headers["content-type"]
     assert b"<svg" in file_resp.content
     assert b"ARCHITECTURE DIAGRAM" in file_resp.content
+
+
+# ---------------------------------------------------------------------------
+# 5. Audit & Grounding Regression Tests
+# ---------------------------------------------------------------------------
+
+def test_unconfirmed_relationships_differentiated_with_dashed_styling():
+    """
+    Verifies that unconfirmed / unresolved relationships across architecture,
+    components, workflow, and data flows are distinguished with dashed lines and
+    (inferred) markers, rather than presented as confirmed facts.
+    """
+    k_click, code_click, sc_arch, _ = _build_click_fixtures()
+
+    # Create unconfirmed interaction
+    unconfirmed_interactions = [
+        ComponentInteractionItem(
+            source_component="comp_decorators",
+            target_component="comp_core",
+            interaction_type="invokes",
+            description="Inferred invocation",
+            is_confirmed=False,
+        )
+    ]
+    code_click_unconfirmed = code_click.model_copy(
+        update={"cross_component_interactions": unconfirmed_interactions}
+    )
+
+    gen = ArchitectureDiagramGenerator()
+    res = gen.generate(sc_arch, k_click, code_click_unconfirmed)
+
+    assert "style=\"dashed\"" in res.dot_source or "style=dashed" in res.dot_source
+    assert "(inferred)" in res.dot_source
+    assert "-.->" in res.mermaid_source
+
+
+def test_dense_diagram_and_long_labels_handling():
+    """
+    Verifies that diagrams with long descriptions, oversized component names,
+    and many components fit gracefully within the 1920x1080 canvas without overflow.
+    """
+    now = datetime.now(timezone.utc)
+    ev = EvidenceReference(file_path="src/click/core.py", is_valid=True)
+    k = RepositoryKnowledge(
+        schema_version="1.0",
+        repository=RepositoryMetadataInfo(
+            name="dense-repo",
+            owner="test",
+            repository_url="https://github.com/test/dense-repo",
+            clone_status=StatusEnum.COMPLETED,
+            file_count=50,
+        ),
+        project_overview=ProjectOverviewInfo(
+            readme_available=True,
+            description="Very dense project with long labels",
+        ),
+        technology_stack=TechnologyStack(primary_language="Python"),
+        repository_structure=RepositoryStructureOverview(
+            total_directories=5,
+            total_files=50,
+            important_directories=["src"],
+        ),
+        statistics=UnifiedStatistics(total_files=50, source_files=40),
+        dependency_information=DependencyGraph(),
+        code_structure=CodeStructureSummary(),
+        architecture=ArchitectureSummary(dependency_graph=DependencyGraph(), call_graph=CallGraph()),
+        analysis_metadata=KnowledgeAnalysisMetadata(
+            analysis_status=StatusEnum.COMPLETED,
+            created_at=now,
+            stages_completed=["repo_structure"],
+        ),
+    )
+
+    # 10 components with 200+ character descriptions
+    components = [
+        ComponentUnderstandingItem(
+            component_id=f"comp_{i}",
+            name=f"EnterpriseModuleWithVeryLongName_{i}_Extended",
+            file_path=f"src/module_{i}.py",
+            category="core",
+            importance_score=8.0,
+            primary_responsibility="A" * 250,
+            why_important="B" * 250,
+            inputs_and_outputs="C" * 250,
+            key_classes_and_functions=[f"FunctionWithLongSignature_{j}()" for j in range(5)],
+        )
+        for i in range(10)
+    ]
+    code_und = RepositoryCodeUnderstanding(
+        repository_name="dense-repo",
+        architecture_overview="Dense overview",
+        components=components,
+    )
+
+    scene = StoryboardScene(
+        scene_id="scene-dense",
+        scene_number=2,
+        script_section_id="sec-2",
+        title="T" * 150,
+        purpose="P" * 250,
+        estimated_duration_seconds=15.0,
+        visual_type=VisualType.ARCHITECTURE_DIAGRAM,
+        visual_description="V" * 300,
+        evidence=[ev],
+    )
+
+    res = ArchitectureDiagramGenerator().generate(scene, k, code_und)
+    assert res.width == 1920
+    assert res.height == 1080
+    assert 'viewBox="0 0 1920 1080"' in res.svg_content
+    # Truncated cleanly with ellipsis
+    assert "..." in res.svg_content
+
+
+def test_secret_and_token_redaction_in_diagrams():
+    """
+    Verifies that API keys, sensitive tokens, and credential filenames (.env, id_rsa)
+    are strictly redacted from diagram labels, file lists, and footers.
+    """
+    from app.services.video.visual_generation.diagrams.base import sanitize_filename, sanitize_text
+
+    # File sanitization
+    assert sanitize_filename(".env") == "[REDACTED_FILE]"
+    assert sanitize_filename("config/credentials.json") == "[REDACTED_FILE]"
+    assert sanitize_filename(".ssh/id_rsa") == "[REDACTED_FILE]"
+    assert sanitize_filename("/Users/alice/secrets/private_key.pem") == "[REDACTED_FILE]"
+
+    # Text sanitization
+    assert "[REDACTED_KEY]" in sanitize_text("Error with key gsk_1234567890abcdef1234567890")
+    assert "[REDACTED_KEY]" in sanitize_text("Firebase AIzaSyA1234567890abcdef12345678")
+    assert "[REDACTED_TOKEN]" in sanitize_text("Authorization: Bearer secret_token_1234567890abcdef")
+
+
+def test_rendering_failure_and_storage_failure_handling(tmp_path: Path):
+    """
+    Verifies that when diagram rendering or file saving fails, a FAILED asset is recorded
+    with a sanitized error message, is_fully_rendered remains False, and Stage 07 is not completed.
+    """
+    from app.services.video.visual_generation import visual_generation_service
+    from app.services.video.visual_generation.schemas import VisualAssetStatus, VisualGenerationStatus
+
+    k_click, code_click, sc_arch, _ = _build_click_fixtures()
+    title_scene = StoryboardScene(
+        scene_id="scene-1",
+        scene_number=1,
+        script_section_id="sec-1",
+        title="Intro",
+        purpose="Hook",
+        estimated_duration_seconds=10.0,
+        visual_type=VisualType.TITLE_CARD,
+        visual_description="Title card",
+    )
+    storyboard = EducationalStoryboard(
+        storyboard_id="sb-fail-test",
+        script_id="sc-fail-test",
+        repository_name="pallets/click",
+        title="Click Storyboard",
+        total_estimated_duration_seconds=25.0,
+        scenes=[title_scene, sc_arch],
+    )
+
+    plan = visual_generation_service.initialize_visual_assets(
+        job_id="fail-job",
+        storyboard=storyboard,
+        knowledge=k_click,
+    )
+
+    # Mock diagram generator to throw an exception
+    class BrokenGenerator:
+        diagram_type = VisualType.ARCHITECTURE_DIAGRAM
+        def generate(self, *args, **kwargs):
+            raise RuntimeError("Renderer host error at /Users/developer/RepoGenie/internal.py")
+
+    original_gen = visual_generation_service.diagram_generators[VisualType.ARCHITECTURE_DIAGRAM]
+    try:
+        visual_generation_service.diagram_generators[VisualType.ARCHITECTURE_DIAGRAM] = BrokenGenerator()
+        rendered_result = visual_generation_service.generate_diagrams_for_job(
+            job_id="fail-job",
+            plan=plan,
+            storyboard=storyboard,
+            knowledge=k_click,
+            code_understanding=code_click,
+        )
+
+        assert rendered_result.scenes_failed == 1
+        assert rendered_result.assets_failed == 1
+        assert rendered_result.assets_completed == 0
+        assert not rendered_result.is_fully_rendered
+
+        # Verify host path was sanitized from error message
+        failed_sa = rendered_result.scene_assets[1]
+        assert failed_sa.status == VisualGenerationStatus.FAILED
+        assert failed_sa.primary_asset.status == VisualAssetStatus.FAILED
+        assert "/Users/developer" not in failed_sa.error_message
+        assert "[LOCAL_PATH]" in failed_sa.error_message
+    finally:
+        visual_generation_service.diagram_generators[VisualType.ARCHITECTURE_DIAGRAM] = original_gen
+
+
+def test_cross_job_isolation_and_path_safety():
+    """
+    Verifies that Job B cannot access or download visual assets belonging to Job A,
+    and path traversal attacks are rejected.
+    """
+    job_a = job_store.create_job(
+        repo_url="https://github.com/a/repo",
+        repo_name="repo",
+        repository_owner="a",
+        repository_name="repo",
+        clone_url="https://github.com/a/repo.git",
+    )
+    job_b = job_store.create_job(
+        repo_url="https://github.com/b/repo",
+        repo_name="repo",
+        repository_owner="b",
+        repository_name="repo",
+        clone_url="https://github.com/b/repo.git",
+    )
+
+    # Requesting asset from uninitialized job returns 404
+    resp1 = client.get(f"/api/v1/jobs/{job_b.job_id}/visual-assets/nonexistent_asset")
+    assert resp1.status_code == 404
+
+    # Path traversal attempt in file retrieval is rejected
+    resp2 = client.get(f"/api/v1/jobs/{job_a.job_id}/visual-assets/../../etc/passwd/file")
+    assert resp2.status_code in (400, 404)

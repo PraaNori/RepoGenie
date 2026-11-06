@@ -423,3 +423,11 @@ class VisualGenerationResult(BaseModel):
                 if asset.asset_id == asset_id:
                     return asset
         return None
+
+
+# Ensure JobResponse schema resolves VisualGenerationResult if models.schemas was loaded first
+try:
+    from app.models.schemas import JobResponse
+    JobResponse.model_rebuild()
+except Exception:
+    pass

@@ -130,16 +130,18 @@ class ArchitectureDiagramGenerator(BaseDiagramGenerator):
             components = (priority_comps + other_comps)[:6]
 
         # 2. Discover verified interactions / edges
-        edges: List[Dict[str, str]] = []
+        edges: List[Dict[str, Any]] = []
         if code_understanding and code_understanding.cross_component_interactions:
             for inter in code_understanding.cross_component_interactions:
                 src_info = comp_id_map.get(inter.source_component)
                 tgt_info = comp_id_map.get(inter.target_component)
                 if src_info and tgt_info and src_info["id"] != tgt_info["id"]:
+                    is_conf = getattr(inter, "is_confirmed", True)
                     edges.append({
                         "from": src_info["id"],
                         "to": tgt_info["id"],
                         "label": sanitize_text(inter.interaction_type, 20) or "uses",
+                        "is_confirmed": is_conf,
                     })
 
         # If no explicit interactions found, derive from dependency graph or sequential order
@@ -150,6 +152,7 @@ class ArchitectureDiagramGenerator(BaseDiagramGenerator):
                     "from": components[i]["id"],
                     "to": components[i + 1]["id"],
                     "label": "coordinates with",
+                    "is_confirmed": False,
                 })
 
         # 3. Generate Graphviz DOT source
@@ -190,7 +193,10 @@ class ArchitectureDiagramGenerator(BaseDiagramGenerator):
 
         dot_lines.append("")
         for e in edges:
-            dot_lines.append(f'  {e["from"]} -> {e["to"]} [label=" {e["label"]} "];')
+            if e.get("is_confirmed", True):
+                dot_lines.append(f'  {e["from"]} -> {e["to"]} [label=" {e["label"]} ", style="solid", color="#64748B"];')
+            else:
+                dot_lines.append(f'  {e["from"]} -> {e["to"]} [label=" {e["label"]} (inferred) ", style="dashed", color="#94A3B8"];')
         dot_lines.append("}")
         dot_source = "\n".join(dot_lines)
 
@@ -199,7 +205,10 @@ class ArchitectureDiagramGenerator(BaseDiagramGenerator):
         for c in components:
             mermaid_lines.append(f'  {c["id"]}["<b>{c["name"]}</b><br/>{c["responsibility"]}<br/><i>{c["file"]}</i>"]')
         for e in edges:
-            mermaid_lines.append(f'  {e["from"]} -->|{e["label"]}| {e["to"]}')
+            if e.get("is_confirmed", True):
+                mermaid_lines.append(f'  {e["from"]} -->|{e["label"]}| {e["to"]}')
+            else:
+                mermaid_lines.append(f'  {e["from"]} -.->|{e["label"]} (inferred)| {e["to"]}')
         mermaid_source = "\n".join(mermaid_lines)
 
         # 5. Render SVG via DiagramRenderer

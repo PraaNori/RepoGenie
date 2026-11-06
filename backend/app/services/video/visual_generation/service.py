@@ -27,6 +27,7 @@ from .diagrams import (
     DataFlowDiagramGenerator,
     DiagramType,
     WorkflowDiagramGenerator,
+    sanitize_text,
 )
 from .schemas import (
     MediaFormat,
@@ -232,6 +233,12 @@ class VisualGenerationService:
             workflow_understanding=workflow_understanding,
         )
 
+        # Validate rendered SVG content is valid
+        if not diag_result.svg_content or not diag_result.svg_content.strip():
+            raise ValueError(f"Generated SVG content for scene {scene.scene_number} is empty.")
+        if "<svg" not in diag_result.svg_content or "</svg>" not in diag_result.svg_content:
+            raise ValueError(f"Generated SVG content for scene {scene.scene_number} is malformed XML.")
+
         # Save rendered SVG file to isolated storage
         saved_path = self.storage.save_asset_content(safe_job_id, filename, diag_result.svg_content)
         relative_path = self.storage.get_relative_asset_path(safe_job_id, filename)
@@ -345,13 +352,14 @@ class VisualGenerationService:
                         scene.scene_number,
                         exc,
                     )
+                    sanitized_err = sanitize_text(str(exc), max_length=200)
                     failed_assets += 1
                     failed_scenes += 1
                     failed_primary = (
                         sa.primary_asset.model_copy(
                             update={
                                 "status": VisualAssetStatus.FAILED,
-                                "error_message": str(exc),
+                                "error_message": sanitized_err,
                             }
                         )
                         if sa.primary_asset
@@ -361,7 +369,7 @@ class VisualGenerationService:
                         update={
                             "primary_asset": failed_primary,
                             "status": VisualGenerationStatus.FAILED,
-                            "error_message": str(exc),
+                            "error_message": sanitized_err,
                         }
                     )
                     updated_scene_assets.append(updated_sa)

@@ -428,6 +428,8 @@ class JobResponse(BaseModel):
 # Late imports to prevent circular dependencies with AI modules that import models.schemas
 from ..services.ai.script_generation.schemas import EducationalScript
 from ..services.ai.storyboard_generation.schemas import EducationalStoryboard
-from ..services.video.visual_generation.schemas import VisualGenerationResult
-
-JobResponse.model_rebuild()
+try:
+    from ..services.video.visual_generation.schemas import VisualGenerationResult
+    JobResponse.model_rebuild()
+except (ImportError, AttributeError):
+    pass

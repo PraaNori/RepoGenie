@@ -72,6 +72,7 @@ class WorkflowDiagramGenerator(BaseDiagramGenerator):
                 sym = sanitize_text(s.symbol_name, 28)
                 act = sanitize_text(s.action_type, 20) or "execute"
                 desc = sanitize_text(s.description, 40)
+                is_verified = bool(getattr(s, "call_relationship_verified", False) or getattr(s, "source_order_verified", False))
                 step_nodes.append({
                     "id": f"step_{s.step_number}",
                     "number": s.step_number,
@@ -81,6 +82,7 @@ class WorkflowDiagramGenerator(BaseDiagramGenerator):
                     "desc": desc,
                     "is_entry": s.step_number == 1,
                     "is_terminal": s.step_number == len(workflow.steps[:5]),
+                    "is_verified": is_verified,
                 })
         else:
             warnings.append("No structured AI workflow found; generating deterministic sequential flow from entry points.")
@@ -90,13 +92,13 @@ class WorkflowDiagramGenerator(BaseDiagramGenerator):
             else:
                 entry = "main.py"
             step_nodes = [
-                {"id": "step_1", "number": 1, "title": "Program Start", "symbol": entry, "action": "initialize", "desc": "CLI invocation & parsing", "is_entry": True, "is_terminal": False},
-                {"id": "step_2", "number": 2, "title": "Execution Engine", "symbol": "run()", "action": "process", "desc": "Process command context", "is_entry": False, "is_terminal": False},
-                {"id": "step_3", "number": 3, "title": "Result Output", "symbol": "return", "action": "output", "desc": "Format and deliver outcome", "is_entry": False, "is_terminal": True},
+                {"id": "step_1", "number": 1, "title": "Program Start", "symbol": entry, "action": "initialize", "desc": "CLI invocation & parsing", "is_entry": True, "is_terminal": False, "is_verified": False},
+                {"id": "step_2", "number": 2, "title": "Execution Engine", "symbol": "run()", "action": "process", "desc": "Process command context", "is_entry": False, "is_terminal": False, "is_verified": False},
+                {"id": "step_3", "number": 3, "title": "Result Output", "symbol": "return", "action": "output", "desc": "Format and deliver outcome", "is_entry": False, "is_terminal": True, "is_verified": False},
             ]
 
         # 3. Generate edges between sequential steps
-        edges: List[Dict[str, str]] = []
+        edges: List[Dict[str, Any]] = []
         for i in range(len(step_nodes) - 1):
             s_curr = step_nodes[i]
             s_next = step_nodes[i + 1]
@@ -104,6 +106,7 @@ class WorkflowDiagramGenerator(BaseDiagramGenerator):
                 "from": s_curr["id"],
                 "to": s_next["id"],
                 "label": f"Step {s_curr['number']} -> {s_next['number']}",
+                "is_confirmed": s_curr.get("is_verified", False),
             })
 
         # 4. Generate Graphviz DOT source
@@ -137,7 +140,10 @@ class WorkflowDiagramGenerator(BaseDiagramGenerator):
 
         dot_lines.append("")
         for e in edges:
-            dot_lines.append(f'  {e["from"]} -> {e["to"]};')
+            if e.get("is_confirmed", True):
+                dot_lines.append(f'  {e["from"]} -> {e["to"]} [style="solid", color="#6366F1"];')
+            else:
+                dot_lines.append(f'  {e["from"]} -> {e["to"]} [style="dashed", color="#94A3B8"];')
         dot_lines.append("}")
         dot_source = "\n".join(dot_lines)
 
@@ -153,7 +159,10 @@ class WorkflowDiagramGenerator(BaseDiagramGenerator):
                 mermaid_lines.append(f'  {s["id"]}["{lbl}"]')
 
         for e in edges:
-            mermaid_lines.append(f'  {e["from"]} --> {e["to"]}')
+            if e.get("is_confirmed", True):
+                mermaid_lines.append(f'  {e["from"]} --> {e["to"]}')
+            else:
+                mermaid_lines.append(f'  {e["from"]} -.-> {e["to"]}')
         mermaid_source = "\n".join(mermaid_lines)
 
         # 6. Render SVG via DiagramRenderer

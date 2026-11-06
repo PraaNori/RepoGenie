@@ -79,12 +79,15 @@ class DataFlowDiagramGenerator(BaseDiagramGenerator):
                             for idx, t in enumerate(df.transformations[:2]):
                                 t_name = sanitize_text(t.transformation_name, 26)
                                 t_by = sanitize_text(t.performed_by_symbol, 24) or "Transform"
+                                is_t_ver = bool(getattr(t, "transformation_verified", False))
+                                role_lbl = f"Transform ({t_by})" if is_t_ver else f"Inferred Transform ({t_by})"
                                 data_flow_stages.append({
                                     "id": f"df_trans_{idx}",
                                     "name": t_name,
-                                    "role": f"Transform ({t_by})",
+                                    "role": role_lbl,
                                     "type": "transform",
                                     "file": t_by,
+                                    "is_verified": is_t_ver,
                                 })
                         else:
                             data_flow_stages.append({
@@ -93,16 +96,20 @@ class DataFlowDiagramGenerator(BaseDiagramGenerator):
                                 "role": "Type Conversion",
                                 "type": "transform",
                                 "file": "Core Logic",
+                                "is_verified": False,
                             })
 
                         # Stage 3: Destination
-                        dest_type = "storage" if getattr(df, "storage_operation_verified", False) else "destination"
+                        is_storage_ver = bool(getattr(df, "storage_operation_verified", False))
+                        dest_type = "storage" if is_storage_ver else "destination"
+                        dest_role = f"Sink: {item_name}" if is_storage_ver else f"Unverified Sink: {item_name}"
                         data_flow_stages.append({
                             "id": "df_dest",
                             "name": dest,
-                            "role": f"Sink: {item_name}",
+                            "role": dest_role,
                             "type": dest_type,
-                            "file": "Output / DB",
+                            "file": "Output / DB" if is_storage_ver else "External Sink",
+                            "is_verified": is_storage_ver,
                         })
                         break
                 if data_flow_stages:
@@ -112,19 +119,23 @@ class DataFlowDiagramGenerator(BaseDiagramGenerator):
         if not data_flow_stages:
             warnings.append("No structured AI data-flows found; generating deterministic input-processing-output flow.")
             data_flow_stages = [
-                {"id": "df_1", "name": "Input Source", "role": "CLI Arguments / Request Payload", "type": "source", "file": "sys.argv / Request"},
-                {"id": "df_2", "name": "Data Parsing & Validation", "role": "Type conversion & constraint validation", "type": "transform", "file": "Parameter Engine"},
-                {"id": "df_3", "name": "Context Transformation", "role": "Assemble domain models & execution state", "type": "transform", "file": "Context Pipeline"},
-                {"id": "df_4", "name": "Sink & Persistence", "role": "Structured output & response delivery", "type": "storage", "file": "Output Stream"},
+                {"id": "df_1", "name": "Input Source", "role": "CLI Arguments / Request Payload", "type": "source", "file": "sys.argv / Request", "is_verified": False},
+                {"id": "df_2", "name": "Data Parsing & Validation", "role": "Type conversion & constraint validation", "type": "transform", "file": "Parameter Engine", "is_verified": False},
+                {"id": "df_3", "name": "Context Transformation", "role": "Assemble domain models & execution state", "type": "transform", "file": "Context Pipeline", "is_verified": False},
+                {"id": "df_4", "name": "Sink & Persistence", "role": "Structured output & response delivery", "type": "storage", "file": "Output Stream", "is_verified": False},
             ]
 
         # 2. Sequential pipeline edges
-        edges: List[Dict[str, str]] = []
+        edges: List[Dict[str, Any]] = []
         for i in range(len(data_flow_stages) - 1):
+            s_curr = data_flow_stages[i]
+            s_next = data_flow_stages[i + 1]
+            is_edge_conf = s_curr.get("is_verified", True) and s_next.get("is_verified", True)
             edges.append({
-                "from": data_flow_stages[i]["id"],
-                "to": data_flow_stages[i + 1]["id"],
+                "from": s_curr["id"],
+                "to": s_next["id"],
                 "label": "flows to",
+                "is_confirmed": is_edge_conf,
             })
 
         # 3. Generate Graphviz DOT source
@@ -160,7 +171,10 @@ class DataFlowDiagramGenerator(BaseDiagramGenerator):
 
         dot_lines.append("")
         for e in edges:
-            dot_lines.append(f'  {e["from"]} -> {e["to"]};')
+            if e.get("is_confirmed", True):
+                dot_lines.append(f'  {e["from"]} -> {e["to"]} [style="solid", color="#059669"];')
+            else:
+                dot_lines.append(f'  {e["from"]} -> {e["to"]} [style="dashed", color="#94A3B8"];')
         dot_lines.append("}")
         dot_source = "\n".join(dot_lines)
 
@@ -174,7 +188,10 @@ class DataFlowDiagramGenerator(BaseDiagramGenerator):
                 mermaid_lines.append(f'  {s["id"]}["{lbl}"]')
 
         for e in edges:
-            mermaid_lines.append(f'  {e["from"]} --> {e["to"]}')
+            if e.get("is_confirmed", True):
+                mermaid_lines.append(f'  {e["from"]} --> {e["to"]}')
+            else:
+                mermaid_lines.append(f'  {e["from"]} -.-> {e["to"]}')
         mermaid_source = "\n".join(mermaid_lines)
 
         # 5. Render SVG via DiagramRenderer

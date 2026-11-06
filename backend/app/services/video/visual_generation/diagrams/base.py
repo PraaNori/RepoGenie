@@ -105,26 +105,41 @@ class DiagramGenerationResult:
 
 
 def sanitize_text(text: Optional[str], max_length: int = 80) -> str:
-    """Escapes quotes, backslashes, XML special characters, and truncates overly long strings."""
+    """Escapes quotes, backslashes, XML special characters, redacts secrets, and truncates overly long strings."""
     if not text:
         return ""
     text = str(text).strip()
-    # Strip local machine paths if present
-    text = re.sub(r"/Users/[^/]+/[^/]+/[^/]+/", "", text)
-    text = re.sub(r"/tmp/[^/]+/", "", text)
+    # Redact potential API keys, credentials, or tokens
+    text = re.sub(r"gsk_[a-zA-Z0-9]{20,}", "[REDACTED_KEY]", text)
+    text = re.sub(r"AIza[a-zA-Z0-9_\-]{20,}", "[REDACTED_KEY]", text)
+    text = re.sub(r"(?:bearer\s+|token\s+|key\s*=\s*)[a-zA-Z0-9_\-\.]{16,}", "[REDACTED_TOKEN]", text, flags=re.IGNORECASE)
+
+    # Strip local machine and host paths if present
+    text = re.sub(r"/(?:Users|home|root|private/tmp|tmp)/[^\s'\"\(\):]+", "[LOCAL_PATH]", text)
+    text = re.sub(r"storage/jobs/[^/]+/repos/[^/]+/", "", text)
     if len(text) > max_length:
         text = text[: max_length - 3] + "..."
     return text
 
 
 def sanitize_filename(path: Optional[str]) -> str:
-    """Normalizes repository paths and strips host filesystem artifacts."""
+    """Normalizes repository paths, redacts sensitive credential files, and strips host filesystem artifacts."""
     if not path:
         return ""
     path = path.strip().replace("\\", "/")
-    # Remove leading slashes or absolute paths
+
+    # Redact sensitive files
+    lower_path = path.lower()
+    if any(s in lower_path for s in [".env", "id_rsa", "credentials.json", "private_key", "secret"]):
+        return "[REDACTED_FILE]"
+
+    # Strip standard OS host directory prefixes
+    path = re.sub(r"^.*?/(?:Users|home|root|tmp|var|private/tmp)/[^/]+/[^/]+/", "", path)
+    path = re.sub(r"^.*?/storage/jobs/[^/]+/repos/[^/]+/", "", path)
+    path = re.sub(r"^[A-Za-z]:/[^/]+/[^/]+/", "", path)
+
+    # Remove leading slashes or parent traversals
     parts = [p for p in path.split("/") if p and p not in ("..", ".")]
-    # If it contains repository root prefix, clean it
     clean = "/".join(parts)
     return clean
 
