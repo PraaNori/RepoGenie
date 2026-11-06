@@ -61,6 +61,11 @@ from ...services.video.captions import (
     caption_service,
     caption_storage_manager,
 )
+from ...services.video.assembly_input import (
+    AssemblyReadinessReport,
+    VideoAssemblyInput,
+    assembly_input_service,
+)
 from ...services.repo.analyzer import repo_analyzer_service
 from ...services.repo.architecture_analyzer import architecture_analyzer_service
 from ...services.repo.code_parser import code_parser_service
@@ -1598,6 +1603,123 @@ def get_job_caption_asset_file(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Error accessing caption file: {e}",
         )
+
+
+@router.post("/{job_id}/assembly-input", response_model=VideoAssemblyInput)
+async def generate_job_assembly_input(
+    job_id: str,
+    refresh: bool = Query(default=False, description="Force re-validation and recompilation of assembly input package"),
+):
+    """
+    Compiles, validates, and stores the complete VideoAssemblyInput package for a job.
+    Inspects all visual, audio, and subtitle files on disk and produces an AssemblyReadinessReport.
+    """
+    internal = job_store.get_internal_job(job_id)
+    if not internal:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Job with ID '{job_id}' not found",
+        )
+
+    if not internal.educational_storyboard:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Educational storyboard must be generated before assembly input compilation for job '{job_id}'.",
+        )
+
+    job_lock = await job_store.get_job_lock(job_id)
+    async with job_lock:
+        internal = job_store.get_internal_job(job_id)
+        if not internal or not internal.educational_storyboard:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Job with ID '{job_id}' not found",
+            )
+
+        if internal.assembly_input and not refresh:
+            return internal.assembly_input
+
+        try:
+            assembly_input = assembly_input_service.build_assembly_input(
+                job_id=job_id,
+                repo_name=internal.repo_name,
+                storyboard=internal.educational_storyboard,
+                visual_generation=internal.visual_generation,
+                narration=internal.narration,
+                captions=internal.captions,
+            )
+            job_store.update_job_assembly_input_success(job_id, assembly_input)
+            return assembly_input
+        except Exception as exc:
+            logger.exception("Failed to build assembly input package for job %s: %s", job_id, exc)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to compile assembly input package: {exc}",
+            )
+
+
+@router.get("/{job_id}/assembly-input", response_model=VideoAssemblyInput)
+def get_job_assembly_input(job_id: str):
+    """
+    Retrieves the stored VideoAssemblyInput package for a job.
+    If not yet generated, compiles it on the fly if storyboard exists.
+    """
+    internal = job_store.get_internal_job(job_id)
+    if not internal:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Job with ID '{job_id}' not found",
+        )
+
+    if internal.assembly_input:
+        return internal.assembly_input
+
+    if not internal.educational_storyboard:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Assembly input package not found and cannot be compiled because storyboard does not exist for job '{job_id}'.",
+        )
+
+    # Build and cache on the fly
+    assembly_input = assembly_input_service.build_assembly_input(
+        job_id=job_id,
+        repo_name=internal.repo_name,
+        storyboard=internal.educational_storyboard,
+        visual_generation=internal.visual_generation,
+        narration=internal.narration,
+        captions=internal.captions,
+    )
+    job_store.update_job_assembly_input_success(job_id, assembly_input)
+    return assembly_input
+
+
+@router.get("/{job_id}/assembly-readiness", response_model=AssemblyReadinessReport)
+def get_job_assembly_readiness(job_id: str):
+    """
+    Returns the AssemblyReadinessReport for a job, evaluating asset presence, format integrity,
+    and cross-asset synchronization.
+    """
+    internal = job_store.get_internal_job(job_id)
+    if not internal:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Job with ID '{job_id}' not found",
+        )
+
+    if internal.assembly_input:
+        return internal.assembly_input.readiness_report
+
+    # Evaluate readiness
+    assembly_input = assembly_input_service.build_assembly_input(
+        job_id=job_id,
+        repo_name=internal.repo_name,
+        storyboard=internal.educational_storyboard,
+        visual_generation=internal.visual_generation,
+        narration=internal.narration,
+        captions=internal.captions,
+    )
+    job_store.update_job_assembly_input_success(job_id, assembly_input)
+    return assembly_input.readiness_report
 
 
 @router.post("/{job_id}/simulate-step", response_model=JobResponse)

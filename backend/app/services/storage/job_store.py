@@ -26,6 +26,7 @@ from ..video.narration.schemas import NarrationAssetStatus, NarrationGenerationR
 from ..video.narration.audio_storage import audio_storage_manager
 from ..video.captions.schemas import CaptionGenerationResult, CaptionStatus
 from ..video.captions.caption_storage import caption_storage_manager
+from ..video.assembly_input.schemas import VideoAssemblyInput
 
 # Standard 9 pipeline stages
 PIPELINE_STAGES = [
@@ -67,6 +68,7 @@ class JobInternal(BaseModel):
     visual_generation: Optional[VisualGenerationResult] = None
     narration: Optional[NarrationGenerationResult] = None
     captions: Optional[CaptionGenerationResult] = None
+    assembly_input: Optional[VideoAssemblyInput] = None
     result: Optional[VideoResult] = None
     error: Optional[str] = None
 
@@ -98,11 +100,13 @@ class JobInternal(BaseModel):
             has_visual_assets=bool(self.visual_generation is not None),
             has_narration=bool(self.narration is not None),
             has_captions=bool(self.captions is not None),
+            has_assembly_input=bool(self.assembly_input is not None),
             educational_script=self.educational_script,
             educational_storyboard=self.educational_storyboard,
             visual_generation=self.visual_generation,
             narration=self.narration,
             captions=self.captions,
+            assembly_input=self.assembly_input,
             result=self.result,
             error=self.error,
         )
@@ -790,6 +794,10 @@ class JobStore:
         job.current_stage = PIPELINE_STAGES[7]
         if job.stages[7].status == StatusEnum.PENDING:
             job.stages[7].detail = "Ready for voice generation"
+
+        # Invalidate downstream assembly input when visual assets are updated
+        self.invalidate_job_assembly_input(job_id)
+
         job.updated_at = now
         return job
 
@@ -830,6 +838,10 @@ class JobStore:
             job.stages[6].completed_at = None
             job.stages[6].detail = "Ready for visual generation (reset)"
         job.current_stage = PIPELINE_STAGES[6]
+
+        # Invalidate downstream assembly input when visual assets are invalidated
+        self.invalidate_job_assembly_input(job_id)
+
         job.updated_at = now
         return job
 
@@ -957,6 +969,10 @@ class JobStore:
             return None
         now = datetime.now(timezone.utc)
         job.captions = result
+
+        # Invalidate downstream assembly input when captions are updated
+        self.invalidate_job_assembly_input(job_id)
+
         job.updated_at = now
         return job
 
@@ -987,6 +1003,46 @@ class JobStore:
             caption_storage_manager.delete_job_captions(job_id)
         except Exception as e:
             logger.warning("Failed to clean caption storage for job %s: %s", job_id, e)
+
+        # Invalidate downstream assembly input when captions are invalidated
+        self.invalidate_job_assembly_input(job_id)
+
+        job.updated_at = now
+        return job
+
+    def update_job_assembly_input_success(
+        self,
+        job_id: str,
+        assembly_input: VideoAssemblyInput,
+    ) -> Optional[JobInternal]:
+        job = self._jobs.get(job_id)
+        if not job:
+            return None
+        now = datetime.now(timezone.utc)
+        job.assembly_input = assembly_input
+        # Note: Stage 9 (VIDEO_ASSEMBLY) remains pending for Milestone 6
+        if job.stages[8].status == StatusEnum.PENDING:
+            job.stages[8].detail = (
+                f"Assembly input package compiled ({assembly_input.total_scenes} scenes, "
+                f"readiness: {assembly_input.readiness_report.status.value})"
+            )
+        job.updated_at = now
+        return job
+
+    def get_job_assembly_input(self, job_id: str) -> Optional[VideoAssemblyInput]:
+        job = self._jobs.get(job_id)
+        if not job:
+            return None
+        return job.assembly_input
+
+    def invalidate_job_assembly_input(self, job_id: str) -> Optional[JobInternal]:
+        job = self._jobs.get(job_id)
+        if not job:
+            return None
+        now = datetime.now(timezone.utc)
+        job.assembly_input = None
+        if job.stages[8].status == StatusEnum.PENDING:
+            job.stages[8].detail = "Ready for video assembly"
         job.updated_at = now
         return job
 

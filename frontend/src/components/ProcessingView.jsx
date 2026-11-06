@@ -6,6 +6,7 @@ import EducationalScriptCard from './EducationalScriptCard';
 import EducationalStoryboardCard from './EducationalStoryboardCard';
 import NarrationCard from './NarrationCard';
 import CaptionsCard from './processing/CaptionsCard';
+import AssemblyReadinessCard from './processing/AssemblyReadinessCard';
 import {
   generateProjectUnderstanding,
   getCodeUnderstanding,
@@ -20,6 +21,8 @@ import {
   generateNarration,
   getCaptions,
   generateCaptions,
+  getAssemblyInput,
+  generateAssemblyInput,
 } from '../api/client';
 import { 
   GitBranch, 
@@ -116,6 +119,13 @@ export default function ProcessingView({
   const [captionsError, setCaptionsError] = useState(null);
   const isFetchingCaptionsRef = useRef(false);
   const isGeneratingCaptionsRef = useRef(false);
+
+  // Milestone 5: Assembly Package & Readiness Preflight (Phase 5.6)
+  const [assemblyInput, setAssemblyInput] = useState(job?.assembly_input || null);
+  const [isGeneratingAssemblyInput, setIsGeneratingAssemblyInput] = useState(false);
+  const [assemblyInputError, setAssemblyInputError] = useState(null);
+  const isFetchingAssemblyInputRef = useRef(false);
+  const isGeneratingAssemblyInputRef = useRef(false);
 
   useEffect(() => {
     // If the job has code understanding generated and we haven't loaded it yet, fetch it
@@ -322,6 +332,64 @@ export default function ProcessingView({
       setCaptions(null);
     }
   }, [job?.has_captions]);
+
+  useEffect(() => {
+    if (job?.job_id && (job?.has_assembly_input || job?.assembly_input) && !assemblyInput) {
+      if (job.assembly_input) {
+        setAssemblyInput(job.assembly_input);
+      } else if (!isFetchingAssemblyInputRef.current) {
+        isFetchingAssemblyInputRef.current = true;
+        getAssemblyInput(job.job_id)
+          .then((res) => {
+            if (res.success) {
+              setAssemblyInput(res.data);
+              if (onJobUpdated) {
+                onJobUpdated({ ...job, assembly_input: res.data, has_assembly_input: true });
+              }
+            }
+          })
+          .finally(() => {
+            isFetchingAssemblyInputRef.current = false;
+          });
+      }
+    }
+  }, [job?.job_id, job?.has_assembly_input, job?.assembly_input, assemblyInput]);
+
+  useEffect(() => {
+    // If job state reports assembly input was invalidated, clear in UI
+    if (job && job.has_assembly_input === false && assemblyInput) {
+      setAssemblyInput(null);
+    }
+  }, [job?.has_assembly_input]);
+
+  const handleValidateAssemblyInput = async (refresh = false) => {
+    if (!job?.job_id) return;
+    if (isGeneratingAssemblyInputRef.current) return;
+    isGeneratingAssemblyInputRef.current = true;
+    setIsGeneratingAssemblyInput(true);
+    setAssemblyInputError(null);
+
+    try {
+      const res = await generateAssemblyInput(job.job_id, refresh);
+      if (res.success) {
+        setAssemblyInput(res.data);
+        if (onJobUpdated) {
+          onJobUpdated({
+            ...job,
+            assembly_input: res.data,
+            has_assembly_input: true,
+          });
+        }
+      } else {
+        setAssemblyInputError(res.error || 'Failed to validate assembly readiness');
+      }
+    } catch (err) {
+      setAssemblyInputError(err.message || 'Error communicating with server');
+    } finally {
+      setIsGeneratingAssemblyInput(false);
+      isGeneratingAssemblyInputRef.current = false;
+    }
+  };
 
   const handleGenerateCaptions = async (refresh = false) => {
     if (!job?.job_id) return;
@@ -1382,6 +1450,18 @@ export default function ProcessingView({
           onGenerate={handleGenerateCaptions}
           error={captionsError}
           isNarrationAvailable={Boolean(narration || job?.narration || job?.has_narration)}
+        />
+      )}
+
+      {/* Milestone 5: Assembly Package & Readiness Preflight (Phase 5.6) */}
+      {(knowledge || job?.has_educational_storyboard || educationalStoryboard || job?.has_assembly_input || assemblyInput) && (
+        <AssemblyReadinessCard
+          jobId={job.job_id}
+          assemblyInput={assemblyInput}
+          isLoading={isGeneratingAssemblyInput}
+          onValidate={handleValidateAssemblyInput}
+          error={assemblyInputError}
+          isStoryboardAvailable={Boolean(educationalStoryboard || job?.educational_storyboard || job?.has_educational_storyboard)}
         />
       )}
 

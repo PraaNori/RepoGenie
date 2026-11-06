@@ -674,3 +674,110 @@ export async function generateCaptions(jobId, refresh = false) {
   }
 }
 
+export async function getAssemblyInput(jobId) {
+  try {
+    const response = await fetch(`${API_BASE_URL}/api/v1/jobs/${jobId}/assembly-input`, {
+      method: 'GET',
+      headers: {
+        'Accept': 'application/json',
+      },
+    });
+
+    let data;
+    try {
+      data = await response.json();
+    } catch {
+      data = {};
+    }
+
+    if (!response.ok) {
+      return {
+        success: false,
+        status: response.status,
+        error: data.detail || `Failed to fetch assembly input package (${response.status})`,
+      };
+    }
+
+    return { success: true, status: response.status, data };
+  } catch (error) {
+    return {
+      success: false,
+      status: 0,
+      error: error.message || 'Error checking assembly input package',
+    };
+  }
+}
+
+export async function generateAssemblyInput(jobId, refresh = false) {
+  try {
+    const params = new URLSearchParams();
+    if (refresh) params.append('refresh', 'true');
+    const queryString = params.toString() ? `?${params.toString()}` : '';
+
+    const response = await fetch(`${API_BASE_URL}/api/v1/jobs/${jobId}/assembly-input${queryString}`, {
+      method: 'POST',
+      headers: {
+        'Accept': 'application/json',
+      },
+    });
+
+    let data;
+    try {
+      data = await response.json();
+    } catch {
+      data = {};
+    }
+
+    if (!response.ok) {
+      return {
+        success: false,
+        status: response.status,
+        error: data.detail || `Failed to generate assembly input package (${response.status})`,
+      };
+    }
+
+    return { success: true, status: response.status, data };
+  } catch (error) {
+    return {
+      success: false,
+      status: 0,
+      error: error.message || 'Error compiling assembly input package',
+    };
+  }
+}
+
+export async function getAssemblyReadiness(jobId) {
+  try {
+    const response = await fetch(`${API_BASE_URL}/api/v1/jobs/${jobId}/assembly-readiness`, {
+      method: 'GET',
+      headers: {
+        'Accept': 'application/json',
+      },
+    });
+
+    let data;
+    try {
+      data = await response.json();
+    } catch {
+      data = {};
+    }
+
+    if (!response.ok) {
+      return {
+        success: false,
+        status: response.status,
+        error: data.detail || `Failed to fetch assembly readiness report (${response.status})`,
+      };
+    }
+
+    return { success: true, status: response.status, data };
+  } catch (error) {
+    return {
+      success: false,
+      status: 0,
+      error: error.message || 'Error checking assembly readiness report',
+    };
+  }
+}
+
+

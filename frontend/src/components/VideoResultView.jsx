@@ -4,12 +4,14 @@ import EducationalScriptCard from './EducationalScriptCard';
 import EducationalStoryboardCard from './EducationalStoryboardCard';
 import NarrationCard from './NarrationCard';
 import CaptionsCard from './processing/CaptionsCard';
+import AssemblyReadinessCard from './processing/AssemblyReadinessCard';
 import {
   getWorkflowUnderstanding,
   getEducationalScript,
   getEducationalStoryboard,
   getNarration,
   getCaptions,
+  getAssemblyInput,
 } from '../api/client';
 import { 
   Download, 
@@ -43,6 +45,9 @@ export default function VideoResultView({ job, onReset }) {
 
   const [captions, setCaptions] = useState(job?.captions || null);
   const [captionsError, setCaptionsError] = useState(null);
+
+  const [assemblyInput, setAssemblyInput] = useState(job?.assembly_input || null);
+  const [assemblyInputError, setAssemblyInputError] = useState(null);
 
   useEffect(() => {
     let isMounted = true;
@@ -208,6 +213,39 @@ export default function VideoResultView({ job, onReset }) {
       isMounted = false;
     };
   }, [job?.job_id, job?.has_captions, job?.captions, captions]);
+
+  useEffect(() => {
+    let isMounted = true;
+    if (job?.job_id && (job?.has_assembly_input || job?.assembly_input) && !assemblyInput) {
+      if (job.assembly_input) {
+        setAssemblyInput(job.assembly_input);
+      } else {
+        getAssemblyInput(job.job_id)
+          .then((res) => {
+            if (!isMounted) return;
+            if (res.success) {
+              setAssemblyInput(res.data);
+              setAssemblyInputError(null);
+            } else if (res.status === 404) {
+              setAssemblyInput(null);
+              setAssemblyInputError(null);
+            } else {
+              setAssemblyInput(null);
+              setAssemblyInputError(res.error || 'Failed to load assembly input package');
+            }
+          })
+          .catch((err) => {
+            if (isMounted) {
+              setAssemblyInput(null);
+              setAssemblyInputError(err.message || 'Unexpected error loading assembly input');
+            }
+          });
+      }
+    }
+    return () => {
+      isMounted = false;
+    };
+  }, [job?.job_id, job?.has_assembly_input, job?.assembly_input, assemblyInput]);
 
   // Fallback data if viewing directly without active job
   const repoName = job?.repo_name || 'fastapi/fastapi';
@@ -386,6 +424,17 @@ export default function VideoResultView({ job, onReset }) {
           <CaptionsCard
             jobId={job?.job_id}
             captions={captions}
+            readOnly
+          />
+        </div>
+      )}
+
+      {/* Assembly Package & Readiness (Phase 5.6) */}
+      {assemblyInput && (
+        <div className="mt-8 pt-6 border-t border-slate-200">
+          <AssemblyReadinessCard
+            jobId={job?.job_id}
+            assemblyInput={assemblyInput}
             readOnly
           />
         </div>
