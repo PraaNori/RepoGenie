@@ -932,11 +932,11 @@ def test_api_post_visual_assets_renders_diagrams_and_file_streaming():
         scene_id="scene-1",
         scene_number=1,
         script_section_id="sec-1",
-        title="Title",
+        title="Custom Scene",
         purpose="Intro",
         estimated_duration_seconds=10.0,
-        visual_type=VisualType.TITLE_CARD,
-        visual_description="Title card",
+        visual_type=VisualType.OTHER,
+        visual_description="Custom unrendered scene",
     )
     storyboard = EducationalStoryboard(
         storyboard_id=f"sb-{job_id}",

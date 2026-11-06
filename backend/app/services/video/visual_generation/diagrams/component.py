@@ -46,6 +46,7 @@ class ComponentDiagramGenerator(BaseDiagramGenerator):
         knowledge: RepositoryKnowledge,
         code_understanding: Optional[RepositoryCodeUnderstanding] = None,
         workflow_understanding: Optional[RepositoryWorkflowUnderstanding] = None,
+        **kwargs,
     ) -> DiagramGenerationResult:
         start_time = time.perf_counter()
         verified_files, verified_evidence, warnings = self.extract_and_validate_files(scene, knowledge)

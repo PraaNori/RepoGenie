@@ -1071,7 +1071,7 @@ async def generate_job_visual_assets(
                 refresh=refresh,
             )
 
-            # Generate technical diagrams for scenes requiring diagram visual types (Phase 5.2)
+            # Generate visuals for all supported visual types (Phase 5.2 diagrams + Phase 5.3 code & scene cards)
             rendered_result = visual_generation_service.generate_diagrams_for_job(
                 job_id=job_id,
                 plan=plan,
@@ -1079,6 +1079,11 @@ async def generate_job_visual_assets(
                 knowledge=internal.knowledge,
                 code_understanding=internal.code_understanding,
                 workflow_understanding=internal.workflow_understanding,
+                project_understanding=internal.project_understanding,
+                script=internal.educational_script,
+                parsed_repository=internal.code_analysis,
+                repo_root_dir=internal.local_path,
+                include_scene_visuals=True,
             )
 
             # Stage 07 is only marked COMPLETED if all required assets in the job have completed.

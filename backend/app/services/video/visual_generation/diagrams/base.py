@@ -157,6 +157,7 @@ class BaseDiagramGenerator(ABC):
         knowledge: RepositoryKnowledge,
         code_understanding: Optional[RepositoryCodeUnderstanding] = None,
         workflow_understanding: Optional[RepositoryWorkflowUnderstanding] = None,
+        **kwargs,
     ) -> DiagramGenerationResult:
         """Generates a production-quality SVG diagram grounded in repository evidence."""
         pass

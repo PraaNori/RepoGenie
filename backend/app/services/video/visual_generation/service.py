@@ -16,11 +16,13 @@ from datetime import datetime, timezone
 from typing import List, Optional
 
 from ...ai.code_understanding.schemas import RepositoryCodeUnderstanding
-from ...ai.project_understanding.schemas import EvidenceReference
+from ...ai.project_understanding.schemas import EvidenceReference, ProjectUnderstanding
 from ...ai.script_generation.schemas import EducationalScript
 from ...ai.storyboard_generation.schemas import EducationalStoryboard, StoryboardScene, VisualType
 from ...ai.workflow_understanding.schemas import RepositoryWorkflowUnderstanding
-from ....models.schemas import RepositoryKnowledge
+from ....models.schemas import ParsedRepository, RepositoryKnowledge
+from .code_visuals import code_walkthrough_generator
+from .scene_cards import summary_card_generator, title_card_generator
 from .diagrams import (
     ArchitectureDiagramGenerator,
     ComponentDiagramGenerator,
@@ -45,6 +47,20 @@ from .storage import VisualAssetStorageManager, visual_storage_manager
 logger = logging.getLogger(__name__)
 
 
+TECHNICAL_DIAGRAM_TYPES = {
+    VisualType.ARCHITECTURE_DIAGRAM,
+    VisualType.COMPONENT_DIAGRAM,
+    VisualType.WORKFLOW_DIAGRAM,
+    VisualType.DATA_FLOW_VISUALIZATION,
+}
+
+SCENE_VISUAL_TYPES = {
+    VisualType.CODE_WALKTHROUGH,
+    VisualType.TITLE_CARD,
+    VisualType.SUMMARY_CARD,
+}
+
+
 def _map_visual_type_to_asset_type(visual_type: VisualType) -> VisualAssetType:
     """Maps a storyboard visual treatment to an asset category."""
     mapping = {
@@ -55,6 +71,8 @@ def _map_visual_type_to_asset_type(visual_type: VisualType) -> VisualAssetType:
         VisualType.DATA_FLOW_VISUALIZATION: VisualAssetType.DATA_FLOW_DIAGRAM,
         VisualType.CODE_WALKTHROUGH: VisualAssetType.CODE_WALKTHROUGH,
         VisualType.SUMMARY_CARD: VisualAssetType.SUMMARY_CARD,
+        VisualType.TECHNOLOGY_OVERVIEW: VisualAssetType.TITLE_CARD,
+        VisualType.OTHER: VisualAssetType.PRIMARY_VISUAL,
     }
     return mapping.get(visual_type, VisualAssetType.PRIMARY_VISUAL)
 
@@ -69,6 +87,16 @@ class VisualGenerationService:
             VisualType.COMPONENT_DIAGRAM: ComponentDiagramGenerator(),
             VisualType.WORKFLOW_DIAGRAM: WorkflowDiagramGenerator(),
             VisualType.DATA_FLOW_VISUALIZATION: DataFlowDiagramGenerator(),
+        }
+        self.scene_visual_generators = {
+            VisualType.CODE_WALKTHROUGH: code_walkthrough_generator,
+            VisualType.TITLE_CARD: title_card_generator,
+            VisualType.SUMMARY_CARD: summary_card_generator,
+            VisualType.TECHNOLOGY_OVERVIEW: title_card_generator,
+        }
+        self.all_generators = {
+            **self.diagram_generators,
+            **self.scene_visual_generators,
         }
 
     def plan_visual_asset_for_scene(
@@ -203,16 +231,21 @@ class VisualGenerationService:
         knowledge: RepositoryKnowledge,
         code_understanding: Optional[RepositoryCodeUnderstanding] = None,
         workflow_understanding: Optional[RepositoryWorkflowUnderstanding] = None,
+        project_understanding: Optional[ProjectUnderstanding] = None,
+        script: Optional[EducationalScript] = None,
+        parsed_repository: Optional[ParsedRepository] = None,
+        repo_root_dir: Optional[str] = None,
         target_asset: Optional[VisualAsset] = None,
     ) -> VisualAsset:
         """
-        Renders a production-quality technical diagram SVG for a single StoryboardScene.
+        Renders a production-quality technical diagram, code walkthrough, or scene card SVG
+        for a single StoryboardScene.
         Saves the SVG to disk and updates the VisualAsset to COMPLETED status.
         """
-        generator = self.diagram_generators.get(scene.visual_type)
+        generator = self.diagram_generators.get(scene.visual_type) or self.scene_visual_generators.get(scene.visual_type)
         if not generator:
             raise ValueError(
-                f"Visual type '{scene.visual_type.value}' is not a supported technical diagram type."
+                f"Visual type '{scene.visual_type.value}' is not a supported visual generator type."
             )
 
         asset = target_asset or self.plan_visual_asset_for_scene(job_id, scene)
@@ -220,8 +253,8 @@ class VisualGenerationService:
         filename = f"{asset.asset_id}.svg"
 
         logger.info(
-            "Rendering technical diagram (%s) for job %s scene %d...",
-            generator.diagram_type.value,
+            "Rendering visual asset (%s) for job %s scene %d...",
+            getattr(generator, "diagram_type", scene.visual_type),
             job_id,
             scene.scene_number,
         )
@@ -231,6 +264,10 @@ class VisualGenerationService:
             knowledge=knowledge,
             code_understanding=code_understanding,
             workflow_understanding=workflow_understanding,
+            project_understanding=project_understanding,
+            script=script,
+            parsed_repository=parsed_repository,
+            repo_root_dir=repo_root_dir,
         )
 
         # Validate rendered SVG content is valid
@@ -303,14 +340,21 @@ class VisualGenerationService:
         knowledge: RepositoryKnowledge,
         code_understanding: Optional[RepositoryCodeUnderstanding] = None,
         workflow_understanding: Optional[RepositoryWorkflowUnderstanding] = None,
+        project_understanding: Optional[ProjectUnderstanding] = None,
+        script: Optional[EducationalScript] = None,
+        parsed_repository: Optional[ParsedRepository] = None,
+        repo_root_dir: Optional[str] = None,
+        include_scene_visuals: bool = False,
     ) -> VisualGenerationResult:
         """
-        Iterates over all planned scenes in the VisualGenerationResult and generates
-        SVG diagrams for scenes whose visual_type is a technical diagram.
+        Iterates over all planned scenes in the VisualGenerationResult and generates SVGs.
+        If include_scene_visuals is False (default), renders technical diagrams.
+        If include_scene_visuals is True, renders both technical diagrams and scene visuals.
         Updates SceneVisualAssets, asset counts, and returns the updated VisualGenerationResult.
         """
         safe_job_id = self.storage.validate_job_id(job_id)
         scene_by_id = {s.scene_id: s for s in storyboard.scenes}
+        active_generators = self.all_generators if include_scene_visuals else self.diagram_generators
 
         updated_scene_assets: List[SceneVisualAssets] = []
         completed_assets = 0
@@ -324,7 +368,7 @@ class VisualGenerationService:
                 updated_scene_assets.append(sa)
                 continue
 
-            if scene.visual_type in self.diagram_generators:
+            if scene.visual_type in active_generators:
                 try:
                     rendered_asset = self.generate_diagram_for_scene(
                         job_id=safe_job_id,
@@ -332,6 +376,10 @@ class VisualGenerationService:
                         knowledge=knowledge,
                         code_understanding=code_understanding,
                         workflow_understanding=workflow_understanding,
+                        project_understanding=project_understanding,
+                        script=script,
+                        parsed_repository=parsed_repository,
+                        repo_root_dir=repo_root_dir,
                         target_asset=sa.primary_asset,
                     )
                     completed_assets += 1
@@ -412,6 +460,34 @@ class VisualGenerationService:
             completed_assets,
         )
         return updated_plan
+
+    def generate_all_visuals_for_job(
+        self,
+        job_id: str,
+        plan: VisualGenerationResult,
+        storyboard: EducationalStoryboard,
+        knowledge: RepositoryKnowledge,
+        code_understanding: Optional[RepositoryCodeUnderstanding] = None,
+        workflow_understanding: Optional[RepositoryWorkflowUnderstanding] = None,
+        project_understanding: Optional[ProjectUnderstanding] = None,
+        script: Optional[EducationalScript] = None,
+        parsed_repository: Optional[ParsedRepository] = None,
+        repo_root_dir: Optional[str] = None,
+    ) -> VisualGenerationResult:
+        """Generates all supported visual assets (diagrams, code walkthroughs, scene cards) for a job."""
+        return self.generate_diagrams_for_job(
+            job_id=job_id,
+            plan=plan,
+            storyboard=storyboard,
+            knowledge=knowledge,
+            code_understanding=code_understanding,
+            workflow_understanding=workflow_understanding,
+            project_understanding=project_understanding,
+            script=script,
+            parsed_repository=parsed_repository,
+            repo_root_dir=repo_root_dir,
+            include_scene_visuals=True,
+        )
 
 
 # Singleton instance
