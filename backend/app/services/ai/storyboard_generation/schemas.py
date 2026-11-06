@@ -97,6 +97,7 @@ class StoryboardScene(BaseModel):
     related_workflow_steps: List[WorkflowStepReference] = Field(default_factory=list)
     evidence: List[EvidenceReference] = Field(default_factory=list)
     uncertainty_notes: List[str] = Field(default_factory=list)
+    layout_hint: Optional[str] = None
 
     transition_to_next: Optional[str] = None
 
@@ -128,6 +129,10 @@ class StoryboardGenerationMetadata(BaseModel):
     latency_ms: float = Field(default=0.0, ge=0)
     token_usage: Optional[TokenUsageRecord] = None
     source_understandings: List[UnderstandingSource] = Field(default_factory=list)
+    missing_understandings: List[UnderstandingSource] = Field(default_factory=list)
+    llm_call_count: int = Field(default=0, ge=0)
+    revision_attempted: bool = False
+    evidence_package_chars: int = Field(default=0, ge=0)
 
 
 class EducationalStoryboard(BaseModel):
