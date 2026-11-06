@@ -1,7 +1,9 @@
 import logging
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, status
+from fastapi.responses import FileResponse
 from ...models.schemas import (
     ArchitectureAnalysisResult,
     JobCreateRequest,
@@ -33,6 +35,13 @@ from ...services.ai.script_generation import (
 from ...services.ai.storyboard_generation import (
     EducationalStoryboard,
     educational_storyboard_analyzer,
+)
+from ...services.video.visual_generation import (
+    PathTraversalError,
+    VisualAsset,
+    VisualGenerationResult,
+    visual_generation_service,
+    visual_storage_manager,
 )
 from ...services.repo.analyzer import repo_analyzer_service
 from ...services.repo.architecture_analyzer import architecture_analyzer_service
@@ -988,6 +997,184 @@ def get_job_educational_storyboard(job_id: str):
         )
 
     return internal.educational_storyboard
+
+
+@router.post("/{job_id}/visual-assets", response_model=VisualGenerationResult)
+async def generate_job_visual_assets(
+    job_id: str,
+    refresh: bool = Query(False, description="Whether to re-initialize and purge previously planned visual assets"),
+):
+    """
+    Initializes or retrieves the visual generation foundation for a job's educational storyboard.
+    Requires an existing generated EducationalStoryboard.
+    Advances Stage 7 (Visual Generation) to COMPLETED upon planning success.
+    """
+    internal = job_store.get_internal_job(job_id)
+    if not internal:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Job with ID '{job_id}' not found",
+        )
+
+    # Ingestion & Analysis prerequisites
+    if internal.stages[0].status != StatusEnum.COMPLETED:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Repository ingestion must be completed first (current status: {internal.stages[0].status.value}).",
+        )
+    if internal.stages[1].status != StatusEnum.COMPLETED:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Repository structure analysis must be completed first (current status: {internal.stages[1].status.value}).",
+        )
+    if internal.stages[2].status != StatusEnum.COMPLETED or not internal.knowledge:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Repository knowledge consolidation must be completed first (current status: {internal.stages[2].status.value}).",
+        )
+
+    # Visual generation requires an existing EducationalStoryboard
+    if not internal.educational_storyboard:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Educational storyboard must be generated before visual asset generation for job '{job_id}'. Call POST /api/v1/jobs/{job_id}/educational-storyboard first.",
+        )
+
+    # Acquire dedicated per-job lock to serialize concurrent requests for the same job atomically
+    job_lock = await job_store.get_job_lock(job_id)
+    async with job_lock:
+        internal = job_store.get_internal_job(job_id)
+        if not internal or not internal.knowledge:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Job with ID '{job_id}' not found",
+            )
+        if not internal.educational_storyboard:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Educational storyboard must be generated before visual asset generation for job '{job_id}'. Call POST /api/v1/jobs/{job_id}/educational-storyboard first.",
+            )
+
+        # Return cached if already available and refresh not requested
+        if internal.visual_generation and not refresh:
+            return internal.visual_generation
+
+        # Prevent duplicate execution if another process or thread marked Stage 7 IN_PROGRESS
+        if internal.stages[6].status == StatusEnum.IN_PROGRESS and not refresh:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Visual asset generation is already in progress for job '{job_id}'.",
+            )
+
+        # Update job stage to IN_PROGRESS atomically
+        job_store.update_job_visual_generation_started(job_id)
+
+        try:
+            result = visual_generation_service.initialize_visual_assets(
+                job_id=job_id,
+                storyboard=internal.educational_storyboard,
+                script=internal.educational_script,
+                knowledge=internal.knowledge,
+                refresh=refresh,
+            )
+            job_store.update_job_visual_generation_success(job_id, result)
+            return result
+        except Exception as exc:
+            logger.exception("Unexpected error during visual asset generation for job %s: %s", job_id, exc)
+            job_store.update_job_visual_generation_failed(job_id, str(exc))
+            exc_msg = _sanitize_error_message(str(exc), internal.local_path)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Unexpected error during visual asset generation: {exc_msg}",
+            )
+
+
+@router.get("/{job_id}/visual-assets", response_model=VisualGenerationResult)
+def get_job_visual_assets(job_id: str):
+    """
+    Retrieves visual asset generation blueprint and asset status for a job.
+    Returns 404 if not yet initialized.
+    """
+    internal = job_store.get_internal_job(job_id)
+    if not internal:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Job with ID '{job_id}' not found",
+        )
+
+    if not internal.visual_generation:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Visual assets have not yet been initialized for job '{job_id}'. Call POST /api/v1/jobs/{job_id}/visual-assets to generate.",
+        )
+
+    return internal.visual_generation
+
+
+@router.get("/{job_id}/visual-assets/{asset_id}", response_model=VisualAsset)
+def get_job_visual_asset_by_id(job_id: str, asset_id: str):
+    """
+    Retrieves metadata for a specific visual asset in a job.
+    Returns 404 if not found.
+    """
+    internal = job_store.get_internal_job(job_id)
+    if not internal:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Job with ID '{job_id}' not found",
+        )
+
+    if not internal.visual_generation:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Visual assets have not yet been initialized for job '{job_id}'.",
+        )
+
+    asset = internal.visual_generation.get_asset_by_id(asset_id)
+    if not asset:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Visual asset '{asset_id}' not found in job '{job_id}'.",
+        )
+
+    return asset
+
+
+@router.get("/{job_id}/visual-assets/{asset_id}/file")
+def get_job_visual_asset_file(job_id: str, asset_id: str):
+    """
+    Retrieves rendered media file content for a visual asset if available on disk.
+    Enforces safe path handling and returns 404 if not yet rendered to disk.
+    """
+    internal = job_store.get_internal_job(job_id)
+    if not internal or not internal.visual_generation:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Job '{job_id}' or its visual assets not found.",
+        )
+
+    asset = internal.visual_generation.get_asset_by_id(asset_id)
+    if not asset:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Visual asset '{asset_id}' not found in job '{job_id}'.",
+        )
+
+    filename = Path(asset.storage_path).name
+    try:
+        if not visual_storage_manager.asset_file_exists(job_id, filename):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Visual asset file '{asset_id}' has not yet been rendered to disk (Phase 5.2).",
+            )
+        abs_path = visual_storage_manager.get_asset_file_path(job_id, filename, must_exist=True)
+        media_type = "image/svg+xml" if asset.media_format.value == "svg" else "application/octet-stream"
+        return FileResponse(path=str(abs_path), media_type=media_type, filename=filename)
+    except PathTraversalError as pte:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid asset path: {pte}",
+        )
 
 @router.post("/{job_id}/simulate-step", response_model=JobResponse)
 def simulate_job_step(job_id: str):

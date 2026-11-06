@@ -20,6 +20,8 @@ from ..ai.code_understanding.schemas import RepositoryCodeUnderstanding
 from ..ai.workflow_understanding.schemas import RepositoryWorkflowUnderstanding
 from ..ai.script_generation.schemas import EducationalScript
 from ..ai.storyboard_generation.schemas import EducationalStoryboard
+from ..video.visual_generation.schemas import VisualGenerationResult
+from ..video.visual_generation.storage import visual_storage_manager
 
 # Standard 9 pipeline stages
 PIPELINE_STAGES = [
@@ -58,6 +60,7 @@ class JobInternal(BaseModel):
     workflow_understanding: Optional[RepositoryWorkflowUnderstanding] = None
     educational_script: Optional[EducationalScript] = None
     educational_storyboard: Optional[EducationalStoryboard] = None
+    visual_generation: Optional[VisualGenerationResult] = None
     result: Optional[VideoResult] = None
     error: Optional[str] = None
 
@@ -86,8 +89,10 @@ class JobInternal(BaseModel):
             has_workflow_understanding=bool(self.workflow_understanding is not None),
             has_educational_script=bool(self.educational_script is not None),
             has_educational_storyboard=bool(self.educational_storyboard is not None),
+            has_visual_assets=bool(self.visual_generation is not None),
             educational_script=self.educational_script,
             educational_storyboard=self.educational_storyboard,
+            visual_generation=self.visual_generation,
             result=self.result,
             error=self.error,
         )
@@ -484,6 +489,19 @@ class JobStore:
                 job.stages[5].detail = "Ready for educational storyboard generation (script was regenerated)"
                 was_invalidated = True
 
+        # If previous visual assets exist, invalidate them because script/storyboard changed
+        if job.visual_generation is not None:
+            job.visual_generation = None
+            try:
+                visual_storage_manager.delete_job_visuals(job_id)
+            except Exception as e:
+                logger.warning("Failed to clean visual storage for job %s: %s", job_id, e)
+            if job.stages[6].status in (StatusEnum.COMPLETED, StatusEnum.IN_PROGRESS):
+                job.stages[6].status = StatusEnum.PENDING
+                job.stages[6].started_at = None
+                job.stages[6].completed_at = None
+                job.stages[6].detail = "Ready for visual generation (script was regenerated)"
+
         # Set next stage ready (Stage 6: Storyboard Generation)
         job.current_stage = PIPELINE_STAGES[5]
         if job.stages[5].status == StatusEnum.PENDING and not was_invalidated:
@@ -507,6 +525,24 @@ class JobStore:
         if not job:
             return None
         return job.educational_script
+
+    def invalidate_job_educational_script(self, job_id: str) -> Optional[JobInternal]:
+        """Invalidates educational script and cascades invalidation to storyboard and visual assets."""
+        job = self._jobs.get(job_id)
+        if not job:
+            return None
+        now = datetime.now(timezone.utc)
+        job.educational_script = None
+        if job.stages[4].status in (StatusEnum.COMPLETED, StatusEnum.IN_PROGRESS):
+            job.stages[4].status = StatusEnum.PENDING
+            job.stages[4].started_at = None
+            job.stages[4].completed_at = None
+            job.stages[4].detail = "Ready for educational script generation"
+
+        # Cascades to storyboard and visual assets
+        self.invalidate_job_educational_storyboard(job_id)
+        job.updated_at = now
+        return job
 
     def update_job_educational_storyboard_started(self, job_id: str) -> Optional[JobInternal]:
         job = self._jobs.get(job_id)
@@ -538,10 +574,26 @@ class JobStore:
             f"{storyboard.total_estimated_duration_seconds}s)"
         )
         job.progress_percentage = 66
+
+        # Invalidate downstream visual assets when storyboard is newly generated or replaced
+        was_visual_invalidated = False
+        if job.visual_generation is not None:
+            job.visual_generation = None
+            try:
+                visual_storage_manager.delete_job_visuals(job_id)
+            except Exception as e:
+                logger.warning("Failed to clean visual storage for job %s: %s", job_id, e)
+            if job.stages[6].status in (StatusEnum.COMPLETED, StatusEnum.IN_PROGRESS):
+                job.stages[6].status = StatusEnum.PENDING
+                job.stages[6].started_at = None
+                job.stages[6].completed_at = None
+                job.stages[6].detail = "Ready for visual generation (storyboard was regenerated)"
+                was_visual_invalidated = True
+
         # Set next stage ready (Stage 7: Visual Generation)
         job.current_stage = PIPELINE_STAGES[6]
-        job.stages[6].status = StatusEnum.PENDING
-        job.stages[6].detail = "Ready for visual generation"
+        if job.stages[6].status == StatusEnum.PENDING and not was_visual_invalidated:
+            job.stages[6].detail = "Ready for visual generation"
         job.updated_at = now
         return job
 
@@ -573,6 +625,92 @@ class JobStore:
             job.stages[5].started_at = None
             job.stages[5].completed_at = None
             job.stages[5].detail = "Ready for educational storyboard generation (script was regenerated)"
+
+        # Invalidate visual assets as well
+        if job.visual_generation is not None:
+            job.visual_generation = None
+            try:
+                visual_storage_manager.delete_job_visuals(job_id)
+            except Exception as e:
+                logger.warning("Failed to clean visual storage for job %s: %s", job_id, e)
+            if job.stages[6].status in (StatusEnum.COMPLETED, StatusEnum.IN_PROGRESS):
+                job.stages[6].status = StatusEnum.PENDING
+                job.stages[6].started_at = None
+                job.stages[6].completed_at = None
+                job.stages[6].detail = "Ready for visual generation (storyboard was invalidated)"
+
+        job.updated_at = now
+        return job
+
+    def update_job_visual_generation_started(self, job_id: str) -> Optional[JobInternal]:
+        job = self._jobs.get(job_id)
+        if not job:
+            return None
+        now = datetime.now(timezone.utc)
+        job.stages[6].status = StatusEnum.IN_PROGRESS
+        job.stages[6].started_at = now
+        job.stages[6].detail = "Initializing visual asset generation foundation..."
+        job.current_stage = PIPELINE_STAGES[6]
+        job.progress_percentage = 70
+        job.updated_at = now
+        return job
+
+    def update_job_visual_generation_success(
+        self,
+        job_id: str,
+        result: VisualGenerationResult,
+    ) -> Optional[JobInternal]:
+        job = self._jobs.get(job_id)
+        if not job:
+            return None
+        now = datetime.now(timezone.utc)
+        job.visual_generation = result
+        job.stages[6].status = StatusEnum.COMPLETED
+        job.stages[6].completed_at = now
+        job.stages[6].detail = (
+            f"Generated visual asset plan ({len(result.scene_assets)} scenes, "
+            f"{result.total_assets} assets)"
+        )
+        job.progress_percentage = 75
+        # Set next stage ready (Stage 8: Voice Generation)
+        job.current_stage = PIPELINE_STAGES[7]
+        if job.stages[7].status == StatusEnum.PENDING:
+            job.stages[7].detail = "Ready for voice generation"
+        job.updated_at = now
+        return job
+
+    def update_job_visual_generation_failed(self, job_id: str, error_message: str) -> Optional[JobInternal]:
+        job = self._jobs.get(job_id)
+        if not job:
+            return None
+        now = datetime.now(timezone.utc)
+        job.stages[6].status = StatusEnum.FAILED
+        job.stages[6].completed_at = now
+        job.stages[6].detail = f"Visual generation failed: {error_message}"
+        job.updated_at = now
+        return job
+
+    def get_job_visual_generation(self, job_id: str) -> Optional[VisualGenerationResult]:
+        job = self._jobs.get(job_id)
+        if not job:
+            return None
+        return job.visual_generation
+
+    def invalidate_job_visual_generation(self, job_id: str) -> Optional[JobInternal]:
+        job = self._jobs.get(job_id)
+        if not job:
+            return None
+        now = datetime.now(timezone.utc)
+        job.visual_generation = None
+        try:
+            visual_storage_manager.delete_job_visuals(job_id)
+        except Exception as e:
+            logger.warning("Failed to clean visual storage for job %s: %s", job_id, e)
+        if job.stages[6].status in (StatusEnum.COMPLETED, StatusEnum.IN_PROGRESS):
+            job.stages[6].status = StatusEnum.PENDING
+            job.stages[6].started_at = None
+            job.stages[6].completed_at = None
+            job.stages[6].detail = "Ready for visual generation (reset)"
         job.updated_at = now
         return job
 
