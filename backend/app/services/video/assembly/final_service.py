@@ -173,6 +173,18 @@ class FinalVideoAssemblyService:
 
         final_output_path = self._storage.get_final_output_path(job_id, "final_video.mp4")
 
+        # Resolve full-video SRT file for burned-in subtitles
+        subtitles_file: Optional[Path] = None
+        if assembly_input.full_video_srt and assembly_input.full_video_srt.relative_path:
+            candidate = self._storage.base_dir / assembly_input.full_video_srt.relative_path
+            if candidate.is_file() and candidate.stat().st_size > 0:
+                subtitles_file = candidate
+
+        if not subtitles_file:
+            from ..captions.caption_storage import caption_storage_manager
+            if caption_storage_manager.caption_file_exists(job_id, "full", format="srt"):
+                subtitles_file = caption_storage_manager.get_caption_path(job_id, "full", format="srt")
+
         # 3. Cache reuse check
         if not refresh and final_output_path.exists() and final_output_path.stat().st_size > 0:
             final_mtime = final_output_path.stat().st_mtime
@@ -182,6 +194,9 @@ class FinalVideoAssemblyService:
                 if not sc_path.exists() or sc_path.stat().st_mtime > final_mtime:
                     scenes_older = False
                     break
+
+            if subtitles_file and subtitles_file.exists() and subtitles_file.stat().st_mtime > final_mtime:
+                scenes_older = False
 
             if scenes_older:
                 try:
@@ -279,12 +294,14 @@ class FinalVideoAssemblyService:
             # 7. Create concat manifest
             manifest_path = self._storage.create_concat_manifest(job_id, concat_scene_files)
 
-            # 8. Execute concat command
+            # 8. Execute concat command with optional burned-in subtitles
             temp_final_path = self._storage.create_temp_render_path(job_id, extension="mp4")
+            has_subtitles = bool(subtitles_file and subtitles_file.is_file() and subtitles_file.stat().st_size > 0)
             concat_cmd = self._builder.build_concat_command(
                 concat_list_file=manifest_path,
                 output_path=temp_final_path,
                 config=config,
+                subtitles_file=subtitles_file,
             )
 
             job_store.update_job_render_progress(
@@ -296,7 +313,11 @@ class FinalVideoAssemblyService:
                     current_scene=total_scenes,
                     total_scenes=total_scenes,
                     elapsed_seconds=round(time.time() - start_time, 2),
-                    stage_detail="Concatenating scenes into final MP4 video...",
+                    stage_detail=(
+                        "Concatenating scenes and burning subtitles into final MP4 video..."
+                        if has_subtitles
+                        else "Concatenating scenes into final MP4 video..."
+                    ),
                 ),
             )
 

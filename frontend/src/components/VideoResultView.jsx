@@ -362,6 +362,7 @@ export default function VideoResultView({ job, onReset }) {
             <video
               className="w-full h-full object-cover"
               controls
+              crossOrigin="anonymous"
               playsInline
               preload="metadata"
               poster="https://images.unsplash.com/photo-1555066931-4365d14bab8c?q=80&w=1200&auto=format&fit=crop"
@@ -372,24 +373,53 @@ export default function VideoResultView({ job, onReset }) {
                   kind="subtitles"
                   src={captionTrackUrl}
                   srcLang="en"
-                  label="English"
-                  default
+                  label="English (Soft Subtitles)"
                 />
               )}
               Your browser does not support video playback.
             </video>
           </div>
 
-          <div className="p-4 rounded-xl bg-white border border-slate-200/80 shadow-sm flex items-center justify-between text-xs text-slate-500">
-            <div className="flex items-center gap-4">
+          <div className="p-4 rounded-xl bg-white border border-slate-200/80 shadow-sm flex flex-wrap items-center justify-between gap-2 text-xs text-slate-500">
+            <div className="flex flex-wrap items-center gap-3">
               <span className="flex items-center gap-1.5 font-medium text-slate-700">
                 <Film className="w-3.5 h-3.5 text-indigo-600" />
                 <span>Format: 1920x1080 (30fps)</span>
               </span>
               <span>•</span>
               <span>Audio: English Narration (Synchronized)</span>
+              {hasSubtitles && (
+                <>
+                  <span>•</span>
+                  <span className="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200">
+                    CC Burned-In
+                  </span>
+                </>
+              )}
             </div>
-            <span className="font-mono text-slate-400">{`Duration: ${formatDuration(durationSeconds)}`}</span>
+            <div className="flex items-center gap-3">
+              {hasSubtitles && job?.job_id && (
+                <div className="flex items-center gap-2">
+                  <a
+                    href={getCaptionFileUrl(job.job_id, 'full', 'srt')}
+                    download={`subtitles_${job.job_id}.srt`}
+                    className="font-medium text-indigo-600 hover:text-indigo-800 hover:underline"
+                  >
+                    Download SRT
+                  </a>
+                  <span>|</span>
+                  <a
+                    href={getCaptionFileUrl(job.job_id, 'full', 'vtt')}
+                    download={`subtitles_${job.job_id}.vtt`}
+                    className="font-medium text-indigo-600 hover:text-indigo-800 hover:underline"
+                  >
+                    Download VTT
+                  </a>
+                  <span>•</span>
+                </div>
+              )}
+              <span className="font-mono text-slate-400">{`Duration: ${formatDuration(durationSeconds)}`}</span>
+            </div>
           </div>
         </div>
 

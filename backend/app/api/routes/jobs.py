@@ -1602,6 +1602,12 @@ def get_job_caption_asset_file(
     clean_fmt = format.lower().strip(".")
     media_type = "text/plain; charset=utf-8" if clean_fmt == "srt" else "text/vtt; charset=utf-8"
 
+    caption_headers = {
+        "Access-Control-Allow-Origin": "*",
+        "Cross-Origin-Resource-Policy": "cross-origin",
+        "Cache-Control": "public, max-age=3600",
+    }
+
     # Support full-video composite subtitle track
     if asset_id == "full":
         if not caption_storage_manager.caption_file_exists(job_id, "full", format=clean_fmt):
@@ -1614,6 +1620,7 @@ def get_job_caption_asset_file(
             path=str(abs_path),
             media_type=media_type,
             filename=f"captions.{clean_fmt}",
+            headers=caption_headers,
         )
 
     # Individual scene caption asset
@@ -1636,6 +1643,7 @@ def get_job_caption_asset_file(
             path=str(abs_path),
             media_type=media_type,
             filename=f"{asset_id}.{clean_fmt}",
+            headers=caption_headers,
         )
     except Exception as e:
         raise HTTPException(

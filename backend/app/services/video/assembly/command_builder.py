@@ -114,14 +114,48 @@ class FFmpegCommandBuilder:
         """Formats a single line for the concat demuxer manifest file."""
         return self.escape_concat_path(str(file_path.resolve())) + "\n"
 
+    def escape_subtitles_filter_path(self, file_path: Path) -> str:
+        """
+        Escapes a file path for the FFmpeg 'subtitles' video filter argument.
+        Inside FFmpeg filter parameters, backslashes are normalized to forward slashes,
+        and colons must be escaped (\\:) so they are not parsed as option separators.
+        """
+        resolved_path = str(file_path.resolve())
+        if any(c in resolved_path for c in ("\x00", "\r", "\n")):
+            raise ValueError("File path in subtitles filter cannot contain newlines or null bytes")
+        escaped = resolved_path.replace("\\", "/").replace(":", "\\:")
+        return escaped
+
+    def build_subtitles_filter_string(
+        self,
+        srt_path: Path,
+        style: Optional[str] = None,
+    ) -> str:
+        """
+        Builds the FFmpeg video filter expression for burning subtitles into video frames.
+        Uses readable white text with dark outline and safe bottom margin.
+        """
+        escaped_path = self.escape_subtitles_filter_path(srt_path)
+        default_style = (
+            "FontName=Helvetica,FontSize=24,Bold=1,"
+            "PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BackColour=&H80000000,"
+            "BorderStyle=1,Outline=2,Shadow=1,Alignment=2,MarginV=40"
+        )
+        chosen_style = style or default_style
+        return f"subtitles=filename='{escaped_path}':force_style='{chosen_style}'"
+
     def build_concat_command(
         self,
         concat_list_file: Path,
         output_path: Path,
         config: VideoRenderConfiguration,
+        subtitles_file: Optional[Path] = None,
+        subtitles_style: Optional[str] = None,
     ) -> List[str]:
         """
         Builds the argument array to concatenate pre-rendered scene segments using the concat demuxer.
+        If subtitles_file is provided and exists, burns in subtitles using libass and re-encodes
+        video to preserve H.264/AAC at 1920x1080 30fps. Otherwise, performs fast stream-copy.
         """
         cmd: List[str] = [
             self.ffmpeg_executable,
@@ -130,8 +164,22 @@ class FFmpegCommandBuilder:
             "-f", "concat",
             "-safe", "0",
             "-i", str(concat_list_file.resolve()),
-            "-c", "copy",
         ]
+
+        if subtitles_file and subtitles_file.is_file() and subtitles_file.stat().st_size > 0:
+            vf = self.build_subtitles_filter_string(subtitles_file, style=subtitles_style)
+            cmd.extend([
+                "-vf", vf,
+                "-c:v", config.video_codec,
+                "-preset", config.preset,
+                "-pix_fmt", config.pixel_format,
+                "-r", str(config.fps),
+                "-c:a", "copy",
+            ])
+            if config.crf is not None:
+                cmd.extend(["-crf", str(config.crf)])
+        else:
+            cmd.extend(["-c", "copy"])
 
         if config.faststart and config.container_format == "mp4":
             cmd.extend(["-movflags", "+faststart"])
