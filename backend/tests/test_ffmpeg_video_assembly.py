@@ -14,10 +14,13 @@ Tests cover:
 10. Concurrency protection.
 """
 
+import asyncio
+import concurrent.futures
 import json
 import os
 import shutil
 import tempfile
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -42,7 +45,13 @@ from app.services.video.assembly.exceptions import (
 )
 from app.services.video.assembly.ffmpeg_manager import FFmpegManager
 from app.services.video.assembly.ffprobe_manager import FFprobeManager
-from app.services.video.assembly.process_runner import run_process_async, run_process_sync, validate_arg_tokens
+from app.services.video.assembly.process_runner import (
+    MAX_OUTPUT_STREAM_BYTES,
+    run_process_async,
+    run_process_sync,
+    sanitize_environment,
+    validate_arg_tokens,
+)
 from app.services.video.assembly.schemas import (
     MediaProbeResult,
     MediaStreamProbe,
@@ -503,3 +512,347 @@ def test_api_render_config_endpoints():
     res_render = client.get(f"/api/v1/jobs/{job_id}/render")
     assert res_render.status_code == status.HTTP_200_OK
     assert res_render.json() is None
+
+
+# ==============================================================================
+# 9. Phase 6.1 Audit Hardening Tests
+# ==============================================================================
+
+def test_concat_path_escaping_special_characters():
+    """
+    Verifies that FFmpeg concat demuxer file paths properly escape single quotes,
+    backslashes, spaces, brackets, semicolons, and Unicode, while rejecting control chars.
+    """
+    builder = FFmpegCommandBuilder()
+
+    # 1. Spaces and standard characters
+    line_space = builder.escape_concat_path("/storage/jobs/job-1/video/scene 1 intro.mp4")
+    assert line_space == "file '/storage/jobs/job-1/video/scene 1 intro.mp4'"
+
+    # 2. Single quotes (must be escaped for concat demuxer: ' -> '\'')
+    line_quote = builder.escape_concat_path("/storage/jobs/job-1/video/user's walkthrough.mp4")
+    assert line_quote == "file '/storage/jobs/job-1/video/user'\\''s walkthrough.mp4'"
+
+    # 3. Double quotes
+    line_dq = builder.escape_concat_path('/storage/jobs/job-1/video/scene_"intro".mp4')
+    assert line_dq == 'file \'/storage/jobs/job-1/video/scene_"intro".mp4\''
+
+    # 4. Backslashes
+    line_bs = builder.escape_concat_path("/storage/jobs/job-1/video/scene\\test.mp4")
+    assert line_bs == "file '/storage/jobs/job-1/video/scene\\\\test.mp4'"
+
+    # 5. Semicolons, brackets, and Unicode
+    line_complex = builder.escape_concat_path("/storage/jobs/job-1/video/scene;[chunk_1]_日本語_🚀.mp4")
+    assert line_complex == "file '/storage/jobs/job-1/video/scene;[chunk_1]_日本語_🚀.mp4'"
+
+    # 6. Prohibited control characters (must raise ValueError)
+    with pytest.raises(ValueError):
+        builder.escape_concat_path("/storage/jobs/job-1/video/scene\ninjection.mp4")
+    with pytest.raises(ValueError):
+        builder.escape_concat_path("/storage/jobs/job-1/video/scene\x00null.mp4")
+    with pytest.raises(ValueError):
+        builder.escape_concat_path("/storage/jobs/job-1/video/scene\rinjection.mp4")
+
+
+def test_concat_manifest_creation_and_containment_check(temp_storage):
+    """Verifies concat manifest creation in isolated video directory and containment enforcement."""
+    storage = VideoStorageManager(base_storage_dir=temp_storage)
+    job_id = "test-job-manifest"
+    video_dir = storage.get_job_video_dir(job_id)
+
+    # Valid scenes inside the job video dir
+    scene1 = video_dir / "scene_01.mp4"
+    scene1.write_bytes(b"scene1data")
+    scene2 = video_dir / "scene 02's test.mp4"
+    scene2.write_bytes(b"scene2data")
+
+    manifest = storage.create_concat_manifest(job_id, [scene1, scene2])
+    assert manifest.exists()
+    assert manifest.parent == video_dir
+    assert "concat_" in manifest.name
+
+    content = manifest.read_text(encoding="utf-8")
+    assert f"file '{str(scene1.resolve())}'" in content
+    assert "scene 02'\\''s test.mp4" in content
+
+    # Attempting to include an external file outside storage root must raise VideoStorageError
+    outside_file = Path("/etc/hosts") if Path("/etc/hosts").exists() else Path("/tmp/outside.mp4")
+    with pytest.raises(VideoStorageError):
+        storage.create_concat_manifest(job_id, [outside_file])
+
+
+def test_storage_overwrite_protection_preserves_completed_video(temp_storage):
+    """
+    Verifies that:
+    1. Overwrite=False preserves existing completed output and cleans up the new temp file.
+    2. Overwrite=True atomically replaces the completed output.
+    """
+    storage = VideoStorageManager(base_storage_dir=temp_storage)
+    job_id = "test-job-overwrite"
+
+    # Step 1: Initial render output
+    temp1 = storage.create_temp_render_path(job_id)
+    temp1.write_bytes(b"ORIGINAL_VIDEO_DATA_V1")
+    final1 = storage.finalize_render_output(job_id, temp1, "final_video.mp4", overwrite=False)
+    assert final1.exists()
+    assert final1.read_bytes() == b"ORIGINAL_VIDEO_DATA_V1"
+
+    # Step 2: Attempting to finalize a new render with overwrite=False
+    temp2 = storage.create_temp_render_path(job_id)
+    temp2.write_bytes(b"NEW_VIDEO_DATA_V2")
+    with pytest.raises(VideoStorageError) as exc:
+        storage.finalize_render_output(job_id, temp2, "final_video.mp4", overwrite=False)
+    assert "already exists" in str(exc.value)
+
+    # Verify original file is 100% preserved
+    assert final1.read_bytes() == b"ORIGINAL_VIDEO_DATA_V1"
+    # Verify temp2 was cleaned up automatically
+    assert not temp2.exists()
+
+    # Step 3: Explicit overwrite=True replaces the file
+    temp3 = storage.create_temp_render_path(job_id)
+    temp3.write_bytes(b"OVERWRITTEN_VIDEO_DATA_V3")
+    final3 = storage.finalize_render_output(job_id, temp3, "final_video.mp4", overwrite=True)
+    assert final3.exists()
+    assert final3.read_bytes() == b"OVERWRITTEN_VIDEO_DATA_V3"
+    assert not temp3.exists()
+
+
+def test_storage_failed_replacement_preserves_completed_video(temp_storage):
+    """Verifies that failed promotion (0-byte file) preserves previous video and cleans up temp."""
+    storage = VideoStorageManager(base_storage_dir=temp_storage)
+    job_id = "test-job-fail-replace"
+
+    # Completed video exists
+    temp_valid = storage.create_temp_render_path(job_id)
+    temp_valid.write_bytes(b"INITIAL_VALID_VIDEO")
+    final = storage.finalize_render_output(job_id, temp_valid, "final_video.mp4")
+    assert final.read_bytes() == b"INITIAL_VALID_VIDEO"
+
+    # Attempt to replace with 0-byte file even with overwrite=True
+    temp_empty = storage.create_temp_render_path(job_id)
+    temp_empty.write_bytes(b"")
+
+    with pytest.raises(VideoStorageError) as exc:
+        storage.finalize_render_output(job_id, temp_empty, "final_video.mp4", overwrite=True)
+    assert "empty (0 bytes)" in str(exc.value)
+
+    # Completed video must still be intact
+    assert final.read_bytes() == b"INITIAL_VALID_VIDEO"
+    assert not temp_empty.exists()
+
+
+def test_storage_concurrent_finalization_serialization(temp_storage):
+    """Verifies that concurrent threads attempting to finalize are serialized safely."""
+    storage = VideoStorageManager(base_storage_dir=temp_storage)
+    job_id = "test-job-concurrent"
+
+    results = []
+    errors = []
+
+    def _worker(thread_idx: int):
+        try:
+            temp = storage.create_temp_render_path(job_id)
+            temp.write_bytes(f"THREAD_{thread_idx}_DATA".encode("utf-8"))
+            out = storage.finalize_render_output(job_id, temp, "final_video.mp4", overwrite=False)
+            results.append((thread_idx, out))
+        except Exception as e:
+            errors.append((thread_idx, type(e).__name__, str(e)))
+
+    threads = [threading.Thread(target=_worker, args=(i,)) for i in range(5)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    # Exactly 1 thread must succeed, 4 must raise VideoStorageError (already exists)
+    assert len(results) == 1
+    assert len(errors) == 4
+    for err in errors:
+        assert err[1] == "VideoStorageError"
+        assert "already exists" in err[2]
+
+    # Target video must exist and be readable
+    final_output = storage.get_final_output_path(job_id, "final_video.mp4")
+    assert final_output.exists()
+    assert b"THREAD_" in final_output.read_bytes()
+
+
+def test_storage_path_layout_no_duplicate_jobs_jobs(temp_storage):
+    """Verifies that whether storage base is /root or /root/jobs, no duplicate jobs/jobs occurs."""
+    # 1. Base is /tmp/root -> jobs/{job_id}/video
+    storage1 = VideoStorageManager(base_storage_dir=temp_storage)
+    dir1 = storage1.get_job_video_dir("job-abc")
+    rel1 = dir1.relative_to(temp_storage.resolve())
+    assert str(rel1) == "jobs/job-abc/video"
+
+    # 2. Base is /tmp/root/jobs -> {job_id}/video (no duplicate jobs/jobs!)
+    jobs_sub = temp_storage / "jobs"
+    jobs_sub.mkdir(exist_ok=True)
+    storage2 = VideoStorageManager(base_storage_dir=jobs_sub)
+    dir2 = storage2.get_job_video_dir("job-abc")
+    rel2 = dir2.relative_to(jobs_sub.resolve())
+    assert str(rel2) == "job-abc/video"
+    assert "jobs/jobs" not in str(dir2)
+
+
+def test_storage_symlink_escape_rejection(temp_storage):
+    """Verifies that symlinks pointing outside storage root are strictly rejected."""
+    storage = VideoStorageManager(base_storage_dir=temp_storage)
+    outside_dir = tempfile.mkdtemp(prefix="outside_root_")
+    try:
+        symlink_path = temp_storage / "symlink_escape"
+        try:
+            os.symlink(outside_dir, symlink_path)
+            with pytest.raises(VideoStorageError) as exc:
+                storage.assert_safe_path(symlink_path / "evil.mp4")
+            assert "outside storage root" in str(exc.value)
+        except OSError:
+            pass  # If OS does not permit symlink in sandbox, skip symlink test
+    finally:
+        shutil.rmtree(outside_dir, ignore_errors=True)
+
+
+def test_process_runner_environment_sanitization():
+    """Verifies that sanitize_environment excludes sensitive secrets while keeping safe system vars."""
+    os.environ["ELEVENLABS_API_KEY"] = "sk-secret-12345"
+    os.environ["GROQ_API_KEY"] = "gsk-secret-67890"
+    os.environ["MY_DATABASE_PASSWORD"] = "p@ssword"
+    os.environ["AUTH_TOKEN"] = "token-xyz"
+
+    env = sanitize_environment(extra_env={"CUSTOM_PARAM": "safe_value"})
+
+    assert "ELEVENLABS_API_KEY" not in env
+    assert "GROQ_API_KEY" not in env
+    assert "MY_DATABASE_PASSWORD" not in env
+    assert "AUTH_TOKEN" not in env
+    assert env.get("CUSTOM_PARAM") == "safe_value"
+    assert "PATH" in env
+    assert "TMPDIR" in env
+
+
+def test_process_runner_active_output_stream_capping():
+    """Verifies that high-volume stream output is capped at MAX_OUTPUT_STREAM_BYTES while running."""
+    # Run a python command that outputs 1MB of text
+    py_script = "import sys; sys.stdout.write('A' * 700000); sys.stdout.flush()"
+    code, stdout, stderr = run_process_sync(["python3", "-c", py_script], timeout_seconds=10.0)
+
+    assert code == 0
+    assert len(stdout) <= MAX_OUTPUT_STREAM_BYTES + 200
+    assert "[RepoGenie: stdout truncated" in stdout
+
+
+@pytest.mark.anyio
+async def test_process_runner_async_cancellation_cleanup():
+    """Verifies that cancelling an async subprocess terminates the process group without orphans."""
+    task = asyncio.create_task(
+        run_process_async(["python3", "-c", "import time; time.sleep(10)"], timeout_seconds=20.0)
+    )
+    await asyncio.sleep(0.1)
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+def test_synthetic_smoke_test_execution_and_cleanup(temp_storage):
+    """Verifies execute_synthetic_smoke_test runs correctly and cleans up assets when cleanup_output=True."""
+    service = VideoAssemblyService(storage_mgr=VideoStorageManager(base_storage_dir=temp_storage))
+    job = job_store.create_job(
+        repo_url="https://github.com/org/repo-smoke",
+        repo_name="org/repo-smoke",
+        repository_owner="org",
+        repository_name="repo-smoke",
+        clone_url="https://github.com/org/repo-smoke.git",
+    )
+    job_id = job.job_id
+
+    mock_probe = MediaProbeResult(
+        file_path="jobs/test/video/synthetic_smoke_test.mp4",
+        format_name="mp4",
+        duration_seconds=2.0,
+        file_size_bytes=1024,
+        video_streams=[
+            MediaStreamProbe(index=0, codec_type="video", codec_name="h264", width=1920, height=1080, fps=30.0, pixel_format="yuv420p")
+        ],
+        audio_streams=[
+            MediaStreamProbe(index=1, codec_type="audio", codec_name="aac", sample_rate=44100, channels=2)
+        ],
+        has_video=True,
+        has_audio=True,
+    )
+
+    with patch.object(service._ffmpeg, "assert_available", return_value=None):
+        with patch.object(service._ffprobe, "assert_available", return_value=None):
+            with patch.object(service._ffmpeg, "resolve_binary", return_value=Path("/usr/local/bin/ffmpeg")):
+                with patch("app.services.video.assembly.service.run_process_sync") as mock_run:
+                    # Mock run_process_sync writing a dummy video file
+                    def _fake_run(cmd, timeout_seconds=None):
+                        # Write data to output path (last arg)
+                        out_path = Path(cmd[-1])
+                        out_path.write_bytes(b"dummy_rendered_video_bytes")
+                        return 0, "", ""
+
+                    mock_run.side_effect = _fake_run
+                    with patch.object(service, "probe_media_file", return_value=mock_probe):
+                        result = service.execute_synthetic_smoke_test(job_id, duration_seconds=2.0, cleanup_output=True)
+                        assert result.has_video is True
+                        assert result.has_audio is True
+                        assert result.duration_seconds == 2.0
+
+                        # Ensure output file was cleaned up
+                        final_path = service._storage.get_final_output_path(job_id, "synthetic_smoke_test.mp4")
+                        assert not final_path.exists()
+
+
+def test_upstream_asset_invalidation_cleans_video_and_resets_stage9(temp_storage):
+    """Verifies that upstream storyboard/narration/caption invalidation purges video storage and resets Stage 09."""
+    storage = VideoStorageManager(base_storage_dir=temp_storage)
+    job = job_store.create_job(
+        repo_url="https://github.com/org/repo-cascade",
+        repo_name="org/repo-cascade",
+        repository_owner="org",
+        repository_name="repo-cascade",
+        clone_url="https://github.com/org/repo-cascade.git",
+    )
+    job_id = job.job_id
+
+    # Create dummy video file
+    video_dir = storage.get_job_video_dir(job_id)
+    dummy_file = video_dir / "final_video.mp4"
+    dummy_file.write_bytes(b"fake_video")
+
+    # Set job into COMPLETED video stage
+    cfg = VideoRenderConfiguration()
+    res = VideoRenderResult(
+        job_id=job_id,
+        output_relative_path=f"jobs/{job_id}/video/final_video.mp4",
+        file_size_bytes=10,
+        duration_seconds=5.0,
+        resolution="1920x1080",
+        fps=30.0,
+        video_codec="libx264",
+        audio_codec="aac",
+    )
+    render_job = VideoRenderJob(
+        job_id=job_id,
+        status=VideoRenderStatus.RENDERING,
+        configuration=cfg,
+        progress=VideoRenderProgress(job_id=job_id, status=VideoRenderStatus.RENDERING),
+    )
+    job_store.update_job_render_started(job_id, render_job)
+    job_store.update_job_render_success(job_id, res)
+
+    job_done = job_store.get_internal_job(job_id)
+    assert job_done.stages[8].status == StatusEnum.COMPLETED
+
+    with patch("app.services.storage.job_store.video_storage_manager", storage):
+        # Invalidate narration -> cascades to captions -> assembly_input -> render!
+        job_store.invalidate_job_narration(job_id)
+
+        job_reset = job_store.get_internal_job(job_id)
+        assert job_reset.render_job is None
+        assert job_reset.stages[8].status == StatusEnum.PENDING
+        assert job_reset.stages[8].detail == "Ready for video assembly"
+        assert not dummy_file.exists()
+

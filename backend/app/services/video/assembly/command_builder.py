@@ -92,6 +92,24 @@ class FFmpegCommandBuilder:
         cmd.append(str(output_path.resolve()))
         return cmd
 
+    @staticmethod
+    def escape_concat_path(path_str: str) -> str:
+        """
+        Escapes a path for the FFmpeg concat demuxer format.
+        Inside single quotes:
+        1. Backslash '\\' becomes '\\\\'
+        2. Single quote '\\'' becomes "'\\\\''"
+        Prohibits raw newlines, carriage returns, and null bytes to prevent directive injection.
+        """
+        if any(c in path_str for c in ("\x00", "\r", "\n")):
+            raise ValueError("File path in concat manifest cannot contain newlines or null bytes")
+        escaped = path_str.replace("\\", "\\\\").replace("'", "'\\''")
+        return f"file '{escaped}'"
+
+    def format_concat_manifest_line(self, file_path: Path) -> str:
+        """Formats a single line for the concat demuxer manifest file."""
+        return self.escape_concat_path(str(file_path.resolve())) + "\n"
+
     def build_concat_command(
         self,
         concat_list_file: Path,

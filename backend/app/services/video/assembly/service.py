@@ -108,10 +108,12 @@ class VideoAssemblyService:
         self,
         job_id: str,
         duration_seconds: float = 2.0,
+        cleanup_output: bool = True,
     ) -> MediaProbeResult:
         """
         Executes a self-contained synthetic video generation and probing smoke test
         using lavfi test sources. Does NOT invoke any external APIs.
+        Cleans up temporary smoke test assets when cleanup_output is True.
         """
         self._ffmpeg.assert_available()
         self._ffprobe.assert_available()
@@ -145,6 +147,8 @@ class VideoAssemblyService:
 
             # Probe the synthesized test media
             probe = self.probe_media_file(final_path)
+            if cleanup_output:
+                self._storage.cleanup_file(final_path)
             return probe
         finally:
             self._storage.cleanup_file(temp_path)
