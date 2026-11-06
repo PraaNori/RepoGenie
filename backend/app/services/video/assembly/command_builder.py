@@ -1,0 +1,151 @@
+"""
+FFmpeg Command Builder (Milestone 6, Phase 6.1).
+"""
+
+from __future__ import annotations
+
+import logging
+from pathlib import Path
+from typing import List, Optional
+
+from .schemas import VideoRenderConfiguration
+
+logger = logging.getLogger(__name__)
+
+
+class FFmpegCommandBuilder:
+    """Builds secure, validated argument lists for FFmpeg subprocess execution."""
+
+    def __init__(self, ffmpeg_executable: str = "ffmpeg"):
+        self.ffmpeg_executable = ffmpeg_executable
+
+    def build_version_command(self) -> List[str]:
+        return [self.ffmpeg_executable, "-version"]
+
+    def build_encoders_command(self) -> List[str]:
+        return [self.ffmpeg_executable, "-encoders"]
+
+    def build_scene_render_command(
+        self,
+        image_path: Path,
+        audio_path: Optional[Path],
+        output_path: Path,
+        duration_seconds: float,
+        config: VideoRenderConfiguration,
+    ) -> List[str]:
+        """
+        Builds the argument array to render a single scene (still image + audio or silence).
+        Uses loop 1 on the still image, sets frame rate, pixel format, and codec parameters.
+        """
+        cmd: List[str] = [
+            self.ffmpeg_executable,
+            "-y",  # Overwrite output
+            "-loglevel", "error",
+            "-loop", "1",
+            "-i", str(image_path.resolve()),
+        ]
+
+        if audio_path and audio_path.exists():
+            cmd.extend(["-i", str(audio_path.resolve())])
+        else:
+            # Generate silent audio track for silent scenes
+            cmd.extend([
+                "-f", "lavfi",
+                "-i", f"anullsrc=channel_layout={'stereo' if config.audio_channels == 2 else 'mono'}:sample_rate={config.audio_sample_rate}",
+            ])
+
+        # Video filters: scale to exact dimensions with padding/letterboxing if necessary
+        # Force exact resolution and even width/height
+        scale_filter = (
+            f"scale={config.resolution_width}:{config.resolution_height}:force_original_aspect_ratio=decrease,"
+            f"pad={config.resolution_width}:{config.resolution_height}:(ow-iw)/2:(oh-ih)/2:color=black,"
+            f"setsar=1"
+        )
+
+        cmd.extend([
+            "-vf", scale_filter,
+            "-c:v", config.video_codec,
+            "-tune", "stillimage",
+            "-pix_fmt", config.pixel_format,
+            "-r", str(config.fps),
+        ])
+
+        if config.crf is not None and config.video_codec in ("libx264", "libx265"):
+            cmd.extend(["-crf", str(config.crf)])
+        if config.preset:
+            cmd.extend(["-preset", config.preset])
+        if config.video_bitrate:
+            cmd.extend(["-b:v", config.video_bitrate])
+
+        cmd.extend([
+            "-c:a", config.audio_codec,
+            "-b:a", config.audio_bitrate,
+            "-ar", str(config.audio_sample_rate),
+            "-ac", str(config.audio_channels),
+            "-t", f"{duration_seconds:.3f}",
+            "-shortest",
+        ])
+
+        if config.faststart and config.container_format == "mp4":
+            cmd.extend(["-movflags", "+faststart"])
+
+        cmd.append(str(output_path.resolve()))
+        return cmd
+
+    def build_concat_command(
+        self,
+        concat_list_file: Path,
+        output_path: Path,
+        config: VideoRenderConfiguration,
+    ) -> List[str]:
+        """
+        Builds the argument array to concatenate pre-rendered scene segments using the concat demuxer.
+        """
+        cmd: List[str] = [
+            self.ffmpeg_executable,
+            "-y",
+            "-loglevel", "error",
+            "-f", "concat",
+            "-safe", "0",
+            "-i", str(concat_list_file.resolve()),
+            "-c", "copy",
+        ]
+
+        if config.faststart and config.container_format == "mp4":
+            cmd.extend(["-movflags", "+faststart"])
+
+        cmd.append(str(output_path.resolve()))
+        return cmd
+
+    def build_synthetic_color_video_command(
+        self,
+        output_path: Path,
+        duration_seconds: float = 2.0,
+        config: Optional[VideoRenderConfiguration] = None,
+    ) -> List[str]:
+        """
+        Builds a self-contained synthetic media generation command (color video test source + test tone)
+        for local smoke testing without external files or API dependencies.
+        """
+        cfg = config or VideoRenderConfiguration()
+        cmd: List[str] = [
+            self.ffmpeg_executable,
+            "-y",
+            "-loglevel", "error",
+            "-f", "lavfi",
+            "-i", f"color=c=navy:s={cfg.resolution_width}x{cfg.resolution_height}:r={cfg.fps}:d={duration_seconds:.2f}",
+            "-f", "lavfi",
+            "-i", f"sine=frequency=440:sample_rate={cfg.audio_sample_rate}:duration={duration_seconds:.2f}",
+            "-c:v", cfg.video_codec,
+            "-pix_fmt", cfg.pixel_format,
+            "-c:a", cfg.audio_codec,
+            "-b:a", cfg.audio_bitrate,
+            "-t", f"{duration_seconds:.2f}",
+        ]
+        if cfg.faststart and cfg.container_format == "mp4":
+            cmd.extend(["-movflags", "+faststart"])
+        cmd.append(str(output_path.resolve()))
+        return cmd
+
+
+command_builder = FFmpegCommandBuilder()

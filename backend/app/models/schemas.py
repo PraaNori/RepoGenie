@@ -422,12 +422,15 @@ class JobResponse(BaseModel):
     has_narration: bool = False
     has_captions: bool = False
     has_assembly_input: bool = False
+    has_video_render: bool = False
     educational_script: Optional[EducationalScript] = None
     educational_storyboard: Optional[EducationalStoryboard] = None
     visual_generation: Optional[VisualGenerationResult] = None
     narration: Optional[NarrationGenerationResult] = None
     captions: Optional[CaptionGenerationResult] = None
     assembly_input: Optional[VideoAssemblyInput] = None
+    render_config: Optional[VideoRenderConfiguration] = None
+    render_job: Optional[VideoRenderJob] = None
     result: Optional[VideoResult] = None
     error: Optional[str] = None
 
@@ -439,6 +442,7 @@ try:
     from ..services.video.narration.schemas import NarrationGenerationResult
     from ..services.video.captions.schemas import CaptionGenerationResult
     from ..services.video.assembly_input.schemas import VideoAssemblyInput
+    from ..services.video.assembly.schemas import VideoRenderConfiguration, VideoRenderJob
     JobResponse.model_rebuild()
 except (ImportError, AttributeError):
     pass

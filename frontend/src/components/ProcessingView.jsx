@@ -7,6 +7,7 @@ import EducationalStoryboardCard from './EducationalStoryboardCard';
 import NarrationCard from './NarrationCard';
 import CaptionsCard from './processing/CaptionsCard';
 import AssemblyReadinessCard from './processing/AssemblyReadinessCard';
+import VideoAssemblyCard from './processing/VideoAssemblyCard';
 import {
   generateProjectUnderstanding,
   getCodeUnderstanding,
@@ -1462,6 +1463,14 @@ export default function ProcessingView({
           onValidate={handleValidateAssemblyInput}
           error={assemblyInputError}
           isStoryboardAvailable={Boolean(educationalStoryboard || job?.educational_storyboard || job?.has_educational_storyboard)}
+        />
+      )}
+
+      {/* Milestone 6: FFmpeg Video Assembly Foundation (Phase 6.1) */}
+      {(knowledge || job?.has_educational_storyboard || educationalStoryboard || job?.has_assembly_input || assemblyInput) && (
+        <VideoAssemblyCard
+          jobId={job.job_id}
+          renderJob={job?.render_job}
         />
       )}
 

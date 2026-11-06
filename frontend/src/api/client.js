@@ -780,4 +780,146 @@ export async function getAssemblyReadiness(jobId) {
   }
 }
 
+export async function getVideoSystemStatus(refresh = false) {
+  try {
+    const params = new URLSearchParams();
+    if (refresh) params.append('refresh', 'true');
+    const queryString = params.toString() ? `?${params.toString()}` : '';
+
+    const response = await fetch(`${API_BASE_URL}/api/v1/video/status${queryString}`, {
+      method: 'GET',
+      headers: {
+        'Accept': 'application/json',
+      },
+    });
+
+    let data;
+    try {
+      data = await response.json();
+    } catch {
+      data = {};
+    }
+
+    if (!response.ok) {
+      return {
+        success: false,
+        status: response.status,
+        error: data.detail || `Failed to fetch video system status (${response.status})`,
+      };
+    }
+
+    return { success: true, status: response.status, data };
+  } catch (error) {
+    return {
+      success: false,
+      status: 0,
+      error: error.message || 'Error checking video system status',
+    };
+  }
+}
+
+export async function getJobRenderConfig(jobId) {
+  try {
+    const response = await fetch(`${API_BASE_URL}/api/v1/jobs/${jobId}/render-config`, {
+      method: 'GET',
+      headers: {
+        'Accept': 'application/json',
+      },
+    });
+
+    let data;
+    try {
+      data = await response.json();
+    } catch {
+      data = {};
+    }
+
+    if (!response.ok) {
+      return {
+        success: false,
+        status: response.status,
+        error: data.detail || `Failed to fetch render configuration (${response.status})`,
+      };
+    }
+
+    return { success: true, status: response.status, data };
+  } catch (error) {
+    return {
+      success: false,
+      status: 0,
+      error: error.message || 'Error checking render configuration',
+    };
+  }
+}
+
+export async function updateJobRenderConfig(jobId, config) {
+  try {
+    const response = await fetch(`${API_BASE_URL}/api/v1/jobs/${jobId}/render-config`, {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+      },
+      body: JSON.stringify(config),
+    });
+
+    let data;
+    try {
+      data = await response.json();
+    } catch {
+      data = {};
+    }
+
+    if (!response.ok) {
+      return {
+        success: false,
+        status: response.status,
+        error: data.detail || `Failed to update render configuration (${response.status})`,
+      };
+    }
+
+    return { success: true, status: response.status, data };
+  } catch (error) {
+    return {
+      success: false,
+      status: 0,
+      error: error.message || 'Error updating render configuration',
+    };
+  }
+}
+
+export async function getJobRender(jobId) {
+  try {
+    const response = await fetch(`${API_BASE_URL}/api/v1/jobs/${jobId}/render`, {
+      method: 'GET',
+      headers: {
+        'Accept': 'application/json',
+      },
+    });
+
+    let data;
+    try {
+      data = await response.json();
+    } catch {
+      data = null;
+    }
+
+    if (!response.ok) {
+      return {
+        success: false,
+        status: response.status,
+        error: (data && data.detail) || `Failed to fetch render status (${response.status})`,
+      };
+    }
+
+    return { success: true, status: response.status, data };
+  } catch (error) {
+    return {
+      success: false,
+      status: 0,
+      error: error.message || 'Error checking render status',
+    };
+  }
+}
+
 

@@ -73,6 +73,18 @@ class Settings(BaseSettings):
     ELEVENLABS_TIMEOUT: float = 30.0
     ELEVENLABS_MAX_RETRIES: int = 3
 
+    # FFmpeg & Video Assembly Configuration (Milestone 6.1)
+    FFMPEG_BINARY: str = "ffmpeg"
+    FFPROBE_BINARY: str = "ffprobe"
+    VIDEO_RENDER_TIMEOUT: int = 300
+    VIDEO_OUTPUT_DIR: str = "./storage/jobs"
+    VIDEO_DEFAULT_FPS: int = 30
+    VIDEO_DEFAULT_CODEC: str = "libx264"
+    VIDEO_DEFAULT_AUDIO_CODEC: str = "aac"
+    VIDEO_DEFAULT_WIDTH: int = 1920
+    VIDEO_DEFAULT_HEIGHT: int = 1080
+    VIDEO_DEFAULT_PIX_FMT: str = "yuv420p"
+
     @property
     def cors_origins_list(self) -> List[str]:
         return [origin.strip() for origin in self.CORS_ORIGINS.split(",") if origin.strip()]

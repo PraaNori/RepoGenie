@@ -66,6 +66,11 @@ from ...services.video.assembly_input import (
     VideoAssemblyInput,
     assembly_input_service,
 )
+from ...services.video.assembly import (
+    VideoRenderConfiguration,
+    VideoRenderJob,
+    video_assembly_service,
+)
 from ...services.repo.analyzer import repo_analyzer_service
 from ...services.repo.architecture_analyzer import architecture_analyzer_service
 from ...services.repo.code_parser import code_parser_service
@@ -1727,6 +1732,48 @@ def get_job_assembly_readiness(job_id: str):
     )
     job_store.update_job_assembly_input_success(job_id, assembly_input)
     return assembly_input.readiness_report
+
+
+@router.get("/{job_id}/render-config", response_model=VideoRenderConfiguration)
+def get_job_render_config(job_id: str):
+    """Retrieves the video rendering configuration for a job."""
+    internal = job_store.get_internal_job(job_id)
+    if not internal:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Job with ID '{job_id}' not found",
+        )
+    return video_assembly_service.get_job_render_config(job_id)
+
+
+@router.put("/{job_id}/render-config", response_model=VideoRenderConfiguration)
+def update_job_render_config(job_id: str, config: VideoRenderConfiguration):
+    """Updates validated video rendering configuration for a job."""
+    internal = job_store.get_internal_job(job_id)
+    if not internal:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Job with ID '{job_id}' not found",
+        )
+    try:
+        return video_assembly_service.update_job_render_config(job_id, config)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        )
+
+
+@router.get("/{job_id}/render", response_model=Optional[VideoRenderJob])
+def get_job_render_status(job_id: str):
+    """Retrieves the current video rendering job state and progress for a job."""
+    internal = job_store.get_internal_job(job_id)
+    if not internal:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Job with ID '{job_id}' not found",
+        )
+    return video_assembly_service.get_job_render(job_id)
 
 
 @router.post("/{job_id}/simulate-step", response_model=JobResponse)

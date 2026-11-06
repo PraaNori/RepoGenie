@@ -5,6 +5,7 @@ import EducationalStoryboardCard from './EducationalStoryboardCard';
 import NarrationCard from './NarrationCard';
 import CaptionsCard from './processing/CaptionsCard';
 import AssemblyReadinessCard from './processing/AssemblyReadinessCard';
+import VideoAssemblyCard from './processing/VideoAssemblyCard';
 import {
   getWorkflowUnderstanding,
   getEducationalScript,
@@ -435,6 +436,17 @@ export default function VideoResultView({ job, onReset }) {
           <AssemblyReadinessCard
             jobId={job?.job_id}
             assemblyInput={assemblyInput}
+            readOnly
+          />
+        </div>
+      )}
+
+      {/* Video Assembly Foundation (Phase 6.1) */}
+      {assemblyInput && (
+        <div className="mt-8 pt-6 border-t border-slate-200">
+          <VideoAssemblyCard
+            jobId={job?.job_id}
+            renderJob={job?.render_job}
             readOnly
           />
         </div>

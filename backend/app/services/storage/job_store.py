@@ -27,6 +27,14 @@ from ..video.narration.audio_storage import audio_storage_manager
 from ..video.captions.schemas import CaptionGenerationResult, CaptionStatus
 from ..video.captions.caption_storage import caption_storage_manager
 from ..video.assembly_input.schemas import VideoAssemblyInput
+from ..video.assembly.schemas import (
+    VideoRenderConfiguration,
+    VideoRenderJob,
+    VideoRenderProgress,
+    VideoRenderResult,
+    VideoRenderStatus,
+)
+from ..video.assembly.storage import video_storage_manager
 
 # Standard 9 pipeline stages
 PIPELINE_STAGES = [
@@ -69,6 +77,8 @@ class JobInternal(BaseModel):
     narration: Optional[NarrationGenerationResult] = None
     captions: Optional[CaptionGenerationResult] = None
     assembly_input: Optional[VideoAssemblyInput] = None
+    render_config: Optional[VideoRenderConfiguration] = None
+    render_job: Optional[VideoRenderJob] = None
     result: Optional[VideoResult] = None
     error: Optional[str] = None
 
@@ -101,12 +111,15 @@ class JobInternal(BaseModel):
             has_narration=bool(self.narration is not None),
             has_captions=bool(self.captions is not None),
             has_assembly_input=bool(self.assembly_input is not None),
+            has_video_render=bool(self.render_job is not None),
             educational_script=self.educational_script,
             educational_storyboard=self.educational_storyboard,
             visual_generation=self.visual_generation,
             narration=self.narration,
             captions=self.captions,
             assembly_input=self.assembly_input,
+            render_config=self.render_config,
+            render_job=self.render_job,
             result=self.result,
             error=self.error,
         )
@@ -1046,6 +1059,129 @@ class JobStore:
         now = datetime.now(timezone.utc)
         job.assembly_input = None
         if job.stages[8].status == StatusEnum.PENDING:
+            job.stages[8].detail = "Ready for video assembly"
+        
+        # Invalidate dependent render job
+        self.invalidate_job_render(job_id)
+
+        job.updated_at = now
+        return job
+
+    def get_job_render_config(self, job_id: str) -> Optional[VideoRenderConfiguration]:
+        job = self._jobs.get(job_id)
+        if not job:
+            return None
+        return job.render_config
+
+    def update_job_render_config(
+        self,
+        job_id: str,
+        config: VideoRenderConfiguration,
+    ) -> Optional[JobInternal]:
+        job = self._jobs.get(job_id)
+        if not job:
+            return None
+        now = datetime.now(timezone.utc)
+        job.render_config = config
+        job.updated_at = now
+        return job
+
+    def get_job_render(self, job_id: str) -> Optional[VideoRenderJob]:
+        job = self._jobs.get(job_id)
+        if not job:
+            return None
+        return job.render_job
+
+    def update_job_render_started(
+        self,
+        job_id: str,
+        render_job: VideoRenderJob,
+    ) -> Optional[JobInternal]:
+        job = self._jobs.get(job_id)
+        if not job:
+            return None
+        now = datetime.now(timezone.utc)
+        job.render_job = render_job
+        job.stages[8].status = StatusEnum.IN_PROGRESS
+        job.stages[8].started_at = now
+        job.stages[8].completed_at = None
+        job.stages[8].detail = "Rendering video scenes and multiplexing audio..."
+        job.current_stage = PIPELINE_STAGES[8]
+        job.progress_percentage = 90
+        job.updated_at = now
+        return job
+
+    def update_job_render_progress(
+        self,
+        job_id: str,
+        progress: VideoRenderProgress,
+    ) -> Optional[JobInternal]:
+        job = self._jobs.get(job_id)
+        if not job or not job.render_job:
+            return None
+        now = datetime.now(timezone.utc)
+        job.render_job.progress = progress
+        job.stages[8].detail = progress.stage_detail
+        if progress.progress_percentage > 0:
+            job.progress_percentage = min(99, 90 + int(progress.progress_percentage * 0.09))
+        job.updated_at = now
+        return job
+
+    def update_job_render_success(
+        self,
+        job_id: str,
+        result: VideoRenderResult,
+    ) -> Optional[JobInternal]:
+        job = self._jobs.get(job_id)
+        if not job:
+            return None
+        now = datetime.now(timezone.utc)
+        if job.render_job:
+            job.render_job.status = VideoRenderStatus.COMPLETED
+            job.render_job.completed_at = now
+            job.render_job.output_relative_path = result.output_relative_path
+            job.render_job.output_file_size_bytes = result.file_size_bytes
+            job.render_job.actual_duration_seconds = result.duration_seconds
+        job.stages[8].status = StatusEnum.COMPLETED
+        job.stages[8].completed_at = now
+        job.stages[8].detail = f"Video assembly completed ({result.duration_seconds:.1f}s, {result.file_size_bytes} bytes)"
+        job.progress_percentage = 100
+        job.status = StatusEnum.COMPLETED
+        job.updated_at = now
+        return job
+
+    def update_job_render_failed(
+        self,
+        job_id: str,
+        error_message: str,
+    ) -> Optional[JobInternal]:
+        job = self._jobs.get(job_id)
+        if not job:
+            return None
+        now = datetime.now(timezone.utc)
+        if job.render_job:
+            job.render_job.status = VideoRenderStatus.FAILED
+            job.render_job.error = error_message
+        job.stages[8].status = StatusEnum.FAILED
+        job.stages[8].completed_at = now
+        job.stages[8].detail = f"Video assembly failed: {error_message}"
+        job.updated_at = now
+        return job
+
+    def invalidate_job_render(self, job_id: str) -> Optional[JobInternal]:
+        job = self._jobs.get(job_id)
+        if not job:
+            return None
+        now = datetime.now(timezone.utc)
+        job.render_job = None
+        try:
+            video_storage_manager.delete_job_video(job_id)
+        except Exception as e:
+            logger.warning("Failed to clean video storage for job %s: %s", job_id, e)
+        if job.stages[8].status in (StatusEnum.COMPLETED, StatusEnum.IN_PROGRESS, StatusEnum.FAILED):
+            job.stages[8].status = StatusEnum.PENDING
+            job.stages[8].started_at = None
+            job.stages[8].completed_at = None
             job.stages[8].detail = "Ready for video assembly"
         job.updated_at = now
         return job
