@@ -3,11 +3,13 @@ import WorkflowUnderstandingCard from './WorkflowUnderstandingCard';
 import EducationalScriptCard from './EducationalScriptCard';
 import EducationalStoryboardCard from './EducationalStoryboardCard';
 import NarrationCard from './NarrationCard';
+import CaptionsCard from './processing/CaptionsCard';
 import {
   getWorkflowUnderstanding,
   getEducationalScript,
   getEducationalStoryboard,
   getNarration,
+  getCaptions,
 } from '../api/client';
 import { 
   Download, 
@@ -38,6 +40,9 @@ export default function VideoResultView({ job, onReset }) {
 
   const [narration, setNarration] = useState(job?.narration || null);
   const [narrationError, setNarrationError] = useState(null);
+
+  const [captions, setCaptions] = useState(job?.captions || null);
+  const [captionsError, setCaptionsError] = useState(null);
 
   useEffect(() => {
     let isMounted = true;
@@ -170,6 +175,39 @@ export default function VideoResultView({ job, onReset }) {
       isMounted = false;
     };
   }, [job?.job_id, job?.has_narration, job?.narration, narration]);
+
+  useEffect(() => {
+    let isMounted = true;
+    if (job?.job_id && (job?.has_captions || job?.captions) && !captions) {
+      if (job.captions) {
+        setCaptions(job.captions);
+      } else {
+        getCaptions(job.job_id)
+          .then((res) => {
+            if (!isMounted) return;
+            if (res.success) {
+              setCaptions(res.data);
+              setCaptionsError(null);
+            } else if (res.status === 404) {
+              setCaptions(null);
+              setCaptionsError(null);
+            } else {
+              setCaptions(null);
+              setCaptionsError(res.error || 'Failed to load captions');
+            }
+          })
+          .catch((err) => {
+            if (isMounted) {
+              setCaptions(null);
+              setCaptionsError(err.message || 'Unexpected error loading captions');
+            }
+          });
+      }
+    }
+    return () => {
+      isMounted = false;
+    };
+  }, [job?.job_id, job?.has_captions, job?.captions, captions]);
 
   // Fallback data if viewing directly without active job
   const repoName = job?.repo_name || 'fastapi/fastapi';
@@ -337,6 +375,17 @@ export default function VideoResultView({ job, onReset }) {
           <NarrationCard
             jobId={job?.job_id}
             narration={narration}
+            readOnly
+          />
+        </div>
+      )}
+
+      {/* Subtitles & Captions (Phase 5.5) */}
+      {captions && (
+        <div className="mt-8 pt-6 border-t border-slate-200">
+          <CaptionsCard
+            jobId={job?.job_id}
+            captions={captions}
             readOnly
           />
         </div>

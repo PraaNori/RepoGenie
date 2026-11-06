@@ -597,3 +597,80 @@ export async function generateNarration(jobId, refresh = false) {
     };
   }
 }
+
+export function getCaptionFileUrl(jobId, assetId = 'full', format = 'srt') {
+  return `${API_BASE_URL}/api/v1/jobs/${jobId}/captions/${assetId}/file?format=${encodeURIComponent(format)}`;
+}
+
+export async function getCaptions(jobId) {
+  try {
+    const response = await fetch(`${API_BASE_URL}/api/v1/jobs/${jobId}/captions`, {
+      method: 'GET',
+      headers: {
+        'Accept': 'application/json',
+      },
+    });
+
+    let data;
+    try {
+      data = await response.json();
+    } catch {
+      data = {};
+    }
+
+    if (!response.ok) {
+      return {
+        success: false,
+        status: response.status,
+        error: data.detail || `Failed to fetch captions (${response.status})`,
+      };
+    }
+
+    return { success: true, status: response.status, data };
+  } catch (error) {
+    return {
+      success: false,
+      status: 0,
+      error: error.message || 'Error checking captions',
+    };
+  }
+}
+
+export async function generateCaptions(jobId, refresh = false) {
+  try {
+    const params = new URLSearchParams();
+    if (refresh) params.append('refresh', 'true');
+    const queryString = params.toString() ? `?${params.toString()}` : '';
+
+    const response = await fetch(`${API_BASE_URL}/api/v1/jobs/${jobId}/captions${queryString}`, {
+      method: 'POST',
+      headers: {
+        'Accept': 'application/json',
+      },
+    });
+
+    let data;
+    try {
+      data = await response.json();
+    } catch {
+      data = {};
+    }
+
+    if (!response.ok) {
+      return {
+        success: false,
+        status: response.status,
+        error: data.detail || `Failed to generate captions (${response.status})`,
+      };
+    }
+
+    return { success: true, status: response.status, data };
+  } catch (error) {
+    return {
+      success: false,
+      status: 0,
+      error: error.message || 'Error generating captions',
+    };
+  }
+}
+

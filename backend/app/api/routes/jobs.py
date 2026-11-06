@@ -55,6 +55,12 @@ from ...services.video.narration import (
     elevenlabs_provider,
     narration_service,
 )
+from ...services.video.captions import (
+    CaptionGenerationResult,
+    SceneCaptionAsset,
+    caption_service,
+    caption_storage_manager,
+)
 from ...services.repo.analyzer import repo_analyzer_service
 from ...services.repo.architecture_analyzer import architecture_analyzer_service
 from ...services.repo.code_parser import code_parser_service
@@ -1396,6 +1402,203 @@ def get_job_narration_asset_file(job_id: str, asset_id: str):
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Error accessing audio file: {e}",
         )
+
+
+# ---------------------------------------------------------------------------
+# Caption Generation Endpoints (Milestone 5, Phase 5.5)
+# ---------------------------------------------------------------------------
+
+@router.post("/{job_id}/captions", response_model=CaptionGenerationResult)
+async def generate_job_captions(
+    job_id: str,
+    refresh: bool = Query(False, description="Whether to regenerate captions if already cached"),
+):
+    """
+    Generates synchronized subtitle tracks (.srt and .vtt) for all storyboard scenes
+    using the exact verbatim narration text and measured audio durations.
+    Requires completed narration assets.
+    """
+    internal = job_store.get_internal_job(job_id)
+    if not internal:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Job with ID '{job_id}' not found",
+        )
+
+    if not internal.educational_storyboard:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Educational storyboard is required before caption generation for job '{job_id}'.",
+        )
+
+    if not internal.narration:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Narration audio assets must be generated before caption generation for job '{job_id}'. Call POST /api/v1/jobs/{job_id}/narration first.",
+        )
+
+    # Acquire dedicated per-job lock for atomic concurrency serialization
+    job_lock = await job_store.get_job_lock(job_id)
+    async with job_lock:
+        internal = job_store.get_internal_job(job_id)
+        if not internal or not internal.educational_storyboard:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Job with ID '{job_id}' or its educational storyboard not found",
+            )
+        if not internal.narration:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Narration audio assets must be generated before caption generation for job '{job_id}'.",
+            )
+
+        # Return cached captions if already available and refresh not requested
+        if internal.captions and not refresh and internal.captions.is_fully_generated:
+            return internal.captions
+
+        # Mark captions as generating
+        job_store.update_job_captions_started(job_id)
+
+        try:
+            rendered_result = caption_service.generate_captions_for_job(
+                job_id=job_id,
+                storyboard=internal.educational_storyboard,
+                script=internal.educational_script,
+                narration=internal.narration,
+                refresh=refresh,
+            )
+
+            if rendered_result.is_fully_generated:
+                job_store.update_job_captions_success(job_id, rendered_result)
+            else:
+                job_store.update_job_captions_failed(
+                    job_id,
+                    rendered_result.error_message or "One or more scene subtitle files failed generation.",
+                )
+
+            return rendered_result
+        except Exception as exc:
+            logger.exception("Unexpected error during caption generation for job %s: %s", job_id, exc)
+            job_store.update_job_captions_failed(job_id, str(exc))
+            exc_msg = _sanitize_error_message(str(exc), internal.local_path)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Unexpected error during caption generation: {exc_msg}",
+            )
+
+
+@router.get("/{job_id}/captions", response_model=CaptionGenerationResult)
+def get_job_captions(job_id: str):
+    """
+    Retrieves caption generation result, per-scene cue metadata, and subtitle tracks for a job.
+    Returns 404 if not yet generated.
+    """
+    internal = job_store.get_internal_job(job_id)
+    if not internal:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Job with ID '{job_id}' not found",
+        )
+
+    if not internal.captions:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Captions have not yet been generated for job '{job_id}'. Call POST /api/v1/jobs/{job_id}/captions to generate.",
+        )
+
+    return internal.captions
+
+
+@router.get("/{job_id}/captions/{asset_id}", response_model=SceneCaptionAsset)
+def get_job_caption_asset_by_id(job_id: str, asset_id: str):
+    """
+    Retrieves metadata for a specific scene caption asset.
+    Returns 404 if not found.
+    """
+    internal = job_store.get_internal_job(job_id)
+    if not internal:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Job with ID '{job_id}' not found",
+        )
+
+    if not internal.captions:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Captions have not yet been generated for job '{job_id}'.",
+        )
+
+    asset = internal.captions.get_asset_by_id(asset_id)
+    if not asset:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Caption asset '{asset_id}' not found in job '{job_id}'.",
+        )
+
+    return asset
+
+
+@router.get("/{job_id}/captions/{asset_id}/file")
+def get_job_caption_asset_file(
+    job_id: str,
+    asset_id: str,
+    format: str = Query("srt", pattern="^(srt|vtt)$", description="Subtitle format: 'srt' or 'vtt'"),
+):
+    """
+    Streams the raw subtitle file (.srt or .vtt) for a scene caption asset or the full video track ('full').
+    Enforces safe path handling and returns 404 if not found on disk.
+    """
+    internal = job_store.get_internal_job(job_id)
+    if not internal or not internal.captions:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Job '{job_id}' or its captions not found.",
+        )
+
+    clean_fmt = format.lower().strip(".")
+    media_type = "text/plain; charset=utf-8" if clean_fmt == "srt" else "text/vtt; charset=utf-8"
+
+    # Support full-video composite subtitle track
+    if asset_id == "full":
+        if not caption_storage_manager.caption_file_exists(job_id, "full", format=clean_fmt):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Full-video caption track ({clean_fmt}) does not exist on disk.",
+            )
+        abs_path = caption_storage_manager.get_caption_path(job_id, "full", format=clean_fmt)
+        return FileResponse(
+            path=str(abs_path),
+            media_type=media_type,
+            filename=f"captions.{clean_fmt}",
+        )
+
+    # Individual scene caption asset
+    asset = internal.captions.get_asset_by_id(asset_id)
+    if not asset:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Caption asset '{asset_id}' not found in job '{job_id}'.",
+        )
+
+    if not caption_storage_manager.caption_file_exists(job_id, asset_id, format=clean_fmt):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Caption file for asset '{asset_id}' ({clean_fmt}) does not exist on disk.",
+        )
+
+    try:
+        abs_path = caption_storage_manager.get_caption_path(job_id, asset_id, format=clean_fmt)
+        return FileResponse(
+            path=str(abs_path),
+            media_type=media_type,
+            filename=f"{asset_id}.{clean_fmt}",
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Error accessing caption file: {e}",
+        )
+
 
 @router.post("/{job_id}/simulate-step", response_model=JobResponse)
 def simulate_job_step(job_id: str):

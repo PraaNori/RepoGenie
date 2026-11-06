@@ -24,6 +24,8 @@ from ..video.visual_generation.schemas import VisualGenerationResult, VisualGene
 from ..video.visual_generation.storage import visual_storage_manager
 from ..video.narration.schemas import NarrationAssetStatus, NarrationGenerationResult
 from ..video.narration.audio_storage import audio_storage_manager
+from ..video.captions.schemas import CaptionGenerationResult, CaptionStatus
+from ..video.captions.caption_storage import caption_storage_manager
 
 # Standard 9 pipeline stages
 PIPELINE_STAGES = [
@@ -64,6 +66,7 @@ class JobInternal(BaseModel):
     educational_storyboard: Optional[EducationalStoryboard] = None
     visual_generation: Optional[VisualGenerationResult] = None
     narration: Optional[NarrationGenerationResult] = None
+    captions: Optional[CaptionGenerationResult] = None
     result: Optional[VideoResult] = None
     error: Optional[str] = None
 
@@ -94,10 +97,12 @@ class JobInternal(BaseModel):
             has_educational_storyboard=bool(self.educational_storyboard is not None),
             has_visual_assets=bool(self.visual_generation is not None),
             has_narration=bool(self.narration is not None),
+            has_captions=bool(self.captions is not None),
             educational_script=self.educational_script,
             educational_storyboard=self.educational_storyboard,
             visual_generation=self.visual_generation,
             narration=self.narration,
+            captions=self.captions,
             result=self.result,
             error=self.error,
         )
@@ -621,6 +626,9 @@ class JobStore:
                 job.stages[7].completed_at = None
                 job.stages[7].detail = "Ready for voice generation (storyboard was regenerated)"
 
+        # Invalidate downstream caption assets
+        self.invalidate_job_captions(job_id)
+
         # Set next stage ready (Stage 7: Visual Generation)
         job.current_stage = PIPELINE_STAGES[6]
         if job.stages[6].status == StatusEnum.PENDING and not was_visual_invalidated:
@@ -682,6 +690,9 @@ class JobStore:
                 job.stages[7].started_at = None
                 job.stages[7].completed_at = None
                 job.stages[7].detail = "Ready for voice generation (storyboard was invalidated)"
+
+        # Invalidate downstream caption assets
+        self.invalidate_job_captions(job_id)
 
         job.updated_at = now
         return job
@@ -875,6 +886,10 @@ class JobStore:
         job.current_stage = PIPELINE_STAGES[8]
         if job.stages[8].status == StatusEnum.PENDING:
             job.stages[8].detail = "Ready for video assembly"
+        
+        # Invalidate dependent captions when narration is newly generated or replaced
+        self.invalidate_job_captions(job_id)
+
         job.updated_at = now
         return job
 
@@ -915,6 +930,63 @@ class JobStore:
             job.stages[7].completed_at = None
             job.stages[7].detail = "Ready for voice generation (reset)"
         job.current_stage = PIPELINE_STAGES[7]
+
+        # Invalidate dependent captions as well
+        self.invalidate_job_captions(job_id)
+
+        job.updated_at = now
+        return job
+
+    def update_job_captions_started(self, job_id: str) -> Optional[JobInternal]:
+        job = self._jobs.get(job_id)
+        if not job:
+            return None
+        now = datetime.now(timezone.utc)
+        if job.captions:
+            job.captions.status = CaptionStatus.GENERATING
+        job.updated_at = now
+        return job
+
+    def update_job_captions_success(
+        self,
+        job_id: str,
+        result: CaptionGenerationResult,
+    ) -> Optional[JobInternal]:
+        job = self._jobs.get(job_id)
+        if not job:
+            return None
+        now = datetime.now(timezone.utc)
+        job.captions = result
+        job.updated_at = now
+        return job
+
+    def update_job_captions_failed(self, job_id: str, error_message: str) -> Optional[JobInternal]:
+        job = self._jobs.get(job_id)
+        if not job:
+            return None
+        now = datetime.now(timezone.utc)
+        if job.captions:
+            job.captions.status = CaptionStatus.FAILED
+            job.captions.error_message = error_message
+        job.updated_at = now
+        return job
+
+    def get_job_captions(self, job_id: str) -> Optional[CaptionGenerationResult]:
+        job = self._jobs.get(job_id)
+        if not job:
+            return None
+        return job.captions
+
+    def invalidate_job_captions(self, job_id: str) -> Optional[JobInternal]:
+        job = self._jobs.get(job_id)
+        if not job:
+            return None
+        now = datetime.now(timezone.utc)
+        job.captions = None
+        try:
+            caption_storage_manager.delete_job_captions(job_id)
+        except Exception as e:
+            logger.warning("Failed to clean caption storage for job %s: %s", job_id, e)
         job.updated_at = now
         return job
 

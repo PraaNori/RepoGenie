@@ -5,6 +5,7 @@ import WorkflowUnderstandingCard from './WorkflowUnderstandingCard';
 import EducationalScriptCard from './EducationalScriptCard';
 import EducationalStoryboardCard from './EducationalStoryboardCard';
 import NarrationCard from './NarrationCard';
+import CaptionsCard from './processing/CaptionsCard';
 import {
   generateProjectUnderstanding,
   getCodeUnderstanding,
@@ -17,6 +18,8 @@ import {
   generateEducationalStoryboard,
   getNarration,
   generateNarration,
+  getCaptions,
+  generateCaptions,
 } from '../api/client';
 import { 
   GitBranch, 
@@ -106,6 +109,13 @@ export default function ProcessingView({
   const [narrationError, setNarrationError] = useState(null);
   const isFetchingNarrationRef = useRef(false);
   const isGeneratingNarrationRef = useRef(false);
+
+  // Milestone 5: Subtitles & Captions (Phase 5.5)
+  const [captions, setCaptions] = useState(job?.captions || null);
+  const [isGeneratingCaptions, setIsGeneratingCaptions] = useState(false);
+  const [captionsError, setCaptionsError] = useState(null);
+  const isFetchingCaptionsRef = useRef(false);
+  const isGeneratingCaptionsRef = useRef(false);
 
   useEffect(() => {
     // If the job has code understanding generated and we haven't loaded it yet, fetch it
@@ -284,6 +294,64 @@ export default function ProcessingView({
     }
   }, [job?.has_narration]);
 
+  useEffect(() => {
+    if (job?.job_id && (job?.has_captions || job?.captions) && !captions) {
+      if (job.captions) {
+        setCaptions(job.captions);
+      } else if (!isFetchingCaptionsRef.current) {
+        isFetchingCaptionsRef.current = true;
+        getCaptions(job.job_id)
+          .then((res) => {
+            if (res.success) {
+              setCaptions(res.data);
+              if (onJobUpdated) {
+                onJobUpdated({ ...job, captions: res.data, has_captions: true });
+              }
+            }
+          })
+          .finally(() => {
+            isFetchingCaptionsRef.current = false;
+          });
+      }
+    }
+  }, [job?.job_id, job?.has_captions, job?.captions, captions]);
+
+  useEffect(() => {
+    // If job state reports captions were invalidated, clear in UI
+    if (job && job.has_captions === false && captions) {
+      setCaptions(null);
+    }
+  }, [job?.has_captions]);
+
+  const handleGenerateCaptions = async (refresh = false) => {
+    if (!job?.job_id) return;
+    if (isGeneratingCaptionsRef.current) return;
+    isGeneratingCaptionsRef.current = true;
+    setIsGeneratingCaptions(true);
+    setCaptionsError(null);
+
+    try {
+      const res = await generateCaptions(job.job_id, refresh);
+      if (res.success) {
+        setCaptions(res.data);
+        if (onJobUpdated) {
+          onJobUpdated({
+            ...job,
+            captions: res.data,
+            has_captions: true,
+          });
+        }
+      } else {
+        setCaptionsError(res.error || 'Failed to generate captions');
+      }
+    } catch (err) {
+      setCaptionsError(err.message || 'Error communicating with server');
+    } finally {
+      setIsGeneratingCaptions(false);
+      isGeneratingCaptionsRef.current = false;
+    }
+  };
+
   const handleGenerateNarration = async (refresh = false) => {
     if (!job?.job_id) return;
     if (isGeneratingNarrationRef.current) return;
@@ -295,11 +363,16 @@ export default function ProcessingView({
       const res = await generateNarration(job.job_id, refresh);
       if (res.success) {
         setNarration(res.data);
+        if (refresh) {
+          setCaptions(null);
+          setCaptionsError(null);
+        }
         if (onJobUpdated) {
           onJobUpdated({
             ...job,
             narration: res.data,
             has_narration: true,
+            ...(refresh ? { captions: null, has_captions: false } : {}),
           });
         }
       } else {
@@ -1297,6 +1370,18 @@ export default function ProcessingView({
           onGenerate={handleGenerateNarration}
           error={narrationError}
           isStoryboardAvailable={Boolean(educationalStoryboard || job?.educational_storyboard || job?.has_educational_storyboard)}
+        />
+      )}
+
+      {/* Milestone 5: Subtitles & Captions (Phase 5.5) */}
+      {(knowledge || job?.has_captions || captions || narration || job?.has_narration) && (
+        <CaptionsCard
+          jobId={job.job_id}
+          captions={captions}
+          isLoading={isGeneratingCaptions}
+          onGenerate={handleGenerateCaptions}
+          error={captionsError}
+          isNarrationAvailable={Boolean(narration || job?.narration || job?.has_narration)}
         />
       )}
 

@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "test": "node --test test_workflow_ui.js test_script_storyboard_ui.js test_narration_ui.js"
+    "test": "node --test test_workflow_ui.js test_script_storyboard_ui.js test_narration_ui.js test_captions_ui.js"
   },
   "dependencies": {
     "lucide-react": "^1.16.0",
