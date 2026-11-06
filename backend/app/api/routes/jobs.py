@@ -94,6 +94,7 @@ from ...services.repo.ingest import (
     RepositorySizeExceededError,
     repo_ingestion_service,
 )
+from ...services.pipeline_runner import pipeline_runner_service
 from ...services.storage.job_store import PIPELINE_STAGES, job_store
 from ...core.config import settings
 from ...utils.github_url import (
@@ -246,16 +247,21 @@ def run_ingestion_and_analysis_task(job_id: str, clone_url: str):
         logger.exception("Unexpected error ingesting repository for job %s", job_id)
 
 @router.post("", response_model=JobResponse, status_code=status.HTTP_201_CREATED)
-def create_job(
+async def create_job(
     payload: JobCreateRequest,
     background_tasks: BackgroundTasks,
     wait: bool = Query(
         False,
         description="If True, performs cloning and analysis synchronously before returning response.",
     ),
+    auto_run: bool = Query(
+        False,
+        description="If True, runs the complete 9-stage pipeline automatically.",
+    ),
 ):
     """
     Validate GitHub repository URL, verify accessibility, and initialize repository ingestion and analysis.
+    If auto_run is True, executes or schedules the complete 9-stage video generation pipeline.
     """
     # 1. Validate GitHub URL format
     try:
@@ -290,7 +296,23 @@ def create_job(
         clone_url=parsed.clone_url,
     )
 
-    # 4. Ingest repository (synchronously if wait=True, or via background task)
+    # 4. Handle auto_run vs standard ingestion
+    if auto_run:
+        if wait:
+            try:
+                await pipeline_runner_service.run_pipeline(internal_job.job_id)
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=_sanitize_error_message(f"Pipeline execution failed: {exc}", internal_job.local_path),
+                ) from exc
+            return job_store.get_job(internal_job.job_id)
+
+        job_store.update_job_ingestion_started(internal_job.job_id)
+        background_tasks.add_task(pipeline_runner_service.run_pipeline, internal_job.job_id)
+        return internal_job.to_response()
+
+    # Standard ingestion (synchronously if wait=True, or via background task)
     if wait:
         try:
             run_ingestion_and_analysis_task(internal_job.job_id, parsed.clone_url)
@@ -2078,3 +2100,102 @@ def simulate_job_step(job_id: str):
 
     job_store.update_job(internal_job)
     return internal_job.to_response()
+
+
+# ==============================================================================
+# Milestone 7: End-to-End Pipeline Execution & Granular Stage Retry
+# ==============================================================================
+
+@router.post("/{job_id}/run-pipeline", response_model=JobResponse)
+async def run_job_pipeline_endpoint(
+    job_id: str,
+    background_tasks: BackgroundTasks,
+    wait: bool = Query(
+        False,
+        description="If True, executes all remaining stages synchronously before returning.",
+    ),
+    refresh: bool = Query(
+        False,
+        description="Whether to force re-execution of previously completed stages.",
+    ),
+):
+    """
+    Executes or resumes the entire 9-stage video generation pipeline for a job.
+    Advances sequentially from the first pending stage to final video assembly.
+    """
+    internal = job_store.get_internal_job(job_id)
+    if not internal:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Job with ID '{job_id}' not found",
+        )
+
+    if wait:
+        try:
+            completed_job = await pipeline_runner_service.run_pipeline(
+                job_id=job_id,
+                refresh=refresh,
+            )
+            return completed_job.to_response()
+        except Exception as exc:
+            logger.exception("Pipeline runner failed for job %s: %s", job_id, exc)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=_sanitize_error_message(str(exc), internal.local_path),
+            ) from exc
+
+    background_tasks.add_task(pipeline_runner_service.run_pipeline, job_id, None, refresh)
+    return internal.to_response()
+
+
+@router.post("/{job_id}/retry-stage/{stage_id}", response_model=JobResponse)
+async def retry_job_stage_endpoint(
+    job_id: str,
+    stage_id: int,
+    background_tasks: BackgroundTasks,
+    wait: bool = Query(
+        False,
+        description="If True, executes stage retry synchronously before returning.",
+    ),
+):
+    """
+    Retries a specific failed pipeline stage (1-9) without invalidating upstream stages.
+    """
+    internal = job_store.get_internal_job(job_id)
+    if not internal:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Job with ID '{job_id}' not found",
+        )
+
+    if stage_id < 1 or stage_id > 9:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid stage ID {stage_id}. Stage ID must be between 1 and 9.",
+        )
+
+    # Reset stage status to pending so pipeline runner can re-execute it
+    target_stage = internal.stages[stage_id - 1]
+    target_stage.status = StatusEnum.PENDING
+    target_stage.detail = f"Queued for retry: {target_stage.name}"
+    internal.status = StatusEnum.IN_PROGRESS
+    internal.error = None
+
+    if wait:
+        try:
+            resumed_job = await pipeline_runner_service.run_pipeline(
+                job_id=job_id,
+                from_stage=stage_id,
+                refresh=False,
+            )
+            return resumed_job.to_response()
+        except Exception as exc:
+            logger.exception("Stage retry failed for job %s, stage %d: %s", job_id, stage_id, exc)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=_sanitize_error_message(str(exc), internal.local_path),
+            ) from exc
+
+    background_tasks.add_task(pipeline_runner_service.run_pipeline, job_id, stage_id, False)
+    return internal.to_response()
+

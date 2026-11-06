@@ -4,6 +4,7 @@ import CodeUnderstandingCard from './CodeUnderstandingCard';
 import WorkflowUnderstandingCard from './WorkflowUnderstandingCard';
 import EducationalScriptCard from './EducationalScriptCard';
 import EducationalStoryboardCard from './EducationalStoryboardCard';
+import VisualGenerationCard from './VisualGenerationCard';
 import NarrationCard from './NarrationCard';
 import CaptionsCard from './processing/CaptionsCard';
 import AssemblyReadinessCard from './processing/AssemblyReadinessCard';
@@ -18,12 +19,16 @@ import {
   generateEducationalScript,
   getEducationalStoryboard,
   generateEducationalStoryboard,
+  getVisualAssets,
+  generateVisualAssets,
   getNarration,
   generateNarration,
   getCaptions,
   generateCaptions,
   getAssemblyInput,
   generateAssemblyInput,
+  runFullPipeline,
+  retryJobStage,
 } from '../api/client';
 import { 
   GitBranch, 
@@ -106,6 +111,18 @@ export default function ProcessingView({
   const [storyboardError, setStoryboardError] = useState(null);
   const isFetchingStoryboardRef = useRef(false);
   const isGeneratingStoryboardRef = useRef(false);
+
+  // Stage 07: Visual Asset Generation
+  const [visualGeneration, setVisualGeneration] = useState(job?.visual_generation || null);
+  const [isGeneratingVisuals, setIsGeneratingVisuals] = useState(false);
+  const [visualsError, setVisualsError] = useState(null);
+  const isFetchingVisualsRef = useRef(false);
+  const isGeneratingVisualsRef = useRef(false);
+
+  // Milestone 7: Automated Pipeline Execution & Granular Stage Retry
+  const [isRunningPipeline, setIsRunningPipeline] = useState(false);
+  const [isRetryingStage, setIsRetryingStage] = useState(false);
+  const [pipelineError, setPipelineError] = useState(null);
 
   // Milestone 5: Narration Audio
   const [narration, setNarration] = useState(job?.narration || null);
@@ -274,6 +291,36 @@ export default function ProcessingView({
       setEducationalStoryboard(null);
     }
   }, [job?.has_educational_storyboard]);
+
+  useEffect(() => {
+    // If the job has visual assets generated and we haven't loaded them yet, fetch them
+    if (job?.job_id && (job?.has_visual_generation || job?.visual_generation) && !visualGeneration) {
+      if (job.visual_generation) {
+        setVisualGeneration(job.visual_generation);
+      } else if (!isFetchingVisualsRef.current) {
+        isFetchingVisualsRef.current = true;
+        getVisualAssets(job.job_id)
+          .then((res) => {
+            if (res.success) {
+              setVisualGeneration(res.data);
+              if (onJobUpdated) {
+                onJobUpdated({ ...job, visual_generation: res.data, has_visual_generation: true });
+              }
+            }
+          })
+          .finally(() => {
+            isFetchingVisualsRef.current = false;
+          });
+      }
+    }
+  }, [job?.job_id, job?.has_visual_generation, job?.visual_generation, visualGeneration]);
+
+  useEffect(() => {
+    // If job state reports that visual assets were invalidated, clear in UI
+    if (job && job.has_visual_generation === false && visualGeneration) {
+      setVisualGeneration(null);
+    }
+  }, [job?.has_visual_generation]);
 
   useEffect(() => {
     // If the job has narration generated and we haven't loaded it yet, fetch it
@@ -516,6 +563,74 @@ export default function ProcessingView({
       setIsGeneratingStoryboard(false);
     }
   };
+
+  const handleGenerateVisuals = async (refresh = false) => {
+    if (!job?.job_id) return;
+    if (isGeneratingVisualsRef.current) return;
+    isGeneratingVisualsRef.current = true;
+    setIsGeneratingVisuals(true);
+    setVisualsError(null);
+    try {
+      const res = await generateVisualAssets(job.job_id, refresh);
+      if (res.success) {
+        setVisualGeneration(res.data);
+        if (onJobUpdated) {
+          onJobUpdated({
+            ...job,
+            has_visual_generation: true,
+            visual_generation: res.data,
+          });
+        }
+      } else {
+        setVisualsError(res.error || 'Failed to generate visual assets');
+      }
+    } catch (err) {
+      setVisualsError(err.message || 'Error communicating with server');
+    } finally {
+      setIsGeneratingVisuals(false);
+      isGeneratingVisualsRef.current = false;
+    }
+  };
+
+  const handleRunFullPipeline = async () => {
+    if (!job?.job_id || isRunningPipeline) return;
+    setIsRunningPipeline(true);
+    setPipelineError(null);
+    try {
+      const res = await runFullPipeline(job.job_id);
+      if (res.success) {
+        if (onJobUpdated) {
+          onJobUpdated(res.data);
+        }
+      } else {
+        setPipelineError(res.error || 'Failed to start automated pipeline execution');
+      }
+    } catch (err) {
+      setPipelineError(err.message || 'Error communicating with server');
+    } finally {
+      setIsRunningPipeline(false);
+    }
+  };
+
+  const handleRetryStage = async (stageId) => {
+    if (!job?.job_id || isRetryingStage) return;
+    setIsRetryingStage(true);
+    setPipelineError(null);
+    try {
+      const res = await retryJobStage(job.job_id, stageId);
+      if (res.success) {
+        if (onJobUpdated) {
+          onJobUpdated(res.data);
+        }
+      } else {
+        setPipelineError(res.error || `Failed to retry Stage ${stageId}`);
+      }
+    } catch (err) {
+      setPipelineError(err.message || 'Error communicating with server');
+    } finally {
+      setIsRetryingStage(false);
+    }
+  };
   if (!job) {
     return (
       <div className="max-w-3xl mx-auto py-16 text-center">
@@ -574,18 +689,49 @@ export default function ProcessingView({
           <div className="flex items-start gap-3">
             <AlertCircle className="w-5 h-5 text-rose-600 flex-shrink-0 mt-0.5" />
             <div>
-              <h4 className="text-sm font-bold text-rose-900">Ingestion or Analysis Error</h4>
+              <h4 className="text-sm font-bold text-rose-900">Pipeline Execution Error</h4>
               <p className="text-xs text-rose-700 mt-1 leading-relaxed">
                 {job.error || 'The repository processing could not be completed.'}
               </p>
             </div>
           </div>
+          <div className="flex items-center gap-2 self-end sm:self-center">
+            {job.stages?.find((s) => s.status === 'failed') && (
+              <button
+                onClick={() => handleRetryStage(job.stages.find((s) => s.status === 'failed').id)}
+                disabled={isRetryingStage}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-xs font-semibold shadow-sm transition whitespace-nowrap"
+              >
+                {isRetryingStage ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <RotateCcw className="w-3.5 h-3.5" />
+                )}
+                <span>{`Retry Stage ${job.stages.find((s) => s.status === 'failed').id}`}</span>
+              </button>
+            )}
+            <button
+              onClick={onCancel}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl border border-rose-200 hover:bg-rose-100 text-rose-800 text-xs font-semibold transition whitespace-nowrap"
+            >
+              <span>Try Another URL</span>
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Non-intrusive notification for pipeline error */}
+      {pipelineError && (
+        <div className="mb-6 p-4 rounded-xl bg-amber-50 border border-amber-200 text-xs text-amber-800 flex items-center justify-between gap-3 shadow-sm">
+          <div className="flex items-center gap-2">
+            <AlertCircle className="w-4 h-4 text-amber-600 flex-shrink-0" />
+            <span>{pipelineError}</span>
+          </div>
           <button
-            onClick={onCancel}
-            className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-xs font-semibold shadow-sm transition whitespace-nowrap self-end sm:self-center"
+            onClick={() => setPipelineError(null)}
+            className="text-amber-500 hover:text-amber-700 font-medium transition"
           >
-            <RotateCcw className="w-3.5 h-3.5" />
-            <span>Try Another URL</span>
+            Dismiss
           </button>
         </div>
       )}
@@ -643,19 +789,35 @@ export default function ProcessingView({
                 <ChevronRight className="w-4 h-4" />
               </button>
             ) : !isFailed && (
-              <button
-                onClick={onSimulateStep}
-                disabled={isSimulating || isStageOneInProgress || isStageTwoInProgress || isStageThreeInProgress}
-                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200/70 text-xs font-semibold transition disabled:opacity-50"
-                title="Advance to next stage"
-              >
-                {isSimulating ? (
-                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                ) : (
-                  <ArrowRight className="w-3.5 h-3.5" />
-                )}
-                <span>Simulate Next Stage</span>
-              </button>
+              <>
+                <button
+                  onClick={handleRunFullPipeline}
+                  disabled={isRunningPipeline || isSimulating || isStageOneInProgress || isStageTwoInProgress || isStageThreeInProgress}
+                  className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold shadow-sm transition disabled:opacity-50"
+                  title="Automatically run all remaining pipeline stages end-to-end"
+                >
+                  {isRunningPipeline ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <Sparkles className="w-3.5 h-3.5" />
+                  )}
+                  <span>Auto-Run Pipeline</span>
+                </button>
+
+                <button
+                  onClick={onSimulateStep}
+                  disabled={isRunningPipeline || isSimulating || isStageOneInProgress || isStageTwoInProgress || isStageThreeInProgress}
+                  className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200/70 text-xs font-semibold transition disabled:opacity-50"
+                  title="Advance to next stage"
+                >
+                  {isSimulating ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <ArrowRight className="w-3.5 h-3.5" />
+                  )}
+                  <span>Simulate Next Stage</span>
+                </button>
+              </>
             )}
 
             <button
@@ -1427,6 +1589,18 @@ export default function ProcessingView({
           onGenerate={handleGenerateStoryboard}
           error={storyboardError}
           isScriptAvailable={isStoryboardPrereqReady}
+        />
+      )}
+
+      {/* Stage 07: Visual Asset Generation */}
+      {(knowledge || job?.has_educational_storyboard || educationalStoryboard || job?.has_visual_generation || visualGeneration) && (
+        <VisualGenerationCard
+          jobId={job.job_id}
+          visualGeneration={visualGeneration}
+          isLoading={isGeneratingVisuals || job.stages?.[6]?.status === 'in_progress'}
+          onGenerate={handleGenerateVisuals}
+          error={visualsError}
+          hasStoryboard={Boolean(educationalStoryboard || job?.educational_storyboard || job?.has_educational_storyboard)}
         />
       )}
 

@@ -1116,5 +1116,156 @@ export function getFinalVideoFileUrl(jobId) {
   return `${API_BASE_URL}/api/v1/jobs/${jobId}/video/file`;
 }
 
+export async function getVisualAssets(jobId) {
+  try {
+    const response = await fetch(`${API_BASE_URL}/api/v1/jobs/${jobId}/visual-assets`, {
+      method: 'GET',
+      headers: {
+        'Accept': 'application/json',
+      },
+    });
+
+    let data;
+    try {
+      data = await response.json();
+    } catch {
+      data = null;
+    }
+
+    if (!response.ok) {
+      return {
+        success: false,
+        status: response.status,
+        error: (data && data.detail) || `Failed to fetch visual assets (${response.status})`,
+      };
+    }
+
+    return { success: true, status: response.status, data };
+  } catch (error) {
+    return {
+      success: false,
+      status: 0,
+      error: error.message || 'Error fetching visual assets',
+    };
+  }
+}
+
+export async function generateVisualAssets(jobId, refresh = false) {
+  try {
+    const url = new URL(`${API_BASE_URL}/api/v1/jobs/${jobId}/visual-assets`);
+    if (refresh) {
+      url.searchParams.set('refresh', 'true');
+    }
+
+    const response = await fetch(url.toString(), {
+      method: 'POST',
+      headers: {
+        'Accept': 'application/json',
+      },
+    });
+
+    let data;
+    try {
+      data = await response.json();
+    } catch {
+      data = null;
+    }
+
+    if (!response.ok) {
+      return {
+        success: false,
+        status: response.status,
+        error: (data && data.detail) || `Failed to generate visual assets (${response.status})`,
+      };
+    }
+
+    return { success: true, status: response.status, data };
+  } catch (error) {
+    return {
+      success: false,
+      status: 0,
+      error: error.message || 'Error generating visual assets',
+    };
+  }
+}
+
+export function getVisualAssetFileUrl(jobId, assetId) {
+  return `${API_BASE_URL}/api/v1/jobs/${jobId}/visual-assets/${assetId}/file`;
+}
+
+export async function runFullPipeline(jobId, refresh = false) {
+  try {
+    const url = new URL(`${API_BASE_URL}/api/v1/jobs/${jobId}/run-pipeline`);
+    if (refresh) {
+      url.searchParams.set('refresh', 'true');
+    }
+
+    const response = await fetch(url.toString(), {
+      method: 'POST',
+      headers: {
+        'Accept': 'application/json',
+      },
+    });
+
+    let data;
+    try {
+      data = await response.json();
+    } catch {
+      data = null;
+    }
+
+    if (!response.ok) {
+      return {
+        success: false,
+        status: response.status,
+        error: (data && data.detail) || `Failed to start pipeline runner (${response.status})`,
+      };
+    }
+
+    return { success: true, status: response.status, data };
+  } catch (error) {
+    return {
+      success: false,
+      status: 0,
+      error: error.message || 'Error starting pipeline runner',
+    };
+  }
+}
+
+export async function retryJobStage(jobId, stageId) {
+  try {
+    const response = await fetch(`${API_BASE_URL}/api/v1/jobs/${jobId}/retry-stage/${stageId}`, {
+      method: 'POST',
+      headers: {
+        'Accept': 'application/json',
+      },
+    });
+
+    let data;
+    try {
+      data = await response.json();
+    } catch {
+      data = null;
+    }
+
+    if (!response.ok) {
+      return {
+        success: false,
+        status: response.status,
+        error: (data && data.detail) || `Failed to retry stage (${response.status})`,
+      };
+    }
+
+    return { success: true, status: response.status, data };
+  } catch (error) {
+    return {
+      success: false,
+      status: 0,
+      error: error.message || 'Error retrying stage',
+    };
+  }
+}
+
+
 
 

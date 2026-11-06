@@ -28,12 +28,54 @@ export default function App() {
     setIsCheckingHealth(false);
   }, []);
 
-  // Check health on initial mount
+  // Check health and restore persistent job on initial mount
   useEffect(() => {
     checkHealth();
+
+    try {
+      if (typeof window !== 'undefined') {
+        const urlParams = new URLSearchParams(window.location.search);
+        const urlJobId = urlParams.get('job');
+        const savedJobId = urlJobId || localStorage.getItem('repogenie_current_job_id');
+
+        if (savedJobId && !savedJobId.startsWith('mock-')) {
+          getJobStatus(savedJobId).then((res) => {
+            if (res.success && res.data) {
+              setCurrentJob(res.data);
+              if (res.data.status === 'completed' && urlParams.get('view') === 'result') {
+                setCurrentView('result');
+              } else {
+                setCurrentView('processing');
+              }
+            }
+          }).catch(() => {});
+        }
+      }
+    } catch {
+      // Ignore in non-browser testing environments
+    }
   }, [checkHealth]);
 
-  // Polling for live ingestion progress
+  // Synchronize active job ID to localStorage and URL query parameters
+  useEffect(() => {
+    if (currentJob?.job_id && !currentJob.job_id.startsWith('mock-')) {
+      try {
+        if (typeof window !== 'undefined') {
+          localStorage.setItem('repogenie_current_job_id', currentJob.job_id);
+          const urlParams = new URLSearchParams(window.location.search);
+          if (urlParams.get('job') !== currentJob.job_id) {
+            urlParams.set('job', currentJob.job_id);
+            const newRelativePath = window.location.pathname + '?' + urlParams.toString();
+            window.history.replaceState(null, '', newRelativePath);
+          }
+        }
+      } catch {
+        // Ignore in non-browser testing environments
+      }
+    }
+  }, [currentJob?.job_id]);
+
+  // Polling for live pipeline progress
   useEffect(() => {
     if (
       currentView !== 'processing' ||
@@ -45,10 +87,9 @@ export default function App() {
     }
 
     const isProcessing =
+      currentJob.status === 'in_progress' ||
       currentJob.ingestion_status === 'in_progress' ||
-      currentJob.stages?.[0]?.status === 'in_progress' ||
-      currentJob.stages?.[1]?.status === 'in_progress' ||
-      currentJob.stages?.[2]?.status === 'in_progress';
+      currentJob.stages?.some((s) => s.status === 'in_progress');
 
     if (!isProcessing) {
       return;
@@ -174,6 +215,19 @@ export default function App() {
   };
 
   const handleReset = () => {
+    try {
+      if (typeof window !== 'undefined') {
+        localStorage.removeItem('repogenie_current_job_id');
+        const urlParams = new URLSearchParams(window.location.search);
+        urlParams.delete('job');
+        urlParams.delete('view');
+        const queryStr = urlParams.toString();
+        const cleanPath = window.location.pathname + (queryStr ? '?' + queryStr : '');
+        window.history.replaceState(null, '', cleanPath);
+      }
+    } catch {
+      // Ignore in non-browser testing environments
+    }
     setCurrentJob(null);
     setServerError('');
     setCurrentView('home');

@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import WorkflowUnderstandingCard from './WorkflowUnderstandingCard';
 import EducationalScriptCard from './EducationalScriptCard';
 import EducationalStoryboardCard from './EducationalStoryboardCard';
+import VisualGenerationCard from './VisualGenerationCard';
 import NarrationCard from './NarrationCard';
 import CaptionsCard from './processing/CaptionsCard';
 import AssemblyReadinessCard from './processing/AssemblyReadinessCard';
@@ -10,6 +11,7 @@ import {
   getWorkflowUnderstanding,
   getEducationalScript,
   getEducationalStoryboard,
+  getVisualAssets,
   getNarration,
   getCaptions,
   getAssemblyInput,
@@ -42,6 +44,9 @@ export default function VideoResultView({ job, onReset }) {
 
   const [educationalStoryboard, setEducationalStoryboard] = useState(job?.educational_storyboard || null);
   const [storyboardError, setStoryboardError] = useState(null);
+
+  const [visualGeneration, setVisualGeneration] = useState(job?.visual_generation || null);
+  const [visualsError, setVisualsError] = useState(null);
 
   const [narration, setNarration] = useState(job?.narration || null);
   const [narrationError, setNarrationError] = useState(null);
@@ -153,6 +158,39 @@ export default function VideoResultView({ job, onReset }) {
 
   useEffect(() => {
     let isMounted = true;
+    if (job?.job_id && (job?.has_visual_generation || job?.visual_generation) && !visualGeneration) {
+      if (job.visual_generation) {
+        setVisualGeneration(job.visual_generation);
+      } else {
+        getVisualAssets(job.job_id)
+          .then((res) => {
+            if (!isMounted) return;
+            if (res.success) {
+              setVisualGeneration(res.data);
+              setVisualsError(null);
+            } else if (res.status === 404) {
+              setVisualGeneration(null);
+              setVisualsError(null);
+            } else {
+              setVisualGeneration(null);
+              setVisualsError(res.error || 'Failed to load visual assets');
+            }
+          })
+          .catch((err) => {
+            if (isMounted) {
+              setVisualGeneration(null);
+              setVisualsError(err.message || 'Unexpected error loading visual assets');
+            }
+          });
+      }
+    }
+    return () => {
+      isMounted = false;
+    };
+  }, [job?.job_id, job?.has_visual_generation, job?.visual_generation, visualGeneration]);
+
+  useEffect(() => {
+    let isMounted = true;
     if (job?.job_id && (job?.has_narration || job?.narration) && !narration) {
       if (job.narration) {
         setNarration(job.narration);
@@ -260,6 +298,14 @@ export default function VideoResultView({ job, onReset }) {
   const hasSubtitles = Boolean(job?.job_id && (job?.has_captions || captions));
   const captionTrackUrl = hasSubtitles ? getCaptionFileUrl(job.job_id, 'full', 'vtt') : null;
 
+  const durationSeconds = job?.result?.duration_seconds ?? job?.render_job?.actual_duration_seconds;
+  const formatDuration = (secs) => {
+    if (secs === null || secs === undefined || isNaN(secs)) return '00:00';
+    const m = Math.floor(secs / 60);
+    const s = Math.floor(secs % 60);
+    return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+  };
+
   return (
     <div className="max-w-5xl mx-auto py-8 px-4 sm:px-6">
       {/* Top Banner / Breadcrumb */}
@@ -343,7 +389,7 @@ export default function VideoResultView({ job, onReset }) {
               <span>•</span>
               <span>Audio: English Narration (Synchronized)</span>
             </div>
-            <span className="font-mono text-slate-400">Duration: 03:00</span>
+            <span className="font-mono text-slate-400">{`Duration: ${formatDuration(durationSeconds)}`}</span>
           </div>
         </div>
 
@@ -416,6 +462,17 @@ export default function VideoResultView({ job, onReset }) {
         <div className="mt-8 pt-6 border-t border-slate-200">
           <EducationalStoryboardCard
             storyboard={educationalStoryboard}
+            readOnly
+          />
+        </div>
+      )}
+
+      {/* Visual Assets (Stage 07) */}
+      {visualGeneration && (
+        <div className="mt-8 pt-6 border-t border-slate-200">
+          <VisualGenerationCard
+            jobId={job?.job_id}
+            visualGeneration={visualGeneration}
             readOnly
           />
         </div>
