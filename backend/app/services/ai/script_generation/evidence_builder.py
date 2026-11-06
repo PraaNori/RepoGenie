@@ -59,7 +59,7 @@ logger = logging.getLogger(__name__)
 # Budgets and limits
 # ---------------------------------------------------------------------------
 
-DEFAULT_MAX_EVIDENCE_CHARS = 12000  # ~3,000 tokens of evidence JSON
+DEFAULT_MAX_EVIDENCE_CHARS = 10000  # ~2,500 tokens of evidence JSON (stays safely under Groq 8000 TPM)
 MAX_FEATURES = 4
 MAX_USE_CASES = 2
 MAX_TECHNOLOGIES = 6

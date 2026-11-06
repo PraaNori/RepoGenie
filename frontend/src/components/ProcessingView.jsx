@@ -347,6 +347,7 @@ export default function ProcessingView({
     !isFailed &&
     job.ingestion_status === 'completed' &&
     job.stages?.[1]?.status === 'completed' &&
+    (job.stages?.[2]?.status === 'completed' || Boolean(knowledge)) &&
     knowledge
   );
   const isStoryboardPrereqReady = Boolean(

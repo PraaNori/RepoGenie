@@ -1528,3 +1528,39 @@ def test_script_validator_direct_post_validation_filters_invalid_references_and_
     assert validated.sections[0].claims[0].statement == "Valid confirmed claim."
     assert any("dropped 'confirmed' claim" in w for w in validated.validation_warnings)
 
+
+def test_wrap_ai_error_mro_with_base_aierror():
+    """Regression test: _wrap_ai_error handles base AIError and subclasses without MRO TypeError."""
+    from app.services.ai.exceptions import AIError, AIInvalidResponseError
+    from app.services.ai.script_generation.analyzer import ScriptGenerationError, _wrap_ai_error
+    from app.services.ai.storyboard_generation.analyzer import StoryboardGenerationError, _wrap_ai_error as _wrap_sb_error
+
+    base_err = AIError("Direct base AIError failure", provider="groq", status_code=413)
+    sub_err = AIInvalidResponseError("Invalid JSON response", provider="groq")
+    plain_exc = RuntimeError("Unexpected runtime exception")
+
+    # Script analyzer wrap
+    wrapped_base = _wrap_ai_error(base_err)
+    assert isinstance(wrapped_base, ScriptGenerationError)
+    assert isinstance(wrapped_base, AIError)
+    assert wrapped_base.status_code == 413
+
+    wrapped_sub = _wrap_ai_error(sub_err)
+    assert isinstance(wrapped_sub, ScriptGenerationError)
+    assert isinstance(wrapped_sub, AIInvalidResponseError)
+
+    wrapped_plain = _wrap_ai_error(plain_exc)
+    assert isinstance(wrapped_plain, ScriptGenerationError)
+    assert "Unexpected runtime exception" in str(wrapped_plain)
+
+    # Storyboard analyzer wrap
+    sb_wrapped_base = _wrap_sb_error(base_err)
+    assert isinstance(sb_wrapped_base, StoryboardGenerationError)
+    assert isinstance(sb_wrapped_base, AIError)
+    assert sb_wrapped_base.status_code == 413
+
+    sb_wrapped_sub = _wrap_sb_error(sub_err)
+    assert isinstance(sb_wrapped_sub, StoryboardGenerationError)
+    assert isinstance(sb_wrapped_sub, AIInvalidResponseError)
+
+

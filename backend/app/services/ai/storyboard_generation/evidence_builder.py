@@ -37,7 +37,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_MAX_STORYBOARD_EVIDENCE_CHARS = 12000
+DEFAULT_MAX_STORYBOARD_EVIDENCE_CHARS = 10000  # ~2,500 tokens of evidence JSON (stays safely under Groq 8000 TPM)
 
 _EXTRA_SECRET_RE_GSK = re.compile(r"\bgsk_[A-Za-z0-9_\-]{20,}\b")
 _EXTRA_SECRET_RE_KV = re.compile(

@@ -69,11 +69,14 @@ def _wrap_ai_error(exc: Exception, default_provider: Optional[str] = None) -> Sc
     if isinstance(exc, ScriptGenerationError):
         return exc
     if isinstance(exc, AIError):
-        combined_cls = type(
-            exc.__class__.__name__,
-            (exc.__class__, ScriptGenerationError),
-            {},
-        )
+        if exc.__class__ is AIError:
+            combined_cls = ScriptGenerationError
+        else:
+            combined_cls = type(
+                exc.__class__.__name__,
+                (exc.__class__, ScriptGenerationError),
+                {},
+            )
         wrapped = combined_cls.__new__(combined_cls)
         wrapped.__dict__.update(exc.__dict__)
         Exception.__init__(wrapped, exc.message)
@@ -272,7 +275,7 @@ class EducationalScriptAnalyzer:
 
         options = LLMGenerationOptions(
             temperature=settings.AI_TEMPERATURE,
-            max_output_tokens=max(settings.AI_MAX_OUTPUT_TOKENS, 2048),
+            max_output_tokens=settings.AI_MAX_OUTPUT_TOKENS,
             timeout_seconds=settings.AI_REQUEST_TIMEOUT,
             system_instruction=SYSTEM_PROMPT,
         )
