@@ -1637,7 +1637,9 @@ async def generate_job_assembly_input(
             )
 
         if internal.assembly_input and not refresh:
-            return internal.assembly_input
+            revalidated = assembly_input_service.revalidate_assembly_input(internal.assembly_input)
+            internal.assembly_input = revalidated
+            return revalidated
 
         try:
             assembly_input = assembly_input_service.build_assembly_input(
@@ -1663,6 +1665,7 @@ def get_job_assembly_input(job_id: str):
     """
     Retrieves the stored VideoAssemblyInput package for a job.
     If not yet generated, compiles it on the fly if storyboard exists.
+    Verifies current physical asset integrity on disk without regenerating assets.
     """
     internal = job_store.get_internal_job(job_id)
     if not internal:
@@ -1672,7 +1675,9 @@ def get_job_assembly_input(job_id: str):
         )
 
     if internal.assembly_input:
-        return internal.assembly_input
+        revalidated = assembly_input_service.revalidate_assembly_input(internal.assembly_input)
+        internal.assembly_input = revalidated
+        return revalidated
 
     if not internal.educational_storyboard:
         raise HTTPException(
@@ -1697,7 +1702,7 @@ def get_job_assembly_input(job_id: str):
 def get_job_assembly_readiness(job_id: str):
     """
     Returns the AssemblyReadinessReport for a job, evaluating asset presence, format integrity,
-    and cross-asset synchronization.
+    and cross-asset synchronization. Verifies current physical asset integrity on disk.
     """
     internal = job_store.get_internal_job(job_id)
     if not internal:
@@ -1707,7 +1712,9 @@ def get_job_assembly_readiness(job_id: str):
         )
 
     if internal.assembly_input:
-        return internal.assembly_input.readiness_report
+        revalidated = assembly_input_service.revalidate_assembly_input(internal.assembly_input)
+        internal.assembly_input = revalidated
+        return revalidated.readiness_report
 
     # Evaluate readiness
     assembly_input = assembly_input_service.build_assembly_input(

@@ -611,6 +611,56 @@ def test_api_assembly_input_404_for_unknown_job():
     assert res.status_code == status.HTTP_404_NOT_FOUND
 
 
+def test_api_cached_readiness_detects_disk_file_mutation(mock_storyboard):
+    """Verifies that GET /assembly-readiness detects disk file deletion and updates cached readiness."""
+    from app.services.video.visual_generation.storage import visual_storage_manager
+
+    job = job_store.create_job(
+        repo_url="https://github.com/test/repo-cache-mut",
+        repo_name="test/repo-cache-mut",
+        repository_owner="test",
+        repository_name="repo-cache-mut",
+        clone_url="https://github.com/test/repo-cache-mut.git",
+    )
+    job_id = job.job_id
+    job.educational_storyboard = mock_storyboard
+    job_store.update_job(job)
+
+    # Create visual asset on disk in actual job directory
+    vis_dir = visual_storage_manager.get_job_visuals_dir(job_id)
+    vis_file = vis_dir / "v1.svg"
+    vis_file.write_text(SAMPLE_VALID_SVG, encoding="utf-8")
+
+    scene = AssemblyScene(
+        scene_id="scene-1", scene_number=1, script_section_id="sec-1", section_purpose="hook", title="Scene 1",
+        start_seconds=0.0, end_seconds=5.0, duration_seconds=5.0, is_silent=True,
+        visual_asset=AssemblyAssetReference(
+            asset_id="v1", asset_type="visual",
+            relative_path=visual_storage_manager.get_relative_asset_path(job_id, "v1.svg"),
+            file_format="svg", is_valid=True
+        ),
+    )
+    rep = preflight_validator.evaluate_package(job_id, [scene])
+    assembly_input = VideoAssemblyInput(
+        job_id=job_id, repo_name="test/repo-cache-mut", scenes=[scene], total_scenes=1,
+        total_duration_seconds=5.0, readiness_report=rep,
+    )
+    job_store.update_job_assembly_input_success(job_id, assembly_input)
+
+    # Initial GET /assembly-readiness
+    res = client.get(f"/api/v1/jobs/{job_id}/assembly-readiness")
+    assert res.status_code == status.HTTP_200_OK
+
+    # Delete the physical file
+    vis_file.unlink(missing_ok=True)
+
+    # GET /assembly-readiness must immediately reflect NOT_READY
+    res_after = client.get(f"/api/v1/jobs/{job_id}/assembly-readiness")
+    assert res_after.status_code == status.HTTP_200_OK
+    assert res_after.json()["status"] == "not_ready"
+    assert any(iss["code"] == "INVALID_VISUAL_ASSET" for iss in res_after.json()["blocking_issues"])
+
+
 # ==============================================================================
 # 7. Audit Section 1: Full-Video Subtitle Consistency (3-Scene Integration)
 # ==============================================================================
@@ -925,4 +975,219 @@ def test_narration_update_invalidates_assembly_input():
     )
     job_store.update_job_narration_success(job_id, dummy_narr_res)
     assert job_store.get_job_assembly_input(job_id) is None
+
+
+# ==============================================================================
+# 10. Audit Section: Scene Identity, Fallback Matching, and Cache Revalidation
+# ==============================================================================
+
+def test_matching_ids_with_reordered_input_lists(temp_storage):
+    """Verifies that matching scene_id always takes precedence even when candidates are reordered."""
+    validator = AssemblyPreflightValidator(base_storage_dir=temp_storage)
+    service = AssemblyInputService(validator=validator)
+
+    sb = EducationalStoryboard(
+        storyboard_id="sb-order", script_id="sc-1", title="Order Test", total_estimated_duration_seconds=10.0,
+        scenes=[
+            StoryboardScene(scene_id="scene-A", scene_number=1, script_section_id="sec-1", title="Scene A", purpose="hook", estimated_duration_seconds=5.0, visual_type=VisualType.TITLE_CARD, visual_description="A"),
+            StoryboardScene(scene_id="scene-B", scene_number=2, script_section_id="sec-2", title="Scene B", purpose="architecture", estimated_duration_seconds=5.0, visual_type=VisualType.SUMMARY_CARD, visual_description="B"),
+        ]
+    )
+
+    # Assets provided in reverse order [B, A]
+    narr_b = NarrationAsset(asset_id="a-b", job_id="j1", scene_id="scene-B", scene_number=2, script_section_id="sec-2", duration_seconds=4.0, status=NarrationAssetStatus.COMPLETED)
+    narr_a = NarrationAsset(asset_id="a-a", job_id="j1", scene_id="scene-A", scene_number=1, script_section_id="sec-1", duration_seconds=5.0, status=NarrationAssetStatus.COMPLETED)
+    narr_res = NarrationGenerationResult(job_id="j1", assets=[narr_b, narr_a], total_scenes=2, total_assets=2, scenes_completed=2, assets_completed=2)
+
+    matched_a, err_a = service._match_asset_for_scene(sb.scenes[0], narr_res.assets, "narration")
+    assert err_a is None
+    assert matched_a.scene_id == "scene-A"
+
+    matched_b, err_b = service._match_asset_for_scene(sb.scenes[1], narr_res.assets, "narration")
+    assert err_b is None
+    assert matched_b.scene_id == "scene-B"
+
+
+def test_mismatched_ids_but_matching_scene_numbers_rejected(temp_storage):
+    """Verifies that if both scene IDs exist but disagree, matching by scene number is strictly forbidden."""
+    validator = AssemblyPreflightValidator(base_storage_dir=temp_storage)
+    service = AssemblyInputService(validator=validator)
+
+    scene = StoryboardScene(
+        scene_id="scene-current", scene_number=1, script_section_id="sec-1", title="Current", purpose="hook",
+        estimated_duration_seconds=5.0, visual_type=VisualType.TITLE_CARD, visual_description="desc"
+    )
+
+    # Candidate has scene_number 1, but scene_id is "scene-different"
+    candidate = NarrationAsset(
+        asset_id="a-diff", job_id="j1", scene_id="scene-different", scene_number=1,
+        script_section_id="sec-1", duration_seconds=5.0, status=NarrationAssetStatus.COMPLETED
+    )
+
+    matched, err = service._match_asset_for_scene(scene, [candidate], "narration")
+    assert matched is None
+    assert err is None
+
+
+def test_missing_ids_with_unique_scene_number_fallback(temp_storage):
+    """Verifies that fallback to scene_number is used ONLY when asset genuinely lacks scene_id and fallback is unambiguous."""
+    validator = AssemblyPreflightValidator(base_storage_dir=temp_storage)
+    service = AssemblyInputService(validator=validator)
+
+    scene = StoryboardScene(
+        scene_id="scene-1", scene_number=1, script_section_id="sec-1", title="S1", purpose="hook",
+        estimated_duration_seconds=5.0, visual_type=VisualType.TITLE_CARD, visual_description="desc"
+    )
+
+    class DummyAsset:
+        def __init__(self, num):
+            self.scene_id = None
+            self.scene_number = num
+            self.asset_id = f"asset-{num}"
+
+    c1 = DummyAsset(1)
+    c2 = DummyAsset(2)
+
+    matched, err = service._match_asset_for_scene(scene, [c1, c2], "visual")
+    assert err is None
+    assert matched is c1
+    assert matched.asset_id == "asset-1"
+
+
+def test_duplicate_scene_ids_and_duplicate_numbers_rejected(temp_storage):
+    """Verifies that duplicate scene IDs and duplicate scene numbers produce blocking issues."""
+    from pydantic import ValidationError
+
+    validator = AssemblyPreflightValidator(base_storage_dir=temp_storage)
+
+    # 1. EducationalStoryboard schema itself rejects duplicate scene_ids
+    with pytest.raises(ValidationError):
+        EducationalStoryboard(
+            storyboard_id="sb-dup-id", script_id="sc-1", title="Dup ID", total_estimated_duration_seconds=10.0,
+            scenes=[
+                StoryboardScene(scene_id="dup-id", scene_number=1, script_section_id="sec-1", title="1", purpose="hook", estimated_duration_seconds=5.0, visual_type=VisualType.TITLE_CARD, visual_description="1"),
+                StoryboardScene(scene_id="dup-id", scene_number=2, script_section_id="sec-2", title="2", purpose="architecture", estimated_duration_seconds=5.0, visual_type=VisualType.SUMMARY_CARD, visual_description="2"),
+            ]
+        )
+
+    # 2. AssemblyPreflightValidator rejects duplicate scene_number
+    s1 = AssemblyScene(
+        scene_id="s1", scene_number=1, script_section_id="sec-1", section_purpose="hook", title="1",
+        start_seconds=0.0, end_seconds=5.0, duration_seconds=5.0, is_silent=True,
+        visual_asset=AssemblyAssetReference(asset_id="v1", asset_type="visual", relative_path="v1.svg", file_format="svg", is_valid=True)
+    )
+    s2 = AssemblyScene(
+        scene_id="s2", scene_number=1, script_section_id="sec-2", section_purpose="hook", title="2",
+        start_seconds=5.0, end_seconds=10.0, duration_seconds=5.0, is_silent=True,
+        visual_asset=AssemblyAssetReference(asset_id="v2", asset_type="visual", relative_path="v2.svg", file_format="svg", is_valid=True)
+    )
+    report = validator.evaluate_package("job-dup", [s1, s2])
+    assert report.status == AssemblyReadinessStatus.NOT_READY
+    assert any(iss.code == "DUPLICATE_SCENE_NUMBER" for iss in report.blocking_issues)
+
+
+def test_asset_from_older_storyboard_generation_rejected(temp_storage):
+    """Verifies that visual assets belonging to an older storyboard_id are rejected."""
+    validator = AssemblyPreflightValidator(base_storage_dir=temp_storage)
+    service = AssemblyInputService(validator=validator)
+
+    sb = EducationalStoryboard(
+        storyboard_id="sb-current", script_id="sc-1", title="Current", total_estimated_duration_seconds=5.0,
+        scenes=[
+            StoryboardScene(scene_id="s1", scene_number=1, script_section_id="sec-1", title="1", purpose="hook", estimated_duration_seconds=5.0, visual_type=VisualType.TITLE_CARD, visual_description="1"),
+        ]
+    )
+
+    old_vis = VisualGenerationResult(
+        job_id="job-old", storyboard_id="sb-older-generation", script_id="sc-1",
+        storage_directory="jobs/job-old/visuals", scene_assets=[]
+    )
+
+    res = service.build_assembly_input("job-old", "repo", sb, old_vis, None, None)
+    assert res.readiness_report.status == AssemblyReadinessStatus.NOT_READY
+    assert any(iss.code == "STALE_STORYBOARD_ASSETS" for iss in res.readiness_report.blocking_issues)
+
+
+def test_cached_readiness_detects_deleted_file(temp_storage):
+    """Verifies that if a referenced asset file is deleted, cached readiness immediately becomes NOT_READY."""
+    validator = AssemblyPreflightValidator(base_storage_dir=temp_storage)
+    service = AssemblyInputService(validator=validator)
+
+    vis_file = temp_storage / "s1.svg"
+    vis_file.write_text(SAMPLE_VALID_SVG, encoding="utf-8")
+
+    scene = AssemblyScene(
+        scene_id="s1", scene_number=1, script_section_id="sec-1", section_purpose="hook", title="S1",
+        start_seconds=0.0, end_seconds=5.0, duration_seconds=5.0, is_silent=True,
+        visual_asset=AssemblyAssetReference(asset_id="v1", asset_type="visual", relative_path="s1.svg", file_format="svg", is_valid=True)
+    )
+
+    package = VideoAssemblyInput(
+        job_id="job-del", repo_name="repo", scenes=[scene], total_scenes=1, total_duration_seconds=5.0,
+        readiness_report=validator.evaluate_package("job-del", [scene])
+    )
+    assert package.readiness_report.status in (AssemblyReadinessStatus.READY, AssemblyReadinessStatus.READY_WITH_WARNINGS)
+
+    # Delete physical visual file
+    vis_file.unlink()
+
+    revalidated = service.revalidate_assembly_input(package)
+    assert revalidated.readiness_report.status == AssemblyReadinessStatus.NOT_READY
+    assert any(iss.code == "INVALID_VISUAL_ASSET" for iss in revalidated.readiness_report.blocking_issues)
+
+
+def test_cached_readiness_detects_truncated_file(temp_storage):
+    """Verifies that if a referenced asset is truncated to 0 bytes, cached readiness immediately becomes NOT_READY."""
+    validator = AssemblyPreflightValidator(base_storage_dir=temp_storage)
+    service = AssemblyInputService(validator=validator)
+
+    vis_file = temp_storage / "s1_trunc.svg"
+    vis_file.write_text(SAMPLE_VALID_SVG, encoding="utf-8")
+
+    scene = AssemblyScene(
+        scene_id="s1", scene_number=1, script_section_id="sec-1", section_purpose="hook", title="S1",
+        start_seconds=0.0, end_seconds=5.0, duration_seconds=5.0, is_silent=True,
+        visual_asset=AssemblyAssetReference(asset_id="v1", asset_type="visual", relative_path="s1_trunc.svg", file_format="svg", is_valid=True)
+    )
+
+    package = VideoAssemblyInput(
+        job_id="job-trunc", repo_name="repo", scenes=[scene], total_scenes=1, total_duration_seconds=5.0,
+        readiness_report=validator.evaluate_package("job-trunc", [scene])
+    )
+    assert package.readiness_report.status in (AssemblyReadinessStatus.READY, AssemblyReadinessStatus.READY_WITH_WARNINGS)
+
+    # Truncate physical visual file to 0 bytes
+    vis_file.write_text("", encoding="utf-8")
+
+    revalidated = service.revalidate_assembly_input(package)
+    assert revalidated.readiness_report.status == AssemblyReadinessStatus.NOT_READY
+    assert any(iss.code == "INVALID_VISUAL_ASSET" for iss in revalidated.readiness_report.blocking_issues)
+
+
+def test_cached_readiness_detects_corrupted_file(temp_storage):
+    """Verifies that if a referenced asset is corrupted on disk, cached readiness immediately becomes NOT_READY."""
+    validator = AssemblyPreflightValidator(base_storage_dir=temp_storage)
+    service = AssemblyInputService(validator=validator)
+
+    vis_file = temp_storage / "s1_corrupt.svg"
+    vis_file.write_text(SAMPLE_VALID_SVG, encoding="utf-8")
+
+    scene = AssemblyScene(
+        scene_id="s1", scene_number=1, script_section_id="sec-1", section_purpose="hook", title="S1",
+        start_seconds=0.0, end_seconds=5.0, duration_seconds=5.0, is_silent=True,
+        visual_asset=AssemblyAssetReference(asset_id="v1", asset_type="visual", relative_path="s1_corrupt.svg", file_format="svg", is_valid=True)
+    )
+
+    package = VideoAssemblyInput(
+        job_id="job-corrupt", repo_name="repo", scenes=[scene], total_scenes=1, total_duration_seconds=5.0,
+        readiness_report=validator.evaluate_package("job-corrupt", [scene])
+    )
+    assert package.readiness_report.status in (AssemblyReadinessStatus.READY, AssemblyReadinessStatus.READY_WITH_WARNINGS)
+
+    # Corrupt physical visual file with broken XML
+    vis_file.write_text("<svg><broken>", encoding="utf-8")
+
+    revalidated = service.revalidate_assembly_input(package)
+    assert revalidated.readiness_report.status == AssemblyReadinessStatus.NOT_READY
+    assert any(iss.code == "INVALID_VISUAL_ASSET" for iss in revalidated.readiness_report.blocking_issues)
 

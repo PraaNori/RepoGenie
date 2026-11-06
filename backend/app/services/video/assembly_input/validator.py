@@ -250,28 +250,39 @@ class AssemblyPreflightValidator:
             return False, "PIL/Pillow library is required for raster image validation", file_size
 
         try:
-            # 1. Structural check with verify()
-            with open(safe_path, "rb") as f:
-                with Image.open(f) as img:
-                    detected_format = (img.format or "").upper()
-                    expected_formats = {
-                        ".png": "PNG",
-                        ".jpg": "JPEG",
-                        ".jpeg": "JPEG",
-                        ".webp": "WEBP",
-                    }
-                    expected = expected_formats.get(ext)
-                    if expected and detected_format != expected:
-                        return False, f"File extension '{ext}' does not match detected image format '{detected_format}'", file_size
-                    img.verify()
+            import warnings
+            with warnings.catch_warnings(record=True) as captured_warnings:
+                warnings.simplefilter("always")
 
-            # 2. Decompression and scanline check with load() (catches truncated/corrupt blocks)
-            with Image.open(safe_path) as img:
-                img.load()
-                width, height = img.size
+                # 1. Structural check with verify()
+                with open(safe_path, "rb") as f:
+                    with Image.open(f) as img:
+                        detected_format = (img.format or "").upper()
+                        expected_formats = {
+                            ".png": "PNG",
+                            ".jpg": "JPEG",
+                            ".jpeg": "JPEG",
+                            ".webp": "WEBP",
+                        }
+                        expected = expected_formats.get(ext)
+                        if expected and detected_format != expected:
+                            return False, f"File extension '{ext}' does not match detected image format '{detected_format}'", file_size
+                        img.verify()
+
+                # 2. Decompression and scanline check with load() (catches truncated/corrupt blocks)
+                with Image.open(safe_path) as img:
+                    img.load()
+                    width, height = img.size
+
+                for w in captured_warnings:
+                    if issubclass(w.category, Image.DecompressionBombWarning):
+                        return False, f"Decompression bomb detected: {w.message}", file_size
 
             if width <= 0 or height <= 0:
                 return False, f"Invalid raster image dimensions: {width}x{height}", file_size
+
+            if (width * height) > MAX_RASTER_PIXELS:
+                return False, f"Decompression bomb detected: image size ({width * height} pixels) exceeds maximum limit of {MAX_RASTER_PIXELS}", file_size
 
             if width < 320 or height < 180:
                 return False, f"Raster image dimensions {width}x{height} below minimum allowable resolution 320x180", file_size
@@ -358,6 +369,7 @@ class AssemblyPreflightValidator:
         scenes: List[AssemblyScene],
         full_video_srt: Optional[AssemblyAssetReference] = None,
         full_video_vtt: Optional[AssemblyAssetReference] = None,
+        additional_issues: Optional[List[AssemblyValidationIssue]] = None,
     ) -> AssemblyReadinessReport:
         """
         Audits the complete assembled package for timeline continuity, asset completeness,
@@ -365,6 +377,13 @@ class AssemblyPreflightValidator:
         """
         blocking_issues: List[AssemblyValidationIssue] = []
         warnings: List[AssemblyValidationIssue] = []
+
+        if additional_issues:
+            for iss in additional_issues:
+                if iss.severity == AssemblyIssueSeverity.BLOCKING:
+                    blocking_issues.append(iss)
+                else:
+                    warnings.append(iss)
 
         total_scenes = len(scenes)
         ready_scenes = 0
@@ -397,6 +416,7 @@ class AssemblyPreflightValidator:
 
         expected_start = 0.0
         seen_scene_ids = set()
+        seen_scene_numbers = set()
         all_expected_composite_cues: List[Tuple[float, float, str, int]] = []
 
         for idx, scene in enumerate(scenes):
@@ -415,6 +435,19 @@ class AssemblyPreflightValidator:
                     )
                 )
             seen_scene_ids.add(scene.scene_id)
+
+            # 1b. Unique scene number check
+            if scene.scene_number in seen_scene_numbers:
+                scene_blocking.append(
+                    AssemblyValidationIssue(
+                        code="DUPLICATE_SCENE_NUMBER",
+                        severity=AssemblyIssueSeverity.BLOCKING,
+                        message=f"Duplicate scene_number detected in assembly scenes: {scene.scene_number}.",
+                        scene_id=scene.scene_id,
+                        scene_number=scene.scene_number,
+                    )
+                )
+            seen_scene_numbers.add(scene.scene_number)
 
             # 2. Monotonic scene number check
             expected_num = idx + 1
