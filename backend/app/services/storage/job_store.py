@@ -1,9 +1,12 @@
 """Job storage service."""
 import asyncio
+import logging
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Dict, List, Optional
 from pydantic import BaseModel
+from ...core.config import settings
 from ...models.schemas import (
     ArchitectureAnalysisResult,
     JobResponse,
@@ -38,6 +41,11 @@ from ..video.assembly.schemas import (
     VideoRenderStatus,
 )
 from ..video.assembly.storage import video_storage_manager
+
+try:
+    JobResponse.model_rebuild()
+except Exception:
+    pass
 
 # Standard 9 pipeline stages
 PIPELINE_STAGES = [
@@ -130,11 +138,181 @@ class JobInternal(BaseModel):
             error=self.error,
         )
 
+logger = logging.getLogger(__name__)
+
 class JobStore:
     def __init__(self):
         self._jobs: Dict[str, JobInternal] = {}
         self._job_locks: Dict[str, asyncio.Lock] = {}
         self._meta_lock = asyncio.Lock()
+        self._storage_jobs_dir = Path(settings.VIDEO_OUTPUT_DIR).resolve()
+        self._storage_jobs_dir.mkdir(parents=True, exist_ok=True)
+        self._load_all_jobs_from_disk()
+        self._wrap_update_methods()
+
+    def _persist_job(self, job: JobInternal) -> None:
+        """Atomically persists JobInternal state to storage/jobs/<job_id>/job_state.json."""
+        try:
+            job_dir = self._storage_jobs_dir / job.job_id
+            job_dir.mkdir(parents=True, exist_ok=True)
+            state_file = job_dir / "job_state.json"
+            tmp_file = job_dir / f"job_state_{uuid.uuid4().hex[:8]}.tmp"
+            tmp_file.write_text(job.model_dump_json(indent=2), encoding="utf-8")
+            tmp_file.replace(state_file)
+        except Exception as e:
+            logger.warning("Failed to persist job %s state to disk: %s", job.job_id, e)
+
+    def _load_job_from_disk(self, job_id: str) -> Optional[JobInternal]:
+        """Loads JobInternal from storage/jobs/<job_id>/job_state.json or orphaned repo directory."""
+        try:
+            state_file = self._storage_jobs_dir / job_id / "job_state.json"
+            if state_file.is_file():
+                content = state_file.read_text(encoding="utf-8")
+                job = JobInternal.model_validate_json(content)
+                self._jobs[job_id] = job
+                return job
+        except Exception as e:
+            logger.warning("Failed loading job state from disk for %s: %s", job_id, e)
+
+        # Legacy / orphaned fallback: If cloned repository directory exists in storage/repos/<job_id>
+        try:
+            repo_dir = settings.repos_path / job_id
+            if repo_dir.is_dir():
+                return self._recover_orphaned_repo_job(job_id, repo_dir)
+        except Exception as e:
+            logger.warning("Failed to recover orphaned repo for %s: %s", job_id, e)
+
+        return None
+
+    def _recover_orphaned_repo_job(self, job_id: str, repo_dir: Path) -> Optional[JobInternal]:
+        """Recovers an orphaned cloned repo directory into a valid JobInternal record."""
+        try:
+            import subprocess
+            res = subprocess.run(
+                ["git", "-C", str(repo_dir), "config", "--get", "remote.origin.url"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            remote_url = res.stdout.strip()
+            clean_url = remote_url.removesuffix(".git")
+            parts = clean_url.rstrip("/").split("/")
+            owner = parts[-2] if len(parts) >= 2 else "unknown"
+            repo_name = parts[-1] if len(parts) >= 1 else repo_dir.name
+
+            files = [p for p in repo_dir.rglob("*") if p.is_file() and not any(part.startswith(".") for part in p.parts)]
+            total_size = sum(f.stat().st_size for f in files)
+            file_count = len(files)
+            size_mb = total_size / (1024 * 1024)
+
+            now = datetime.now(timezone.utc)
+            stages = [
+                StageInfo(id=idx + 1, name=stage_name, status=StatusEnum.PENDING, detail=f"Queued for {stage_name}")
+                for idx, stage_name in enumerate(PIPELINE_STAGES)
+            ]
+            stages[0].status = StatusEnum.COMPLETED
+            stages[0].detail = f"Cloned successfully ({file_count} files, {size_mb:.2f} MB)"
+
+            analysis = None
+            code_analysis = None
+            architecture = None
+            knowledge = None
+
+            try:
+                from ..repo.analyzer import repo_analyzer_service
+                from ..repo.code_parser import code_parser_service
+                from ..repo.knowledge_builder import knowledge_builder_service
+                from ..repo.architecture_analyzer import architecture_analyzer_service
+
+                analysis = repo_analyzer_service.analyze_repository(job_id=job_id, repo_name=repo_name, local_path=str(repo_dir))
+                stages[1].status = StatusEnum.COMPLETED
+                stages[1].detail = f"Analyzed {analysis.statistics.source_files} source files"
+
+                code_analysis = code_parser_service.parse_repository(job_id=job_id, repo_name=repo_name, local_path=str(repo_dir), analysis=analysis)
+                architecture = architecture_analyzer_service.analyze_architecture(job_id=job_id, repo_name=repo_name, parsed_repo=code_analysis, analysis=analysis, local_path=str(repo_dir))
+                knowledge = knowledge_builder_service.build_knowledge(
+                    job_id=job_id,
+                    repo_name=repo_name,
+                    repo_owner=owner,
+                    repo_url=clean_url,
+                    local_path=str(repo_dir),
+                    size_mb=round(analysis.statistics.total_size_bytes / (1024 * 1024), 2) if analysis else 0.0,
+                    file_count=analysis.statistics.total_files if analysis else 0,
+                    analysis=analysis,
+                    parsed_repo=code_analysis,
+                    architecture=architecture,
+                )
+                stages[2].status = StatusEnum.COMPLETED
+                stages[2].detail = f"Parsed {code_analysis.total_parsed_files} source files, built unified knowledge"
+                stages[4].status = StatusEnum.PENDING
+                stages[4].detail = "Ready for educational script generation"
+            except Exception as e:
+                logger.warning("Could not pre-run static analysis on recovered repo %s: %s", job_id, e)
+
+            job = JobInternal(
+                job_id=job_id,
+                repo_url=clean_url or f"https://github.com/{owner}/{repo_name}",
+                repo_name=repo_name,
+                repository_owner=owner,
+                repository_name=repo_name,
+                clone_url=remote_url or clean_url,
+                local_path=str(repo_dir.resolve()),
+                ingestion_status=StatusEnum.COMPLETED,
+                status=StatusEnum.IN_PROGRESS if knowledge else StatusEnum.PENDING,
+                current_stage=PIPELINE_STAGES[4] if knowledge else PIPELINE_STAGES[1],
+                progress_percentage=44 if knowledge else 11,
+                stages=stages,
+                created_at=now,
+                updated_at=now,
+                analysis=analysis,
+                code_analysis=code_analysis,
+                architecture=architecture,
+                knowledge=knowledge,
+            )
+            self._jobs[job_id] = job
+            self._persist_job(job)
+            return job
+        except Exception as e:
+            logger.warning("Failed to recover orphaned repo for %s: %s", job_id, e)
+            return None
+
+    def _load_all_jobs_from_disk(self) -> None:
+        """Scans storage/jobs for existing job_state.json files on startup."""
+        try:
+            if self._storage_jobs_dir.is_dir():
+                for job_folder in self._storage_jobs_dir.iterdir():
+                    if job_folder.is_dir() and job_folder.name not in self._jobs:
+                        state_file = job_folder / "job_state.json"
+                        if state_file.is_file():
+                            try:
+                                content = state_file.read_text(encoding="utf-8")
+                                job = JobInternal.model_validate_json(content)
+                                self._jobs[job.job_id] = job
+                            except Exception as err:
+                                logger.warning("Failed parsing job state for %s: %s", job_folder.name, err)
+        except Exception as e:
+            logger.warning("Error scanning jobs on disk: %s", e)
+
+    def _wrap_update_methods(self) -> None:
+        """Dynamically wraps job-modifying methods to ensure disk persistence and rehydration."""
+        for attr_name in list(dir(self)):
+            if attr_name.startswith(("update_", "invalidate_")) or attr_name == "create_job":
+                method = getattr(self, attr_name)
+                if callable(method) and not getattr(method, "_is_wrapped", False):
+                    setattr(self, attr_name, self._make_persisting_wrapper(method))
+
+    def _make_persisting_wrapper(self, func):
+        def wrapper(*args, **kwargs):
+            if args:
+                first_arg = args[0]
+                if isinstance(first_arg, str) and first_arg not in self._jobs:
+                    self.get_internal_job(first_arg)
+            res = func(*args, **kwargs)
+            if isinstance(res, JobInternal):
+                self._persist_job(res)
+            return res
+        wrapper._is_wrapped = True
+        return wrapper
 
     async def get_job_lock(self, job_id: str) -> asyncio.Lock:
         """
@@ -182,18 +360,22 @@ class JobStore:
             updated_at=now,
         )
         self._jobs[job_id] = job
+        self._persist_job(job)
         return job
 
     def get_job(self, job_id: str) -> Optional[JobResponse]:
-        internal = self._jobs.get(job_id)
+        internal = self.get_internal_job(job_id)
         if not internal:
             return None
         return internal.to_response()
 
     def get_internal_job(self, job_id: str) -> Optional[JobInternal]:
-        return self._jobs.get(job_id)
+        if job_id in self._jobs:
+            return self._jobs[job_id]
+        return self._load_job_from_disk(job_id)
 
     def list_jobs(self) -> List[JobResponse]:
+        self._load_all_jobs_from_disk()
         sorted_internal = sorted(self._jobs.values(), key=lambda j: j.created_at, reverse=True)
         return [j.to_response() for j in sorted_internal]
 

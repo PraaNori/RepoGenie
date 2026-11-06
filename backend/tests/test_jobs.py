@@ -108,3 +108,59 @@ def test_get_analysis_job_not_found():
     response = client.get("/api/v1/jobs/nonexistent-job-id/analysis")
     assert response.status_code == 404
     assert "not found" in response.json()["detail"].lower()
+
+
+def test_job_survives_backend_restart_and_store_reinitialization(tmp_path):
+    """
+    Verifies that jobs created in JobStore are durably persisted to disk
+    and remain fully accessible after a backend restart / JobStore reinitialization.
+    """
+    from app.services.storage.job_store import job_store, JobStore
+
+    job = job_store.create_job(
+        repo_url="https://github.com/pallets/click",
+        repo_name="click",
+        repository_owner="pallets",
+        repository_name="click",
+        clone_url="https://github.com/pallets/click.git",
+    )
+    job_id = job.job_id
+
+    # Verify initially accessible
+    res = client.get(f"/api/v1/jobs/{job_id}")
+    assert res.status_code == 200
+    assert res.json()["job_id"] == job_id
+
+    # Simulate backend restart: instantiate a completely new JobStore instance
+    fresh_store = JobStore()
+    rehydrated = fresh_store.get_internal_job(job_id)
+    assert rehydrated is not None
+    assert rehydrated.job_id == job_id
+    assert rehydrated.repo_name == "click"
+
+    # API endpoint also retrieves rehydrated job
+    res_after = client.get(f"/api/v1/jobs/{job_id}")
+    assert res_after.status_code == 200
+    assert res_after.json()["job_id"] == job_id
+
+
+def test_script_generation_prerequisite_validation_and_job_preservation():
+    """
+    Verifies that script generation endpoint locates the job in JobStore,
+    validates prerequisites, and does not return 404 for existing jobs.
+    """
+    from app.services.storage.job_store import job_store
+
+    job = job_store.create_job(
+        repo_url="https://github.com/pallets/click",
+        repo_name="click",
+        repository_owner="pallets",
+        repository_name="click",
+        clone_url="https://github.com/pallets/click.git",
+    )
+    job_id = job.job_id
+
+    # Calling script generation on an uningested job returns 409 Conflict, NOT 404 Not Found!
+    res = client.post(f"/api/v1/jobs/{job_id}/educational-script")
+    assert res.status_code == 409
+    assert "ingestion must be completed first" in res.json()["detail"]

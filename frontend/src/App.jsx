@@ -47,6 +47,15 @@ export default function App() {
               } else {
                 setCurrentView('processing');
               }
+            } else if (res.status === 404) {
+              localStorage.removeItem('repogenie_current_job_id');
+              urlParams.delete('job');
+              urlParams.delete('view');
+              const queryStr = urlParams.toString();
+              const cleanPath = window.location.pathname + (queryStr ? '?' + queryStr : '');
+              window.history.replaceState(null, '', cleanPath);
+              setCurrentJob(null);
+              setCurrentView('home');
             }
           }).catch(() => {});
         }
@@ -99,6 +108,9 @@ export default function App() {
       const res = await getJobStatus(currentJob.job_id);
       if (res.success) {
         setCurrentJob(res.data);
+      } else if (res.status === 404) {
+        clearInterval(timer);
+        setServerError(`Job '${currentJob.job_id}' is no longer active on the server.`);
       }
     }, 1200);
 
