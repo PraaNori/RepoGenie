@@ -797,3 +797,80 @@ async def test_storyboard_serialization_round_trip():
     assert len(restored.scenes) == len(storyboard.scenes)
     assert restored.total_estimated_duration_seconds == storyboard.total_estimated_duration_seconds
     assert restored.validate_against_script(script) == []
+
+
+@pytest.mark.anyio
+async def test_storyboard_scenes_auto_distributed_excerpts():
+    """
+    Verifies that when LLM returns multiple scenes for one script section without excerpts,
+    the validator automatically divides the section narration across the scenes.
+    """
+    script = EducationalScript(
+        script_id="script-multi-scene",
+        repository_name="pallets/flask",
+        title="Multi-scene test",
+        introduction="Intro",
+        learning_objectives=["Learn multi-scene splitting"],
+        total_estimated_duration_seconds=30.0,
+        conclusion="Conclusion",
+        sections=[
+            ScriptSection(
+                section_id="sec-1",
+                order=1,
+                title="Architecture",
+                purpose=SectionPurpose.ARCHITECTURE_OVERVIEW,
+                narration_text="Flask routes incoming HTTP requests to endpoints. Context locals make request objects available globally.",
+                estimated_duration_seconds=30.0,
+            )
+        ],
+    )
+    knowledge = make_repository_knowledge()
+
+    # Raw LLM response has 2 scenes pointing to sec-1 with excerpt: null
+    payload = {
+        "storyboard_id": "sb-multi-scene",
+        "script_id": "script-multi-scene",
+        "title": "Multi-scene test",
+        "total_estimated_duration_seconds": 30.0,
+        "scenes": [
+            {
+                "scene_id": "scene-1",
+                "scene_number": 1,
+                "script_section_id": "sec-1",
+                "title": "Routing",
+                "purpose": "Routing purpose",
+                "estimated_duration_seconds": 15.0,
+                "visual_type": "architecture_diagram",
+                "visual_description": "Routing diagram",
+                "on_screen_text": ["Routing"],
+                "narration": {"script_section_id": "sec-1", "excerpt": None},
+            },
+            {
+                "scene_id": "scene-2",
+                "scene_number": 2,
+                "script_section_id": "sec-1",
+                "title": "Context",
+                "purpose": "Context purpose",
+                "estimated_duration_seconds": 15.0,
+                "visual_type": "component_diagram",
+                "visual_description": "Context diagram",
+                "on_screen_text": ["Context"],
+                "narration": {"script_section_id": "sec-1", "excerpt": None},
+            },
+        ],
+    }
+
+    mock_llm = make_mock_llm(json.dumps(payload))
+    analyzer = EducationalStoryboardAnalyzer(llm_manager=mock_llm)
+
+    storyboard = await analyzer.generate_storyboard(
+        job_id="job-auto-split",
+        script=script,
+        knowledge=knowledge,
+    )
+
+    assert len(storyboard.scenes) == 2
+    # Check that excerpts were auto-assigned sentence-by-sentence
+    assert storyboard.scenes[0].narration.excerpt == "Flask routes incoming HTTP requests to endpoints."
+    assert storyboard.scenes[1].narration.excerpt == "Context locals make request objects available globally."
+

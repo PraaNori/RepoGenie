@@ -22,9 +22,10 @@ CRITICAL VISUAL GROUNDING & SYNCHRONIZATION RULES:
    - Every scene MUST specify a valid `script_section_id` from the provided script sections.
    - Scenes MUST follow the sequential order of script sections.
    - Every script section MUST be covered by at least one storyboard scene. A section may span multiple scenes if a visual shift is helpful.
-   - The combined `estimated_duration_seconds` of scenes for each section MUST match that section's duration.
-   - The total storyboard duration MUST equal the script's `total_duration_seconds`.
-   - Do NOT rewrite, omit, or add narration text.
+   - NARRATION EXCERPTS MUST BE DISTINCT: Each scene voices a specific, non-overlapping portion of the script narration. If a section spans multiple scenes, each scene MUST specify a distinct `narration.excerpt` containing ONLY the text spoken during that specific scene. Two scenes MUST NEVER share identical narration text or excerpts.
+   - DURATION ALIGNMENT: Each scene's `estimated_duration_seconds` MUST match its spoken narration word count (~2.5 words per second; e.g. a 35-word excerpt takes ~14-16 seconds). Never create an unrealistically short scene (such as 3 seconds) for a lengthy narration excerpt.
+   - The combined `estimated_duration_seconds` of scenes for each section MUST match that section's duration, and total storyboard duration MUST equal the script's `total_duration_seconds`.
+   - Do NOT rewrite, omit, or invent narration text.
 2. GROUNDED VISUAL SPECIFICATIONS:
    - Base all visual descriptions, diagrams, and labels strictly on the provided script, components, and workflows.
    - Use concrete visual types: `title_card`, `architecture_diagram`, `component_diagram`, `code_walkthrough`, `workflow_diagram`, `data_flow_visualization`, `technology_overview`, `summary_card`, `other`.
@@ -64,22 +65,42 @@ REQUIRED OUTPUT JSON SCHEMA:
     {{
       "scene_id": "scene-1",
       "scene_number": 1,
-      "script_section_id": "<must match section_id from script>",
+      "script_section_id": "sec-1-hook",
       "title": "<Concise scene title>",
       "purpose": "<Visual and narrative purpose>",
-      "estimated_duration_seconds": <duration in seconds matching section>,
-      "visual_type": "<title_card | architecture_diagram | component_diagram | code_walkthrough | workflow_diagram | data_flow_visualization | technology_overview | summary_card | other>",
+      "estimated_duration_seconds": 16.0,
+      "visual_type": "title_card",
       "visual_description": "<Concrete description of layout, displayed boxes, diagrams, labels, and highlighted elements>",
       "on_screen_text": ["<Short on-screen label 1>", "<Short on-screen label 2>"],
       "narration": {{
-        "script_section_id": "<matching script_section_id>",
-        "excerpt": null
+        "script_section_id": "sec-1-hook",
+        "excerpt": "<Exact spoken excerpt for scene 1 from section 1>"
       }},
-      "layout_hint": "<centered_hero | split_screen | diagram_flow | code_callout | summary_grid>",
+      "layout_hint": "centered_hero",
       "related_files": ["<actual file path from evidence>"],
       "related_component_ids": ["<canonical component_id from evidence>"],
       "related_workflow_steps": ["<workflow_id#step_number from evidence if applicable>"],
-      "transition_to_next": "<Visual transition to next scene, or null on final scene>"
+      "transition_to_next": "Crossfade to architecture view"
+    }},
+    {{
+      "scene_id": "scene-2",
+      "scene_number": 2,
+      "script_section_id": "sec-2-arch",
+      "title": "<Concise scene title>",
+      "purpose": "<Visual and narrative purpose>",
+      "estimated_duration_seconds": 18.0,
+      "visual_type": "architecture_diagram",
+      "visual_description": "<Concrete description of layout, displayed boxes, diagrams, labels, and highlighted elements>",
+      "on_screen_text": ["<Short on-screen label 1>", "<Short on-screen label 2>"],
+      "narration": {{
+        "script_section_id": "sec-2-arch",
+        "excerpt": "<Exact spoken excerpt for scene 2 from section 2>"
+      }},
+      "layout_hint": "diagram_flow",
+      "related_files": ["<actual file path from evidence>"],
+      "related_component_ids": ["<canonical component_id from evidence>"],
+      "related_workflow_steps": [],
+      "transition_to_next": "Pan right to workflow execution"
     }}
   ]
 }}

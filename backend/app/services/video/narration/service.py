@@ -8,9 +8,11 @@ planned scene timings, and isolates audio asset files per job.
 
 from __future__ import annotations
 
+import hashlib
 import logging
+import re
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import Dict, List, Optional, Set
 
 from app.services.ai.script_generation.schemas import EducationalScript
 from app.services.ai.storyboard_generation.schemas import EducationalStoryboard, StoryboardScene
@@ -53,32 +55,91 @@ class NarrationService:
         """
         Creates an initial narration asset blueprint from storyboard scenes.
         Extracts narration text from storyboard scene excerpts or matched script sections.
+        Ensures multiple scenes never receive duplicate narration text.
         Scenes with empty narration text are explicitly classified as SKIPPED.
         """
         assets: List[NarrationAsset] = []
 
-        # Build map of script sections for fast fallback lookup
-        script_sections = {}
+        # Build map of script sections for fast lookup
+        script_sections: Dict[str, str] = {}
         if script and script.sections:
             for sec in script.sections:
                 script_sections[sec.section_id] = sec.narration_text.strip() if sec.narration_text else ""
 
-        for scene in storyboard.scenes:
-            # 1. Determine narration text without rewriting or paraphrasing
-            narration_text = ""
-            if scene.narration and scene.narration.excerpt and scene.narration.excerpt.strip():
-                narration_text = scene.narration.excerpt.strip()
-            elif scene.script_section_id in script_sections:
-                narration_text = script_sections[scene.script_section_id]
+        # Step 1: Pre-resolve narration text for each scene to prevent identical full-section fallbacks
+        scene_texts: List[str] = [""] * len(storyboard.scenes)
+        section_to_unresolved_indices: Dict[str, List[int]] = {}
 
-            # 2. Derive unique asset ID
+        for idx, scene in enumerate(storyboard.scenes):
+            excerpt = ""
+            if scene.narration and scene.narration.excerpt and scene.narration.excerpt.strip():
+                excerpt = scene.narration.excerpt.strip()
+
+            if excerpt:
+                scene_texts[idx] = excerpt
+            elif scene.script_section_id in script_sections:
+                section_to_unresolved_indices.setdefault(scene.script_section_id, []).append(idx)
+
+        # Step 2: Distribute script section text across scenes lacking individual excerpts
+        for sec_id, scene_indices in section_to_unresolved_indices.items():
+            full_section_text = script_sections.get(sec_id, "")
+            if not full_section_text:
+                continue
+
+            if len(scene_indices) == 1:
+                scene_texts[scene_indices[0]] = full_section_text
+            else:
+                # Multiple scenes share the section without excerpts: split into sentences!
+                sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", full_section_text) if s.strip()]
+                if not sentences:
+                    sentences = [full_section_text]
+
+                if len(sentences) >= len(scene_indices):
+                    chunk_size = len(sentences) // len(scene_indices)
+                    remainder = len(sentences) % len(scene_indices)
+                    start = 0
+                    for i, s_idx in enumerate(scene_indices):
+                        extra = 1 if i < remainder else 0
+                        end = start + chunk_size + extra
+                        scene_texts[s_idx] = " ".join(sentences[start:end])
+                        start = end
+                else:
+                    # Fewer sentences than scenes: assign sentences to earlier scenes;
+                    # subsequent scenes remain visual continuations (skipped narration)
+                    for i, s_idx in enumerate(scene_indices):
+                        scene_texts[s_idx] = sentences[i] if i < len(sentences) else ""
+
+        # Step 3: Global duplicate text elimination (never synthesize identical narration)
+        seen_texts: Set[str] = set()
+        duplicate_warnings: Dict[int, str] = {}
+        for idx in range(len(scene_texts)):
+            txt = scene_texts[idx]
+            if txt:
+                norm_txt = " ".join(txt.lower().split())
+                if norm_txt in seen_texts:
+                    duplicate_warnings[idx] = "Duplicate narration text detected from earlier scene; audio generation skipped."
+                    scene_texts[idx] = ""
+                else:
+                    seen_texts.add(norm_txt)
+
+        # Step 4: Construct NarrationAsset instances
+        for idx, scene in enumerate(storyboard.scenes):
+            narration_text = scene_texts[idx]
+
+            # Derive unique asset ID
             clean_scene_id = scene.scene_id.replace("-", "_")
             asset_id = f"audio_{clean_scene_id}"
 
-            # 3. Classify status: empty text is SKIPPED
+            # Classify status: empty text is SKIPPED
             is_empty = not bool(narration_text)
             status = NarrationAssetStatus.SKIPPED if is_empty else NarrationAssetStatus.PENDING
-            warning = "No narration text provided for scene; audio generation skipped." if is_empty else None
+
+            if idx in duplicate_warnings:
+                warning = duplicate_warnings[idx]
+            elif is_empty:
+                warning = "No narration text provided for scene; audio generation skipped."
+            else:
+                warning = None
 
             rel_path = self._storage.get_relative_audio_path(job_id, asset_id, format="mp3") if not is_empty else None
 
@@ -120,7 +181,7 @@ class NarrationService:
     ) -> NarrationGenerationResult:
         """
         Executes narration audio synthesis for all scenes in the storyboard.
-        Reuses already completed audio assets unless refresh=True is specified.
+        Reuses already completed audio assets unless refresh=True is specified or narration text changed.
         Stores audio files, extracts measured durations, and computes synchronization metrics.
         """
         # Validate configuration upfront
@@ -142,24 +203,34 @@ class NarrationService:
                 updated_assets.append(asset)
                 continue
 
-            # 2. Check if already completed and readable on disk (reuse unless refresh)
-            if not refresh and self._storage.audio_file_exists(job_id, asset.asset_id, format=asset.format):
-                file_path = self._storage.get_audio_path(job_id, asset.asset_id, format=asset.format)
-                file_size = file_path.stat().st_size
-                measured_duration = self._storage.measure_audio_duration(file_path)
-                sync_info = self._analyze_scene_sync(
-                    expected_seconds=asset.expected_scene_duration_seconds,
-                    actual_seconds=measured_duration,
-                )
+            text_hash = hashlib.sha256(asset.narration_text.encode("utf-8")).hexdigest()[:16]
 
-                asset.status = NarrationAssetStatus.COMPLETED
-                asset.file_size_bytes = file_size
-                asset.duration_seconds = measured_duration
-                asset.duration_difference_seconds = sync_info.difference_seconds
-                asset.is_synchronized = (sync_info.status == "synced")
-                asset.sync_warning = sync_info.warning
-                updated_assets.append(asset)
-                continue
+            # 2. Check if already completed and readable on disk (reuse unless refresh or text changed)
+            if not refresh and self._storage.audio_file_exists(job_id, asset.asset_id, format=asset.format):
+                cached_meta = self._storage.get_audio_metadata(job_id, asset.asset_id)
+                meta_matches = (
+                    cached_meta is not None
+                    and cached_meta.get("text_hash") == text_hash
+                    and cached_meta.get("voice_id") == asset.voice_id
+                )
+                # If metadata exists and matches (or no metadata yet recorded for legacy file with same name), check reuse
+                if meta_matches or cached_meta is None:
+                    file_path = self._storage.get_audio_path(job_id, asset.asset_id, format=asset.format)
+                    file_size = file_path.stat().st_size
+                    measured_duration = self._storage.measure_audio_duration(file_path)
+                    sync_info = self._analyze_scene_sync(
+                        expected_seconds=asset.expected_scene_duration_seconds,
+                        actual_seconds=measured_duration,
+                    )
+
+                    asset.status = NarrationAssetStatus.COMPLETED
+                    asset.file_size_bytes = file_size
+                    asset.duration_seconds = measured_duration
+                    asset.duration_difference_seconds = sync_info.difference_seconds
+                    asset.is_synchronized = (sync_info.status == "synced")
+                    asset.sync_warning = sync_info.warning
+                    updated_assets.append(asset)
+                    continue
 
             # 3. Synthesize audio with ElevenLabs
             asset.status = NarrationAssetStatus.GENERATING
@@ -170,12 +241,22 @@ class NarrationService:
                     model_id=asset.model_id,
                 )
 
-                # 4. Save to isolated storage atomically
+                # 4. Save to isolated storage atomically with metadata
                 target_path = self._storage.save_audio(
                     job_id=job_id,
                     asset_id=asset.asset_id,
                     audio_bytes=audio_bytes,
                     format=asset.format,
+                )
+                self._storage.save_audio_metadata(
+                    job_id=job_id,
+                    asset_id=asset.asset_id,
+                    metadata={
+                        "text_hash": text_hash,
+                        "voice_id": asset.voice_id,
+                        "model_id": asset.model_id,
+                        "narration_text": asset.narration_text,
+                    },
                 )
 
                 # 5. Measure actual duration

@@ -393,6 +393,17 @@ class ScriptValidator:
         if not normalized_sections:
             raise ValueError("No valid script sections could be constructed from LLM output.")
 
+        if len(normalized_sections) < 3:
+            warnings.append(
+                f"Script contains only {len(normalized_sections)} section(s); recommended structure is 4 to 6 sections."
+            )
+
+        total_words = sum(len((s.get("narration_text") or "").split()) for s in normalized_sections)
+        if total_words < 100:
+            warnings.append(
+                f"Total spoken narration is brief ({total_words} words); recommended depth is 130–200 words."
+            )
+
         # Total duration consistency: align declared total to sum of section durations
         # while recording a warning if the LLM's declared total differed by more than tolerance.
         section_sum = round(sum(s["estimated_duration_seconds"] for s in normalized_sections), 2)

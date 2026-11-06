@@ -244,7 +244,28 @@ class StoryboardValidator:
                     d = 0.0
                 raw_durations.append(d if d > 0 else 1.0)
 
-            # Reconcile durations
+            # Reconcile durations and auto-distribute narration excerpts if multiple scenes share section
+            excerpts_provided = [
+                bool(sc.get("narration", {}).get("excerpt") if isinstance(sc.get("narration"), dict) else False)
+                for sc in sec_scenes
+            ]
+            auto_excerpts: List[Optional[str]] = [None] * m
+            if m > 1 and not any(excerpts_provided):
+                sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", sec.narration_text) if s.strip()]
+                if not sentences:
+                    sentences = [sec.narration_text]
+                if len(sentences) >= m:
+                    chunk = len(sentences) // m
+                    rem = len(sentences) % m
+                    cur = 0
+                    for i in range(m):
+                        extra = 1 if i < rem else 0
+                        auto_excerpts[i] = " ".join(sentences[cur : cur + chunk + extra])
+                        cur += chunk + extra
+                else:
+                    for i in range(m):
+                        auto_excerpts[i] = sentences[i] if i < len(sentences) else None
+
             if m == 1:
                 reconciled_durations = [sec_duration]
             else:
@@ -313,6 +334,8 @@ class StoryboardValidator:
                             )
                             excerpt_clean = None
                     excerpt = excerpt_clean
+                elif auto_excerpts[idx_in_sec] is not None:
+                    excerpt = auto_excerpts[idx_in_sec]
 
                 # Grounding: related files
                 valid_files: List[str] = []

@@ -7,6 +7,7 @@ of narration audio files isolated per job under storage/jobs/{job_id}/audio/.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -14,7 +15,7 @@ import shutil
 import subprocess
 import uuid
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, Optional
 
 from app.core.config import settings
 
@@ -151,6 +152,30 @@ class AudioAssetStorageManager:
                 shutil.rmtree(audio_dir)
         except Exception as e:
             logger.warning("Error cleaning up audio directory for job %s: %s", job_id, e)
+
+    def save_audio_metadata(self, job_id: str, asset_id: str, metadata: Dict[str, Any]) -> None:
+        """Stores a JSON sidecar file alongside the audio asset for cache validation."""
+        if not asset_id or not SAFE_FILENAME_RE.match(asset_id):
+            raise ValueError(f"Unsafe or invalid asset_id: '{asset_id}'")
+        meta_path = self.get_job_audio_dir(job_id) / f"{asset_id}.meta.json"
+        try:
+            with open(meta_path, "w", encoding="utf-8") as f:
+                json.dump(metadata, f)
+        except Exception as e:
+            logger.warning("Failed to write audio metadata for %s: %s", asset_id, e)
+
+    def get_audio_metadata(self, job_id: str, asset_id: str) -> Optional[Dict[str, Any]]:
+        """Retrieves the JSON sidecar metadata for an audio asset if it exists."""
+        if not asset_id or not SAFE_FILENAME_RE.match(asset_id):
+            return None
+        try:
+            meta_path = self.get_job_audio_dir(job_id) / f"{asset_id}.meta.json"
+            if meta_path.is_file():
+                with open(meta_path, "r", encoding="utf-8") as f:
+                    return json.load(f)
+        except Exception:
+            return None
+        return None
 
     def measure_audio_duration(self, file_path: Path) -> float:
         """

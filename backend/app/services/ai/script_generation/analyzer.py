@@ -347,7 +347,7 @@ class EducationalScriptAnalyzer:
                 )
                 raise _wrap_ai_error(err, default_provider=response.provider) from repair_exc
 
-        # 5. Optional controlled revision if total duration is outside target range
+        # 5. Optional controlled revision if section count, word count, or duration is outside target range
         revision_attempted = False
         if revise_on_duration_out_of_range and llm_call_count < 2:
             raw_sections = parsed_dict.get("sections") if isinstance(parsed_dict, dict) else None
@@ -356,12 +356,37 @@ class EducationalScriptAnalyzer:
                     est_sum = sum(float(s.get("estimated_duration_seconds") or 0) for s in raw_sections if isinstance(s, dict))
                 except (TypeError, ValueError):
                     est_sum = 0.0
+                total_words = sum(
+                    len(str(s.get("narration_text") or s.get("narration") or "").split())
+                    for s in raw_sections
+                    if isinstance(s, dict)
+                )
+
+                needs_revision = False
+                reasons: list[str] = []
+                if len(raw_sections) < 3:
+                    needs_revision = True
+                    reasons.append(
+                        f"Script contains only {len(raw_sections)} section(s); 4 to 6 sections are required."
+                    )
                 if est_sum > 0 and (est_sum < target.min_seconds or est_sum > target.max_seconds):
-                    revision_attempted = True
-                    reason = (
+                    needs_revision = True
+                    reasons.append(
                         f"Total duration {est_sum:.1f}s is outside target range "
                         f"{target.min_seconds:.0f}–{target.max_seconds:.0f}s."
                     )
+                elif est_sum <= 0:
+                    needs_revision = True
+                    reasons.append("Section durations could not be parsed.")
+                if total_words < 100:
+                    needs_revision = True
+                    reasons.append(
+                        f"Total word count of {total_words} words is below the minimum threshold of 120 words."
+                    )
+
+                if needs_revision:
+                    revision_attempted = True
+                    reason = " ".join(reasons)
                     rev_prompt = build_script_revision_prompt(
                         raw_script_dict=parsed_dict,
                         evidence_package=evidence_package,

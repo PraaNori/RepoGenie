@@ -657,3 +657,200 @@ def test_api_post_narration_success_and_file_stream(
             assert file_resp.status_code == 200
             assert file_resp.headers["content-type"] == "audio/mpeg"
             assert len(file_resp.content) == len(mock_audio)
+
+
+@pytest.mark.anyio
+async def test_multi_scene_shared_section_sentence_distribution_no_duplicate_text(tmp_path: Path):
+    """
+    Verifies that when multiple scenes share a single script section without individual excerpts,
+    the narration service distributes sentences across scenes rather than copying the full text.
+    """
+    script = EducationalScript(
+        script_id="script-flask",
+        repository_name="pallets/flask",
+        title="Understanding Flask",
+        introduction="An introduction to Flask.",
+        learning_objectives=["Understand Flask WSGI"],
+        total_estimated_duration_seconds=60.0,
+        conclusion="Flask wraps WSGI cleanly.",
+        sections=[
+            ScriptSection(
+                section_id="sec-1",
+                order=1,
+                title="WSGI and Request Context",
+                purpose=SectionPurpose.INTRODUCTION,
+                narration_text=(
+                    "Flask is a lightweight WSGI web application framework in Python. "
+                    "It routes incoming HTTP requests through an application context. "
+                    "Finally, it executes the view function and returns a response."
+                ),
+                estimated_duration_seconds=60.0,
+            )
+        ],
+    )
+
+    storyboard = EducationalStoryboard(
+        storyboard_id="sb-flask",
+        script_id="script-flask",
+        title="Flask Storyboard",
+        total_estimated_duration_seconds=60.0,
+        scenes=[
+            StoryboardScene(
+                scene_id="scene-1",
+                scene_number=1,
+                script_section_id="sec-1",
+                title="Introduction",
+                purpose="Hook",
+                estimated_duration_seconds=20.0,
+                visual_type=VisualType.TITLE_CARD,
+                visual_description="Title view",
+                narration=NarrationReference(script_section_id="sec-1", excerpt=None),
+            ),
+            StoryboardScene(
+                scene_id="scene-2",
+                scene_number=2,
+                script_section_id="sec-1",
+                title="Routing and Context",
+                purpose="Context",
+                estimated_duration_seconds=20.0,
+                visual_type=VisualType.ARCHITECTURE_DIAGRAM,
+                visual_description="Context view",
+                narration=NarrationReference(script_section_id="sec-1", excerpt=None),
+            ),
+            StoryboardScene(
+                scene_id="scene-3",
+                scene_number=3,
+                script_section_id="sec-1",
+                title="Response Dispatch",
+                purpose="Dispatch",
+                estimated_duration_seconds=20.0,
+                visual_type=VisualType.WORKFLOW_DIAGRAM,
+                visual_description="Dispatch view",
+                narration=NarrationReference(script_section_id="sec-1", excerpt=None),
+            ),
+        ],
+    )
+
+    storage = AudioAssetStorageManager(base_storage_dir=str(tmp_path))
+    provider = MagicMock(spec=ElevenLabsTTSProvider)
+    provider.voice_id = "test-voice"
+    provider.model_id = "test-model"
+
+    service = NarrationService(provider=provider, storage=storage)
+    plan = service.initialize_narration_plan("job-distrib", storyboard, script=script)
+
+    assert len(plan.assets) == 3
+    texts = [a.narration_text for a in plan.assets]
+
+    # Every scene must receive distinct text
+    assert len(set(texts)) == 3
+    for txt in texts:
+        assert len(txt) > 0
+    # None of the scenes should have received the entire 3-sentence script
+    for txt in texts:
+        assert txt != script.sections[0].narration_text
+
+
+@pytest.mark.anyio
+async def test_exact_duplicate_narration_text_cleared_to_avoid_redundant_synthesis(tmp_path: Path):
+    """
+    Verifies that if multiple storyboard scenes provide identical narration excerpts,
+    subsequent duplicate scenes are cleared and marked SKIPPED.
+    """
+    storyboard = EducationalStoryboard(
+        storyboard_id="sb-dup",
+        script_id="script-dup",
+        title="Duplicate Test Storyboard",
+        total_estimated_duration_seconds=30.0,
+        scenes=[
+            StoryboardScene(
+                scene_id="scene-1",
+                scene_number=1,
+                script_section_id="sec-1",
+                title="Scene 1",
+                purpose="Intro",
+                estimated_duration_seconds=15.0,
+                visual_type=VisualType.TITLE_CARD,
+                visual_description="Title view",
+                narration=NarrationReference(script_section_id="sec-1", excerpt="Identical narration text here."),
+            ),
+            StoryboardScene(
+                scene_id="scene-2",
+                scene_number=2,
+                script_section_id="sec-1",
+                title="Scene 2",
+                purpose="Duplicate",
+                estimated_duration_seconds=15.0,
+                visual_type=VisualType.ARCHITECTURE_DIAGRAM,
+                visual_description="Arch view",
+                narration=NarrationReference(script_section_id="sec-1", excerpt="Identical narration text here."),
+            ),
+        ],
+    )
+
+    storage = AudioAssetStorageManager(base_storage_dir=str(tmp_path))
+    provider = MagicMock(spec=ElevenLabsTTSProvider)
+    provider.voice_id = "test-voice"
+    provider.model_id = "test-model"
+
+    service = NarrationService(provider=provider, storage=storage)
+    plan = service.initialize_narration_plan("job-dup-test", storyboard)
+
+    assert plan.assets[0].status == NarrationAssetStatus.PENDING
+    assert plan.assets[0].narration_text == "Identical narration text here."
+    assert plan.assets[1].status == NarrationAssetStatus.SKIPPED
+    assert plan.assets[1].narration_text == ""
+    assert "Duplicate narration text" in (plan.assets[1].sync_warning or "")
+
+
+@pytest.mark.anyio
+async def test_narration_cache_invalidated_when_text_changes(tmp_path: Path):
+    """
+    Verifies that changing narration text invalidates the audio cache and forces re-synthesis.
+    """
+    def make_sb(text: str) -> EducationalStoryboard:
+        return EducationalStoryboard(
+            storyboard_id="sb-cache",
+            script_id="script-cache",
+            title="Cache Invalidation Test",
+            total_estimated_duration_seconds=15.0,
+            scenes=[
+                StoryboardScene(
+                    scene_id="scene-1",
+                    scene_number=1,
+                    script_section_id="sec-1",
+                    title="Scene 1",
+                    purpose="Intro",
+                    estimated_duration_seconds=15.0,
+                    visual_type=VisualType.TITLE_CARD,
+                    visual_description="Title view",
+                    narration=NarrationReference(script_section_id="sec-1", excerpt=text),
+                ),
+            ],
+        )
+
+    storage = AudioAssetStorageManager(base_storage_dir=str(tmp_path))
+    provider = MagicMock(spec=ElevenLabsTTSProvider)
+    provider.voice_id = "test-voice"
+    provider.model_id = "test-model"
+    provider.validate_configuration = MagicMock(return_value=None)
+    mock_audio = create_valid_mp3_bytes(num_frames=20)
+    provider.synthesize = AsyncMock(return_value=mock_audio)
+
+    service = NarrationService(provider=provider, storage=storage)
+
+    # First run with initial text
+    res1 = await service.generate_narration_for_job("job-cache-test", make_sb("Initial narration text."))
+    assert res1.status.value == "completed"
+    assert provider.synthesize.call_count == 1
+
+    # Second run with same text (should reuse from disk)
+    res2 = await service.generate_narration_for_job("job-cache-test", make_sb("Initial narration text."))
+    assert res2.status.value == "completed"
+    assert provider.synthesize.call_count == 1  # Not called again
+
+    # Third run with modified text (cache should be invalidated and synthesize called)
+    res3 = await service.generate_narration_for_job("job-cache-test", make_sb("Updated narration text."))
+    assert res3.status.value == "completed"
+    assert provider.synthesize.call_count == 2  # Synthesized newly!
+

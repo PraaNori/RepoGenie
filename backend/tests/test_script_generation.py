@@ -1564,3 +1564,110 @@ def test_wrap_ai_error_mro_with_base_aierror():
     assert isinstance(sb_wrapped_sub, AIInvalidResponseError)
 
 
+@pytest.mark.anyio
+async def test_script_revision_triggered_on_short_sections_count():
+    """
+    Verifies that when LLM returns only 1 section and revise_on_duration_out_of_range=True,
+    the analyzer initiates a revision pass to expand the script into 4-6 sections.
+    """
+    # First response: single brief 1-section script (38 words, ~16s)
+    short_payload = {
+        "script_id": "script-flask",
+        "repository_name": "pallets/flask",
+        "title": "Brief Flask Overview",
+        "introduction": "Flask is a web framework.",
+        "learning_objectives": ["Understand Flask"],
+        "total_estimated_duration_seconds": 16.0,
+        "sections": [
+            {
+                "section_id": "sec-1",
+                "order": 1,
+                "title": "Introduction",
+                "purpose": "hook",
+                "narration_text": "Flask is a lightweight WSGI web application framework designed to make getting started quick and easy.",
+                "estimated_duration_seconds": 16.0,
+                "evidence_ids": ["PROJ-IDENTITY"],
+                "claims": [
+                    {
+                        "statement": "Flask is a lightweight WSGI web framework",
+                        "grounding_status": "confirmed",
+                        "evidence_ids": ["PROJ-IDENTITY"],
+                    }
+                ],
+                "transition_to_next": None,
+            }
+        ],
+        "conclusion": "Flask is simple.",
+    }
+
+    # Second response (after revision): valid 4-section educational script
+    revised_payload = make_valid_llm_script_dict()
+
+    mock_llm = AsyncMock(spec=LLMManager)
+    mock_llm.active_provider_name = "groq"
+    mock_llm.generate = AsyncMock(
+        side_effect=[
+            LLMResponse(text=json.dumps(short_payload), provider="groq", model="test-model"),
+            LLMResponse(text=json.dumps(revised_payload), provider="groq", model="test-model"),
+        ]
+    )
+
+    analyzer = EducationalScriptAnalyzer(llm_manager=mock_llm)
+    script = await analyzer.generate_script(
+        job_id="job-short-rev",
+        knowledge=make_repository_knowledge(),
+        project_understanding=make_project_understanding(),
+        revise_on_duration_out_of_range=True,
+    )
+
+    assert mock_llm.generate.call_count == 2
+    assert len(script.sections) >= 4
+    assert script.metadata.revision_attempted is True
+
+
+def test_script_validator_records_warning_on_brief_or_low_section_count():
+    """
+    Verifies that the validator flags scripts with fewer than 3 sections or brief narration.
+    """
+    raw_dict = {
+        "script_id": "script-flask-warn",
+        "repository_name": "pallets/flask",
+        "title": "Brief Flask",
+        "introduction": "Intro",
+        "learning_objectives": ["Objective"],
+        "total_estimated_duration_seconds": 16.0,
+        "sections": [
+            {
+                "section_id": "sec-1",
+                "order": 1,
+                "title": "Single Section",
+                "purpose": "hook",
+                "narration_text": "Short 10 words narration text for testing warnings in validator.",
+                "estimated_duration_seconds": 16.0,
+                "evidence_ids": ["PROJ-IDENTITY"],
+                "claims": [],
+                "transition_to_next": None,
+            }
+        ],
+        "conclusion": "End",
+    }
+
+    builder = ScriptEvidenceBuilder()
+    pkg = builder.build_evidence_package(
+        knowledge=make_repository_knowledge(),
+        project_understanding=make_project_understanding(),
+    )
+
+    validator = ScriptValidator()
+    normalized = validator.normalize_and_ground_raw_script(
+        raw_dict=raw_dict,
+        evidence_package=pkg,
+        knowledge=make_repository_knowledge(),
+    )
+
+    warnings = normalized.get("validation_warnings", [])
+    assert any("recommended structure is 4 to 6 sections" in w for w in warnings)
+    assert any("Total spoken narration is brief" in w for w in warnings)
+
+
+

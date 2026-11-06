@@ -300,9 +300,10 @@ export default function NarrationCard({
                             Audio Preview ({asset.duration_seconds}s • {Math.round(asset.file_size_bytes / 1024)} KB)
                           </div>
                           <audio
+                            key={`${jobId}-${asset.asset_id}`}
                             controls
                             src={getNarrationAudioUrl(jobId, asset.asset_id)}
-                            preload="none"
+                            preload="metadata"
                             className="w-full h-8"
                           />
                         </div>

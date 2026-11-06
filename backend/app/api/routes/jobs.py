@@ -879,6 +879,7 @@ async def generate_job_educational_script(
                 workflow_understanding=internal.workflow_understanding,
                 provider_name=provider,
                 local_path=internal.local_path,
+                revise_on_duration_out_of_range=True,
             )
             job_store.update_job_educational_script_success(job_id, script)
             return script

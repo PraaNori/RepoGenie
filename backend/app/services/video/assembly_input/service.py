@@ -272,13 +272,19 @@ class AssemblyInputService:
                 if getattr(vis_asset, "storage_path", None):
                     filename = Path(vis_asset.storage_path).name
                     file_format = filename.split(".")[-1].lower()
-                    vis_path = visual_storage_manager.get_job_visuals_dir(job_id) / filename
                     rel_path = vis_asset.storage_path
+                    if self._validator._custom_base:
+                        vis_path = self._validator.base_dir / rel_path
+                    else:
+                        vis_path = visual_storage_manager.get_job_visuals_dir(job_id) / filename
                 else:
                     filename = f"{asset_id}.svg"
                     file_format = "svg"
-                    vis_path = visual_storage_manager.get_job_visuals_dir(job_id) / filename
                     rel_path = visual_storage_manager.get_relative_asset_path(job_id, filename)
+                    if self._validator._custom_base:
+                        vis_path = self._validator.base_dir / rel_path
+                    else:
+                        vis_path = visual_storage_manager.get_job_visuals_dir(job_id) / filename
 
                 if getattr(vis_asset, "status", None) == VisualAssetStatus.FAILED:
                     valid = False
@@ -304,7 +310,10 @@ class AssemblyInputService:
             if not is_silent:
                 if narr_asset:
                     asset_id = narr_asset.asset_id
-                    audio_path = audio_storage_manager.get_audio_path(job_id, asset_id, format="mp3")
+                    if self._validator._custom_base and narr_asset.file_path:
+                        audio_path = self._validator.base_dir / narr_asset.file_path
+                    else:
+                        audio_path = audio_storage_manager.get_audio_path(job_id, asset_id, format="mp3")
                     if narr_asset.status == NarrationAssetStatus.FAILED:
                         valid = False
                         err = f"Narration audio for scene {scene.scene_number} failed: {narr_asset.error_message or 'Synthesis failed'}"
@@ -343,8 +352,15 @@ class AssemblyInputService:
                     )
                 if cap_asset:
                     cap_id = cap_asset.asset_id
-                    srt_path = caption_storage_manager.get_caption_path(job_id, cap_id, format="srt")
-                    vtt_path = caption_storage_manager.get_caption_path(job_id, cap_id, format="vtt")
+                    if self._validator._custom_base and getattr(cap_asset, "srt_file_path", None):
+                        srt_path = self._validator.base_dir / cap_asset.srt_file_path
+                    else:
+                        srt_path = caption_storage_manager.get_caption_path(job_id, cap_id, format="srt")
+
+                    if self._validator._custom_base and getattr(cap_asset, "vtt_file_path", None):
+                        vtt_path = self._validator.base_dir / cap_asset.vtt_file_path
+                    else:
+                        vtt_path = caption_storage_manager.get_caption_path(job_id, cap_id, format="vtt")
 
                     if getattr(cap_asset, "status", None) == CaptionStatus.FAILED:
                         srt_valid = False
@@ -403,18 +419,39 @@ class AssemblyInputService:
         # --- 4. Full-video Composite Subtitle Tracks ---
         full_srt_ref: Optional[AssemblyAssetReference] = None
         full_vtt_ref: Optional[AssemblyAssetReference] = None
-        has_srt_track = bool(
+
+        rel_srt = (
             getattr(captions, "full_srt_file_path", None)
             or getattr(captions, "full_video_srt_path", None)
-            or (captions and caption_storage_manager.caption_file_exists(job_id, "full_video", format="srt"))
+            or caption_storage_manager.get_relative_caption_path(job_id, "full_video", format="srt")
         )
+        if self._validator._custom_base:
+            srt_candidate_path = self._validator.base_dir / rel_srt
+            if not srt_candidate_path.is_file():
+                # Check "full.srt" fallback
+                alt_rel = caption_storage_manager.get_relative_caption_path(job_id, "full", format="srt")
+                if (self._validator.base_dir / alt_rel).is_file():
+                    rel_srt = alt_rel
+                    srt_candidate_path = self._validator.base_dir / alt_rel
+            has_srt_track = bool(captions and srt_candidate_path.is_file())
+            srt_path = srt_candidate_path
+        else:
+            has_srt_track = bool(
+                getattr(captions, "full_srt_file_path", None)
+                or getattr(captions, "full_video_srt_path", None)
+                or (captions and caption_storage_manager.caption_file_exists(job_id, "full_video", format="srt"))
+                or (captions and caption_storage_manager.caption_file_exists(job_id, "full", format="srt"))
+            )
+            if not caption_storage_manager.caption_file_exists(job_id, "full_video", format="srt") and caption_storage_manager.caption_file_exists(job_id, "full", format="srt"):
+                rel_srt = caption_storage_manager.get_relative_caption_path(job_id, "full", format="srt")
+            srt_path = caption_storage_manager.base_dir / rel_srt
+
         if captions and has_srt_track:
-            srt_path = caption_storage_manager.get_caption_path(job_id, "full_video", format="srt")
             srt_valid, srt_err, srt_size = self._validator.validate_caption_file(srt_path, format="srt")
             full_srt_ref = AssemblyAssetReference(
                 asset_id="full_video",
                 asset_type="full_video_srt",
-                relative_path=caption_storage_manager.get_relative_caption_path(job_id, "full_video", format="srt"),
+                relative_path=rel_srt,
                 file_format="srt",
                 file_size_bytes=srt_size,
                 duration_seconds=round(cumulative_time, 3),
@@ -422,18 +459,38 @@ class AssemblyInputService:
                 validation_error=srt_err,
             )
 
-        has_vtt_track = bool(
+        rel_vtt = (
             getattr(captions, "full_vtt_file_path", None)
             or getattr(captions, "full_video_vtt_path", None)
-            or (captions and caption_storage_manager.caption_file_exists(job_id, "full_video", format="vtt"))
+            or caption_storage_manager.get_relative_caption_path(job_id, "full_video", format="vtt")
         )
+        if self._validator._custom_base:
+            vtt_candidate_path = self._validator.base_dir / rel_vtt
+            if not vtt_candidate_path.is_file():
+                # Check "full.vtt" fallback
+                alt_rel_vtt = caption_storage_manager.get_relative_caption_path(job_id, "full", format="vtt")
+                if (self._validator.base_dir / alt_rel_vtt).is_file():
+                    rel_vtt = alt_rel_vtt
+                    vtt_candidate_path = self._validator.base_dir / alt_rel_vtt
+            has_vtt_track = bool(captions and vtt_candidate_path.is_file())
+            vtt_path = vtt_candidate_path
+        else:
+            has_vtt_track = bool(
+                getattr(captions, "full_vtt_file_path", None)
+                or getattr(captions, "full_video_vtt_path", None)
+                or (captions and caption_storage_manager.caption_file_exists(job_id, "full_video", format="vtt"))
+                or (captions and caption_storage_manager.caption_file_exists(job_id, "full", format="vtt"))
+            )
+            if not caption_storage_manager.caption_file_exists(job_id, "full_video", format="vtt") and caption_storage_manager.caption_file_exists(job_id, "full", format="vtt"):
+                rel_vtt = caption_storage_manager.get_relative_caption_path(job_id, "full", format="vtt")
+            vtt_path = caption_storage_manager.base_dir / rel_vtt
+
         if captions and has_vtt_track:
-            vtt_path = caption_storage_manager.get_caption_path(job_id, "full_video", format="vtt")
             vtt_valid, vtt_err, vtt_size = self._validator.validate_caption_file(vtt_path, format="vtt")
             full_vtt_ref = AssemblyAssetReference(
                 asset_id="full_video",
                 asset_type="full_video_vtt",
-                relative_path=caption_storage_manager.get_relative_caption_path(job_id, "full_video", format="vtt"),
+                relative_path=rel_vtt,
                 file_format="vtt",
                 file_size_bytes=vtt_size,
                 duration_seconds=round(cumulative_time, 3),

@@ -24,9 +24,10 @@ from .schemas import (
 
 NARRATIVE_PROFILE_GUIDANCE: Dict[str, str] = {
     "library": (
-        "This repository is a reusable software library or package. Focus the storyline on the "
-        "developer problem it solves, its public abstractions, internal design of its core modules, "
-        "and how a caller invokes its primary workflow."
+        "This repository is a reusable software library, package, or framework. Focus the storyline on the "
+        "developer problem it solves, its public abstractions, internal architecture (e.g. core classes, "
+        "dispatch mechanisms, context management, or pipelines), how its key components collaborate, and "
+        "how a caller or request moves through its primary execution workflow."
     ),
     "cli_tool": (
         "This repository is a command-line tool. Focus the storyline on its purpose, command entry point, "
@@ -83,15 +84,19 @@ CRITICAL GROUNDING & ANTI-HALLUCINATION RULES:
    - Do NOT read raw file paths (such as `src/click/core.py` or `backend/app/main.py`) or raw function signatures aloud in `narration_text`. Refer to components by their human-readable names or roles, and keep file paths inside structured references.
    - Avoid unexplained jargon, repeated introductions, generic filler that could apply to any repo, or laundry lists of technologies without explaining their role in the project.
    - Do NOT explain every file or function. Select the most meaningful 2–4 components and 1–2 workflows that form one coherent educational story.
-5. DURATION & PACING:
+5. DURATION, PACING & MANDATORY SECTION COUNT:
    - Target total duration: 60–90 seconds (aim for ~70–80 seconds).
    - Speaking rate assumption: 150 words per minute (~2.5 words per second; comfortable range 110–180 wpm).
-   - A 75-second script should contain roughly 175–195 spoken words across all sections.
-   - For each section, match `narration_text` word count to `estimated_duration_seconds` (~2.2–2.7 words per second).
+   - A 75-second script MUST contain roughly 140–200 spoken words across all sections.
+   - You MUST generate 4 to 6 distinct sections (minimum 3 sections required). A single-section or two-section script is strictly prohibited.
+   - For each section, match `narration_text` word count to `estimated_duration_seconds` (~2.2–2.7 words per second; ~35–45 words for a 15–18s section).
    - `total_estimated_duration_seconds` MUST equal the exact sum of `estimated_duration_seconds` across all sections.
 6. ADAPTIVE NARRATIVE STRUCTURE:
-   - Use between 3 and 6 sections depending on what the repository evidence supports. Do not force six sections if a repository is small or lacks workflow evidence.
-   - Suggested progression: hook/introduction -> problem addressed -> architecture & key technologies -> important components -> workflow/data flow -> conclusion.
+   - Provide 4 to 5 progressive sections:
+     1. Hook / Introduction: problem solved and core identity.
+     2. Architecture & Technologies: foundational stack and architectural design.
+     3. Core Workflow / Request Handling: how execution moves through key components.
+     4. Key Components / Implementation & Takeaway: critical abstractions and educational summary.
    - Include a natural `transition_to_next` on every section except the final section.
 7. OUTPUT FORMAT:
    - Keep internal reasoning minimal (do not draft the script in reasoning first); emit the compact JSON object immediately so it finishes well within the token budget.
@@ -104,8 +109,9 @@ NARRATIVE PROFILE GUIDANCE ({narrative_profile}):
 {profile_guidance}
 
 TARGET SPECIFICATION:
-- Duration range: {min_duration:.0f}–{max_duration:.0f} seconds (aim for ~70 seconds across 4 sections)
+- Duration range: {min_duration:.0f}–{max_duration:.0f} seconds (aim for ~70–75 seconds across 4 sections)
 - Speaking rate: {wpm:.0f} words per minute (comfortable range {min_wpm:.0f}–{max_wpm:.0f} wpm; ~{target_words_min}–{target_words_max} words total)
+- Section count: You MUST produce 4 to 6 sections. A 1-section or 2-section script is strictly prohibited.
 - Video format: Landscape 16:9
 - Audience: Developers and students
 
@@ -131,19 +137,70 @@ REQUIRED OUTPUT JSON SCHEMA (emit compact JSON immediately):
     {{
       "section_id": "sec-1-hook",
       "order": 1,
-      "title": "<Section title>",
-      "purpose": "<hook | introduction | problem | architecture_overview | technology_overview | component_deep_dive | workflow | data_flow | conclusion>",
-      "narration_text": "<Natural spoken narration of ~35-45 words for a 15-18s section, without reading raw file paths aloud>",
+      "title": "Introduction & Core Problem",
+      "purpose": "hook",
+      "narration_text": "<Spoken hook of ~35-45 words explaining what developer problem this project solves and why it matters.>",
       "estimated_duration_seconds": 16.0,
       "evidence_ids": ["PROJ-IDENTITY", "PROJ-PROBLEM"],
       "claims": [
         {{
-          "statement": "<Concise factual claim made in this section>",
-          "grounding_status": "<confirmed | inferred | uncertain>",
+          "statement": "<Concise factual claim grounded in evidence>",
+          "grounding_status": "confirmed",
           "evidence_ids": ["PROJ-IDENTITY"]
         }}
       ],
-      "transition_to_next": "<Short spoken bridge to the next section, or null on the final section>"
+      "transition_to_next": "Let us take a closer look at the architecture and underlying technologies."
+    }},
+    {{
+      "section_id": "sec-2-arch",
+      "order": 2,
+      "title": "Architecture & Core Stack",
+      "purpose": "architecture_overview",
+      "narration_text": "<Spoken explanation of ~35-45 words detailing the core architectural design and key technologies.>",
+      "estimated_duration_seconds": 18.0,
+      "evidence_ids": ["TECH-1", "COMP-1"],
+      "claims": [
+        {{
+          "statement": "<Architectural claim grounded in evidence>",
+          "grounding_status": "confirmed",
+          "evidence_ids": ["TECH-1"]
+        }}
+      ],
+      "transition_to_next": "Next, let us see how execution and control flow through the system."
+    }},
+    {{
+      "section_id": "sec-3-workflow",
+      "order": 3,
+      "title": "Primary Execution Workflow",
+      "purpose": "workflow",
+      "narration_text": "<Spoken walkthrough of ~40-50 words explaining how a primary request or command flows through the core components.>",
+      "estimated_duration_seconds": 20.0,
+      "evidence_ids": ["WF-1", "COMP-1"],
+      "claims": [
+        {{
+          "statement": "<Workflow step claim grounded in evidence>",
+          "grounding_status": "inferred",
+          "evidence_ids": ["WF-1"]
+        }}
+      ],
+      "transition_to_next": "Finally, let us review the key implementation highlights."
+    }},
+    {{
+      "section_id": "sec-4-conclusion",
+      "order": 4,
+      "title": "Key Implementation Highlights",
+      "purpose": "conclusion",
+      "narration_text": "<Spoken conclusion of ~35-45 words summarizing the core abstractions, developer benefits, and key architectural takeaways.>",
+      "estimated_duration_seconds": 16.0,
+      "evidence_ids": ["COMP-1", "PROJ-IDENTITY"],
+      "claims": [
+        {{
+          "statement": "<Summary claim grounded in evidence>",
+          "grounding_status": "confirmed",
+          "evidence_ids": ["PROJ-IDENTITY"]
+        }}
+      ],
+      "transition_to_next": null
     }}
   ],
   "conclusion": "<1-2 sentence takeaway summarizing what the viewer learned>",
@@ -171,6 +228,8 @@ Issue to correct: {reason}
 Target specification:
 - Total duration: {min_duration:.0f}–{max_duration:.0f} seconds
 - Speaking rate: {wpm:.0f} wpm (comfortable range {min_wpm:.0f}–{max_wpm:.0f} wpm)
+- Section count: 4 to 6 distinct sections (scripts with fewer than 3 sections are INVALID)
+- Total word count: at least 130 words (~140–190 words total across all sections)
 - Each section's `estimated_duration_seconds` must match its `narration_text` word count at ~2.5 words/second, and `total_estimated_duration_seconds` must equal the sum of section durations.
 
 Current script JSON:
