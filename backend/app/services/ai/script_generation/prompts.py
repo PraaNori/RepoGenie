@@ -84,20 +84,26 @@ CRITICAL GROUNDING & ANTI-HALLUCINATION RULES:
    - Do NOT read raw file paths (such as `src/click/core.py` or `backend/app/main.py`) or raw function signatures aloud in `narration_text`. Refer to components by their human-readable names or roles, and keep file paths inside structured references.
    - Avoid unexplained jargon, repeated introductions, generic filler that could apply to any repo, or laundry lists of technologies without explaining their role in the project.
    - Do NOT explain every file or function. Select the most meaningful 2–4 components and 1–2 workflows that form one coherent educational story.
-5. DURATION, PACING & MANDATORY SECTION COUNT:
+5. DURATION, PACING & MANDATORY 5-SECTION STRUCTURE:
    - Target total duration: 60–90 seconds (aim for ~70–80 seconds).
    - Speaking rate assumption: 150 words per minute (~2.5 words per second; comfortable range 110–180 wpm).
-   - A 75-second script MUST contain roughly 140–200 spoken words across all sections.
-   - You MUST generate 4 to 6 distinct sections (minimum 3 sections required). A single-section or two-section script is strictly prohibited.
-   - For each section, match `narration_text` word count to `estimated_duration_seconds` (~2.2–2.7 words per second; ~35–45 words for a 15–18s section).
-   - `total_estimated_duration_seconds` MUST equal the exact sum of `estimated_duration_seconds` across all sections.
-6. ADAPTIVE NARRATIVE STRUCTURE:
-   - Provide 4 to 5 progressive sections:
-     1. Hook / Introduction: problem solved and core identity.
-     2. Architecture & Technologies: foundational stack and architectural design.
-     3. Core Workflow / Request Handling: how execution moves through key components.
-     4. Key Components / Implementation & Takeaway: critical abstractions and educational summary.
-   - Include a natural `transition_to_next` on every section except the final section.
+   - A 75-second script MUST contain roughly 150–200 spoken words across all sections.
+   - MANDATORY 5 SECTIONS REQUIRED: You MUST generate EXACTLY 5 distinct, sequential sections. Scripts with fewer than 5 sections (such as 1, 2, 3, or 4 sections) or more than 5 sections are strictly prohibited.
+   - For each section, match `narration_text` word count to `estimated_duration_seconds` (~2.2–2.7 words per second; ~35–45 words for a 14–18s section).
+   - `total_estimated_duration_seconds` MUST equal the exact sum of `estimated_duration_seconds` across all 5 sections.
+6. MANDATORY 5-SECTION PEDAGOGICAL SEQUENCE:
+   You MUST provide EXACTLY these 5 sequential sections in order:
+     Section 1 (sec-1-hook): Introduction & Core Problem (purpose: 'hook')
+       Introduce the repository, developer problem solved, and core value proposition (~14–16s, ~35–45 words).
+     Section 2 (sec-2-architecture): System Architecture & Core Stack (purpose: 'architecture_overview')
+       Detail the foundational stack, structural layers, and architectural patterns (~14–16s, ~35–45 words).
+     Section 3 (sec-3-components): Key Components & Subsystem Deep-Dive (purpose: 'component_deep_dive')
+       Inspect primary abstractions, module interfaces, and core responsibilities (~16–18s, ~40–50 words).
+     Section 4 (sec-4-workflow): Primary Execution Workflow & Data Flow (purpose: 'workflow')
+       Walk through how a primary request or command flows across components and transforms data (~16–18s, ~40–50 words).
+     Section 5 (sec-5-conclusion): Summary, Key Takeaways & Best Practices (purpose: 'conclusion')
+       Summarize modular strengths, architectural design highlights, and main takeaways (~10–14s, ~25–35 words).
+   - Include a natural `transition_to_next` on sections 1, 2, 3, and 4. Section 5 MUST have `transition_to_next: null`.
 7. OUTPUT FORMAT:
    - Keep internal reasoning minimal (do not draft the script in reasoning first); emit the compact JSON object immediately so it finishes well within the token budget.
    - Return ONLY a single valid JSON object matching the required schema. No markdown prose outside the JSON block.
@@ -109,9 +115,9 @@ NARRATIVE PROFILE GUIDANCE ({narrative_profile}):
 {profile_guidance}
 
 TARGET SPECIFICATION:
-- Duration range: {min_duration:.0f}–{max_duration:.0f} seconds (aim for ~70–75 seconds across 4 sections)
+- Duration range: {min_duration:.0f}–{max_duration:.0f} seconds (aim for ~75 seconds across EXACTLY 5 sections)
 - Speaking rate: {wpm:.0f} words per minute (comfortable range {min_wpm:.0f}–{max_wpm:.0f} wpm; ~{target_words_min}–{target_words_max} words total)
-- Section count: You MUST produce 4 to 6 sections. A 1-section or 2-section script is strictly prohibited.
+- Section count: You MUST produce EXACTLY 5 sections (`sec-1-hook`, `sec-2-architecture`, `sec-3-components`, `sec-4-workflow`, `sec-5-conclusion`). A 2-section, 3-section, or 4-section script is strictly prohibited.
 - Video format: Landscape 16:9
 - Audience: Developers and students
 
@@ -132,7 +138,7 @@ REQUIRED OUTPUT JSON SCHEMA (emit compact JSON immediately):
     "<Specific learning objective 1>",
     "<Specific learning objective 2>"
   ],
-  "total_estimated_duration_seconds": 70.0,
+  "total_estimated_duration_seconds": 75.0,
   "sections": [
     {{
       "section_id": "sec-1-hook",
@@ -140,7 +146,7 @@ REQUIRED OUTPUT JSON SCHEMA (emit compact JSON immediately):
       "title": "Introduction & Core Problem",
       "purpose": "hook",
       "narration_text": "<Spoken hook of ~35-45 words explaining what developer problem this project solves and why it matters.>",
-      "estimated_duration_seconds": 16.0,
+      "estimated_duration_seconds": 15.0,
       "evidence_ids": ["PROJ-IDENTITY", "PROJ-PROBLEM"],
       "claims": [
         {{
@@ -152,12 +158,12 @@ REQUIRED OUTPUT JSON SCHEMA (emit compact JSON immediately):
       "transition_to_next": "Let us take a closer look at the architecture and underlying technologies."
     }},
     {{
-      "section_id": "sec-2-arch",
+      "section_id": "sec-2-architecture",
       "order": 2,
       "title": "Architecture & Core Stack",
       "purpose": "architecture_overview",
       "narration_text": "<Spoken explanation of ~35-45 words detailing the core architectural design and key technologies.>",
-      "estimated_duration_seconds": 18.0,
+      "estimated_duration_seconds": 15.0,
       "evidence_ids": ["TECH-1", "COMP-1"],
       "claims": [
         {{
@@ -166,15 +172,32 @@ REQUIRED OUTPUT JSON SCHEMA (emit compact JSON immediately):
           "evidence_ids": ["TECH-1"]
         }}
       ],
-      "transition_to_next": "Next, let us see how execution and control flow through the system."
+      "transition_to_next": "Next, let us dive into the core components that drive this implementation."
     }},
     {{
-      "section_id": "sec-3-workflow",
+      "section_id": "sec-3-components",
       "order": 3,
-      "title": "Primary Execution Workflow",
+      "title": "Key Components & Subsystems",
+      "purpose": "component_deep_dive",
+      "narration_text": "<Spoken deep-dive of ~40-50 words explaining key modules, primary abstractions, and their responsibilities.>",
+      "estimated_duration_seconds": 17.0,
+      "evidence_ids": ["COMP-1", "COMP-2"],
+      "claims": [
+        {{
+          "statement": "<Component capability claim grounded in evidence>",
+          "grounding_status": "confirmed",
+          "evidence_ids": ["COMP-1"]
+        }}
+      ],
+      "transition_to_next": "Now, let us trace how execution and data flow through these components."
+    }},
+    {{
+      "section_id": "sec-4-workflow",
+      "order": 4,
+      "title": "Primary Execution Workflow & Data Flow",
       "purpose": "workflow",
       "narration_text": "<Spoken walkthrough of ~40-50 words explaining how a primary request or command flows through the core components.>",
-      "estimated_duration_seconds": 20.0,
+      "estimated_duration_seconds": 16.0,
       "evidence_ids": ["WF-1", "COMP-1"],
       "claims": [
         {{
@@ -183,15 +206,15 @@ REQUIRED OUTPUT JSON SCHEMA (emit compact JSON immediately):
           "evidence_ids": ["WF-1"]
         }}
       ],
-      "transition_to_next": "Finally, let us review the key implementation highlights."
+      "transition_to_next": "Finally, let us review the key architectural takeaways and summary."
     }},
     {{
-      "section_id": "sec-4-conclusion",
-      "order": 4,
-      "title": "Key Implementation Highlights",
+      "section_id": "sec-5-conclusion",
+      "order": 5,
+      "title": "Summary & Key Takeaways",
       "purpose": "conclusion",
-      "narration_text": "<Spoken conclusion of ~35-45 words summarizing the core abstractions, developer benefits, and key architectural takeaways.>",
-      "estimated_duration_seconds": 16.0,
+      "narration_text": "<Spoken conclusion of ~25-35 words summarizing the core abstractions, developer benefits, and key architectural takeaways.>",
+      "estimated_duration_seconds": 12.0,
       "evidence_ids": ["COMP-1", "PROJ-IDENTITY"],
       "claims": [
         {{
@@ -218,18 +241,18 @@ Raw response prefix:
 {raw_text}
 {evidence_context}
 Produce a single, complete, 100% valid JSON object matching the EducationalScript schema for repository `{repository_name}`.
-Ensure `sections` is a non-empty array of 4 sections where every section has `section_id`, `order`, `title`, `purpose`, non-empty `narration_text` (~35-45 words), `estimated_duration_seconds` (~15-20s), `evidence_ids`, `claims`, and `transition_to_next`, and `total_estimated_duration_seconds` equals the sum of section durations.
+Ensure `sections` is an array of EXACTLY 5 sections (`sec-1-hook`, `sec-2-architecture`, `sec-3-components`, `sec-4-workflow`, `sec-5-conclusion`) where every section has `section_id`, contiguous `order` (1 to 5), `title`, `purpose`, non-empty `narration_text` (~30-45 words), `estimated_duration_seconds` (~12-18s), `evidence_ids`, `claims`, and `transition_to_next` (null on section 5). Total duration must equal the exact sum of section durations.
 Only cite valid `evidence_ids` from the grounded evidence. Respond ONLY with the JSON object.
 """
 
-REVISION_PROMPT_TEMPLATE = """The generated EducationalScript JSON is outside the target narration pacing or duration bounds.
+REVISION_PROMPT_TEMPLATE = """The generated EducationalScript JSON is outside the target narration pacing or section bounds.
 Issue to correct: {reason}
 
 Target specification:
 - Total duration: {min_duration:.0f}–{max_duration:.0f} seconds
 - Speaking rate: {wpm:.0f} wpm (comfortable range {min_wpm:.0f}–{max_wpm:.0f} wpm)
-- Section count: 4 to 6 distinct sections (scripts with fewer than 3 sections are INVALID)
-- Total word count: at least 130 words (~140–190 words total across all sections)
+- Section count: EXACTLY 5 distinct sections required (`sec-1-hook`, `sec-2-architecture`, `sec-3-components`, `sec-4-workflow`, `sec-5-conclusion`). Generating only 2, 3, or 4 sections is strictly prohibited.
+- Total word count: at least 130 words (~150–190 words total across all 5 sections)
 - Each section's `estimated_duration_seconds` must match its `narration_text` word count at ~2.5 words/second, and `total_estimated_duration_seconds` must equal the sum of section durations.
 
 Current script JSON:
@@ -240,7 +263,7 @@ Current script JSON:
 Valid evidence IDs from the evidence package:
 {valid_evidence_ids}
 
-Revise the script JSON so the narration word count and section durations fit cleanly within the target specification while preserving all grounded evidence IDs and anti-hallucination rules.
+Revise the script JSON so it contains EXACTLY 5 distinct sections with balanced narration word counts and section durations that fit cleanly within the target specification while preserving all grounded evidence IDs and anti-hallucination rules.
 Respond ONLY with the revised JSON object.
 """
 

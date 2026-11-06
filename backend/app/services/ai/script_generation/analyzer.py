@@ -364,10 +364,10 @@ class EducationalScriptAnalyzer:
 
                 needs_revision = False
                 reasons: list[str] = []
-                if len(raw_sections) < 3:
+                if len(raw_sections) != 5:
                     needs_revision = True
                     reasons.append(
-                        f"Script contains only {len(raw_sections)} section(s); 4 to 6 sections are required."
+                        f"Script contains {len(raw_sections)} section(s); EXACTLY 5 sections are required (sec-1-hook, sec-2-architecture, sec-3-components, sec-4-workflow, sec-5-conclusion)."
                     )
                 if est_sum > 0 and (est_sum < target.min_seconds or est_sum > target.max_seconds):
                     needs_revision = True

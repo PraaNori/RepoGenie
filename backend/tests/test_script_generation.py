@@ -1441,7 +1441,9 @@ async def test_truncated_json_with_complete_sections_recovered_via_brace_balanci
         project_understanding=make_project_understanding(),
     )
 
-    assert len(script.sections) == 2
+    assert len(script.sections) == 5
+    assert script.sections[0].section_id == "sec-1-hook"
+    assert script.sections[1].section_id == "sec-2-architecture"
     assert mock_llm.generate.call_count == 1
 
 
@@ -1668,6 +1670,109 @@ def test_script_validator_records_warning_on_brief_or_low_section_count():
     warnings = normalized.get("validation_warnings", [])
     assert any("recommended structure is 4 to 6 sections" in w for w in warnings)
     assert any("Total spoken narration is brief" in w for w in warnings)
+
+
+@pytest.mark.anyio
+async def test_llm_generating_two_sections_is_restructured_to_exact_five_sections():
+    """
+    Verifies that when LLM generates only 2 sections, the script generation service
+    reliably produces a valid EducationalScript with EXACTLY 5 sections:
+    1. sec-1-hook (HOOK)
+    2. sec-2-architecture (ARCHITECTURE_OVERVIEW)
+    3. sec-3-components (COMPONENT_DEEP_DIVE)
+    4. sec-4-workflow (WORKFLOW)
+    5. sec-5-conclusion (CONCLUSION)
+    with non-empty narration, valid durations, and contiguous ordering (1..5).
+    """
+    two_section_payload = {
+        "script_id": "script-pallets-click",
+        "repository_name": "pallets/click",
+        "title": "Inside Click: Composable Command-Line Interfaces in Python",
+        "introduction": "Click turns ordinary Python functions into composable command-line tools.",
+        "intended_audience": ["Developers", "Students"],
+        "learning_objectives": ["Understand Click CLI architecture", "Trace command execution flow"],
+        "total_estimated_duration_seconds": 75.0,
+        "conclusion": "Click simplifies CLI application development.",
+        "evidence_ids": ["PROJ-IDENTITY"],
+        "sections": [
+            {
+                "section_id": "sec-1-hook",
+                "order": 1,
+                "title": "Introduction & Hook",
+                "purpose": "hook",
+                "purpose_description": "Introduce the CLI problem.",
+                "is_narrated": True,
+                "narration_text": "Building clean command-line interfaces often requires excessive boilerplate and argument parsing complexity.",
+                "estimated_duration_seconds": 35.0,
+                "evidence_ids": ["PROJ-IDENTITY"],
+                "claims": [
+                    {
+                        "statement": "Click provides decorator-based CLI authoring.",
+                        "grounding_status": "confirmed",
+                        "evidence_ids": ["PROJ-IDENTITY"],
+                    }
+                ],
+                "transition_to_next": "Let us examine the architecture.",
+            },
+            {
+                "section_id": "sec-2-architecture",
+                "order": 2,
+                "title": "System Architecture",
+                "purpose": "architecture_overview",
+                "purpose_description": "Explain Click architecture.",
+                "is_narrated": True,
+                "narration_text": "Click structures command hierarchy through Context and Command objects to cleanly isolate parameter parsing.",
+                "estimated_duration_seconds": 40.0,
+                "evidence_ids": ["PROJ-IDENTITY"],
+                "claims": [
+                    {
+                        "statement": "Click isolates parameter parsing into commands.",
+                        "grounding_status": "confirmed",
+                        "evidence_ids": ["PROJ-IDENTITY"],
+                    }
+                ],
+                "transition_to_next": None,
+            },
+        ],
+    }
+
+    mock_llm = make_mock_llm(json.dumps(two_section_payload))
+    analyzer = EducationalScriptAnalyzer(llm_manager=mock_llm)
+
+    script = await analyzer.generate_script(
+        job_id="job-two-sec-001",
+        knowledge=make_repository_knowledge(),
+        project_understanding=make_project_understanding(),
+    )
+
+    assert len(script.sections) == 5
+    for idx, sec in enumerate(script.sections, start=1):
+        assert sec.order == idx
+        assert sec.estimated_duration_seconds > 0
+        assert len(sec.narration_text.strip()) > 0
+        if idx < 5:
+            assert sec.transition_to_next is not None
+
+    expected_purposes = [
+        SectionPurpose.HOOK,
+        SectionPurpose.ARCHITECTURE_OVERVIEW,
+        SectionPurpose.COMPONENT_DEEP_DIVE,
+        SectionPurpose.WORKFLOW,
+        SectionPurpose.CONCLUSION,
+    ]
+    actual_purposes = [s.purpose for s in script.sections]
+    assert actual_purposes == expected_purposes
+
+    expected_section_ids = [
+        "sec-1-hook",
+        "sec-2-architecture",
+        "sec-3-components",
+        "sec-4-workflow",
+        "sec-5-conclusion",
+    ]
+    actual_section_ids = [s.section_id for s in script.sections]
+    assert actual_section_ids == expected_section_ids
+
 
 
 

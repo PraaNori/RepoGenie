@@ -205,7 +205,7 @@ async def test_food_ordering_script_generation_mocked(food_ordering_knowledge: R
                     "restaurant menu updates, and reliable order dispatching. Food Ordering WebApp tackles this with a "
                     "decoupled architecture built in Python and JavaScript."
                 ),
-                "estimated_duration_seconds": 16.0,
+                "estimated_duration_seconds": 14.0,
                 "evidence_ids": ["PROJ-IDENTITY"],
                 "claims": [
                     {
@@ -226,7 +226,7 @@ async def test_food_ordering_script_generation_mocked(food_ordering_knowledge: R
                     "uses Next.js and React for interactive menus and cart state management. Middleware components enforce "
                     "authentication and request isolation."
                 ),
-                "estimated_duration_seconds": 18.0,
+                "estimated_duration_seconds": 15.0,
                 "evidence_ids": ["TECH-1", "PROJ-IDENTITY"],
                 "claims": [
                     {
@@ -235,11 +235,31 @@ async def test_food_ordering_script_generation_mocked(food_ordering_knowledge: R
                         "evidence_ids": ["TECH-1"],
                     }
                 ],
+                "transition_to_next": "Now, let us examine the core subsystems and components.",
+            },
+            {
+                "section_id": "sec-3-components",
+                "order": 3,
+                "title": "Core Components and Subsystems",
+                "purpose": "component_deep_dive",
+                "narration_text": (
+                    "The application separates data access repositories from client state handlers. The menu subsystem "
+                    "manages real-time item availability and pricing, while dedicated order serializers validate incoming customer checkout requests."
+                ),
+                "estimated_duration_seconds": 14.0,
+                "evidence_ids": ["PROJ-IDENTITY"],
+                "claims": [
+                    {
+                        "statement": "The menu subsystem manages item availability while order serializers validate requests",
+                        "grounding_status": "inferred",
+                        "evidence_ids": ["PROJ-IDENTITY"],
+                    }
+                ],
                 "transition_to_next": "Next, let us trace how an order moves through the system.",
             },
             {
-                "section_id": "sec-3-workflow",
-                "order": 3,
+                "section_id": "sec-4-workflow",
+                "order": 4,
                 "title": "Order Processing and Checkout Workflow",
                 "purpose": "workflow",
                 "narration_text": (
@@ -247,7 +267,7 @@ async def test_food_ordering_script_generation_mocked(food_ordering_knowledge: R
                     "Django validates the cart items, calculates totals, checks authentication credentials, and persists the "
                     "order record before returning an order confirmation response."
                 ),
-                "estimated_duration_seconds": 20.0,
+                "estimated_duration_seconds": 15.0,
                 "evidence_ids": ["WF-1"],
                 "claims": [
                     {
@@ -259,15 +279,15 @@ async def test_food_ordering_script_generation_mocked(food_ordering_knowledge: R
                 "transition_to_next": "Finally, let us review the key implementation highlights.",
             },
             {
-                "section_id": "sec-4-conclusion",
-                "order": 4,
+                "section_id": "sec-5-conclusion",
+                "order": 5,
                 "title": "Key Implementation Highlights",
                 "purpose": "conclusion",
                 "narration_text": (
                     "By separating frontend state management from backend API business logic, the repository maintains clean "
                     "boundaries and modularity. This structure demonstrates a production-style pattern for full-stack food delivery applications."
                 ),
-                "estimated_duration_seconds": 18.0,
+                "estimated_duration_seconds": 14.0,
                 "evidence_ids": ["PROJ-IDENTITY"],
                 "claims": [
                     {
@@ -304,7 +324,7 @@ async def test_food_ordering_script_generation_mocked(food_ordering_knowledge: R
     )
 
     assert script.script_id == "script-food-ordering"
-    assert len(script.sections) == 4
+    assert len(script.sections) == 5
     assert script.total_estimated_duration_seconds == 72.0
     assert script.total_word_count >= 130
     assert all(len(s.narration_text.split()) >= 25 for s in script.sections)

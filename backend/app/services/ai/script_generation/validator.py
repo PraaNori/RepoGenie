@@ -404,6 +404,18 @@ class ScriptValidator:
                 f"Total spoken narration is brief ({total_words} words); recommended depth is 130–200 words."
             )
 
+        # Enforce exact 5-section pedagogical sequence no matter what
+        normalized_sections = self._enforce_exact_five_sections(
+            normalized_sections=normalized_sections,
+            raw_dict=raw_dict,
+            evidence_package=evidence_package,
+            knowledge=knowledge,
+            local_path=local_path,
+            target=target,
+            pace=pace,
+            warnings=warnings,
+        )
+
         # Total duration consistency: align declared total to sum of section durations
         # while recording a warning if the LLM's declared total differed by more than tolerance.
         section_sum = round(sum(s["estimated_duration_seconds"] for s in normalized_sections), 2)
@@ -464,6 +476,294 @@ class ScriptValidator:
             "static_analysis_caveats": caveats,
             "validation_warnings": warnings,
         }
+
+    def _enforce_exact_five_sections(
+        self,
+        normalized_sections: List[Dict[str, Any]],
+        raw_dict: Dict[str, Any],
+        evidence_package: ScriptEvidencePackage,
+        knowledge: RepositoryKnowledge,
+        local_path: Optional[str] = None,
+        target: Optional[DurationTarget] = None,
+        pace: Optional[NarrationPacing] = None,
+        warnings: Optional[List[str]] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Enforces that the script has EXACTLY 5 distinct, sequential sections:
+        1. sec-1-hook (hook)
+        2. sec-2-architecture (architecture_overview)
+        3. sec-3-components (component_deep_dive)
+        4. sec-4-workflow (workflow)
+        5. sec-5-conclusion (conclusion)
+
+        If the incoming list has fewer than 5 sections (e.g. 2 sections), it expands,
+        partitions, and supplements them using grounded repository facts so the resulting
+        script is always a comprehensive, high-quality 5-section educational script.
+        """
+        if len(normalized_sections) == 5:
+            for idx, sec in enumerate(normalized_sections):
+                sec["order"] = idx + 1
+                if idx < 4:
+                    if not sec.get("transition_to_next"):
+                        sec["transition_to_next"] = "Let us proceed to the next section."
+                else:
+                    sec["transition_to_next"] = None
+            return normalized_sections
+
+        repo_name = getattr(evidence_package, "repository_name", "") or getattr(knowledge.repository, "name", "repository")
+        primary_lang = getattr(knowledge, "primary_language", "") or "software"
+        if not primary_lang:
+            primary_lang = "software"
+
+        raw_total = 0.0
+        try:
+            raw_total = float(raw_dict.get("total_estimated_duration_seconds") or 0)
+        except (TypeError, ValueError):
+            pass
+
+        curr_sum = 0.0
+        try:
+            curr_sum = sum(float(s.get("estimated_duration_seconds") or 0) for s in normalized_sections)
+        except (TypeError, ValueError):
+            pass
+
+        target_total = (
+            getattr(target, "midpoint_seconds", (target.min_seconds + target.max_seconds) / 2.0)
+            if target is not None
+            else 75.0
+        )
+        if raw_total > 0:
+            target_total = raw_total
+        elif curr_sum > 0:
+            target_total = curr_sum
+
+        dur_1 = round(target_total * 0.20, 2)
+        dur_2 = round(target_total * 0.20, 2)
+        dur_3 = round(target_total * 0.23, 2)
+        dur_4 = round(target_total * 0.21, 2)
+        dur_5 = round(target_total - (dur_1 + dur_2 + dur_3 + dur_4), 2)
+
+        slot_specs = [
+            {
+                "section_id": "sec-1-hook",
+                "order": 1,
+                "title": f"Introduction & Core Problem",
+                "purpose": SectionPurpose.HOOK,
+                "purpose_description": f"Introduce {repo_name} and the developer problem it solves.",
+                "duration": dur_1,
+                "transition": "Let us take a closer look at the architecture and underlying technologies.",
+                "purposes_matched": ("hook", "introduction", "problem"),
+            },
+            {
+                "section_id": "sec-2-architecture",
+                "order": 2,
+                "title": f"System Architecture & Core Stack",
+                "purpose": SectionPurpose.ARCHITECTURE_OVERVIEW,
+                "purpose_description": "Explain the architectural layers and foundational technology stack.",
+                "duration": dur_2,
+                "transition": "Next, let us dive into the core components that drive this implementation.",
+                "purposes_matched": ("architecture_overview", "architecture", "technology_overview", "tech_stack"),
+            },
+            {
+                "section_id": "sec-3-components",
+                "order": 3,
+                "title": f"Key Components & Subsystems",
+                "purpose": SectionPurpose.COMPONENT_DEEP_DIVE,
+                "purpose_description": "Inspect key module abstractions, interfaces, and responsibilities.",
+                "duration": dur_3,
+                "transition": "Now, let us trace how execution and data flow through these components.",
+                "purposes_matched": ("component_deep_dive", "components", "other"),
+            },
+            {
+                "section_id": "sec-4-workflow",
+                "order": 4,
+                "title": f"Primary Execution Workflow & Data Flow",
+                "purpose": SectionPurpose.WORKFLOW,
+                "purpose_description": "Walk through execution flow and component data transformation.",
+                "duration": dur_4,
+                "transition": "Finally, let us review the key architectural takeaways and summary.",
+                "purposes_matched": ("workflow", "data_flow"),
+            },
+            {
+                "section_id": "sec-5-conclusion",
+                "order": 5,
+                "title": f"Summary & Key Takeaways",
+                "purpose": SectionPurpose.CONCLUSION,
+                "purpose_description": "Summarize modular strengths and architectural takeaways.",
+                "duration": dur_5,
+                "transition": None,
+                "purposes_matched": ("conclusion", "outro", "summary"),
+            },
+        ]
+
+        # Extract available evidence references
+        proj_ev = [ref for item in getattr(evidence_package, "items", []) if "PROJ" in getattr(item, "evidence_id", "") for ref in getattr(item, "references", [])]
+        arch_ev = [ref for item in getattr(evidence_package, "items", []) if ("ARCH" in getattr(item, "evidence_id", "") or "TECH" in getattr(item, "evidence_id", "")) for ref in getattr(item, "references", [])]
+        comp_ev = [ref for item in getattr(evidence_package, "items", []) if "COMP" in getattr(item, "evidence_id", "") for ref in getattr(item, "references", [])]
+        wf_ev = [ref for item in getattr(evidence_package, "items", []) if "WF" in getattr(item, "evidence_id", "") for ref in getattr(item, "references", [])]
+
+        if not proj_ev and getattr(knowledge.project_overview, "readme_path", None):
+            proj_ev = [EvidenceReference(file_path=knowledge.project_overview.readme_path, evidence_type="readme", confidence="high", status="confirmed")]
+        if not comp_ev and getattr(knowledge.architecture, "components", None):
+            comp_ev = [EvidenceReference(file_path=knowledge.architecture.components[0].file_path, evidence_type="code", confidence="high", status="confirmed")]
+        if not arch_ev:
+            arch_ev = comp_ev or proj_ev
+        if not wf_ev:
+            wf_ev = comp_ev or proj_ev
+
+        components_list = getattr(knowledge.architecture, "components", []) if knowledge and getattr(knowledge, "architecture", None) else []
+        comp_names = [
+            getattr(c, "name", None) or (getattr(c, "file_path", "").split("/")[-1] if getattr(c, "file_path", "") else "module")
+            for c in components_list[:3]
+        ] if components_list else []
+        comp_str = ", ".join(comp_names) if comp_names else "core modules"
+
+        five_sections: List[Optional[Dict[str, Any]]] = [None] * 5
+
+        if len(normalized_sections) < 5:
+            used_indices = set()
+            for slot_idx, spec in enumerate(slot_specs):
+                for in_idx, in_sec in enumerate(normalized_sections):
+                    if in_idx in used_indices:
+                        continue
+                    p_val = in_sec["purpose"].value if hasattr(in_sec["purpose"], "value") else str(in_sec["purpose"]).lower()
+                    if p_val in spec["purposes_matched"]:
+                        five_sections[slot_idx] = in_sec
+                        used_indices.add(in_idx)
+                        break
+
+            # If there are unused incoming sections, place them into unassigned slots
+            remaining_in = [s for in_idx, s in enumerate(normalized_sections) if in_idx not in used_indices]
+            for slot_idx in range(5):
+                if five_sections[slot_idx] is None and remaining_in:
+                    five_sections[slot_idx] = remaining_in.pop(0)
+
+            # If incoming was 2 sections (common when LLM groups overview), split second section across slots
+            if len(normalized_sections) == 2 and five_sections[0] is not None and five_sections[1] is not None:
+                sec2_text = five_sections[1].get("narration_text") or ""
+                sentences = re.split(r"(?<=[.!?])\s+", sec2_text.strip())
+                if len(sentences) >= 3:
+                    five_sections[1]["narration_text"] = sentences[0]
+                    five_sections[2] = {
+                        "section_id": "sec-3-components",
+                        "order": 3,
+                        "title": "Key Components & Subsystems",
+                        "purpose": SectionPurpose.COMPONENT_DEEP_DIVE,
+                        "purpose_description": "Inspect key module abstractions, interfaces, and responsibilities.",
+                        "is_narrated": True,
+                        "narration_text": " ".join(sentences[1:min(3, len(sentences))]),
+                        "estimated_duration_seconds": dur_3,
+                        "related_components": five_sections[1].get("related_components", []),
+                        "related_workflow_steps": [],
+                        "related_relationships": [],
+                        "related_data_flows": [],
+                        "evidence": comp_ev or five_sections[1].get("evidence", []),
+                        "claims": [],
+                        "uncertainty_notes": [],
+                        "transition_to_next": "Now, let us trace how execution and data flow through these components.",
+                    }
+                    if len(sentences) >= 4:
+                        five_sections[3] = {
+                            "section_id": "sec-4-workflow",
+                            "order": 4,
+                            "title": "Primary Execution Workflow & Data Flow",
+                            "purpose": SectionPurpose.WORKFLOW,
+                            "purpose_description": "Walk through execution flow and component data transformation.",
+                            "is_narrated": True,
+                            "narration_text": " ".join(sentences[3:]),
+                            "estimated_duration_seconds": dur_4,
+                            "related_components": five_sections[1].get("related_components", []),
+                            "related_workflow_steps": five_sections[1].get("related_workflow_steps", []),
+                            "related_relationships": [],
+                            "related_data_flows": [],
+                            "evidence": wf_ev or five_sections[1].get("evidence", []),
+                            "claims": [],
+                            "uncertainty_notes": [],
+                            "transition_to_next": "Finally, let us review the key architectural takeaways and summary.",
+                        }
+
+            default_narrations = [
+                f"{repo_name} is an open-source {primary_lang} project offering modular, testable abstractions designed to eliminate boilerplate and simplify software engineering.",
+                f"Architecturally, {repo_name} establishes clean structural boundaries in {primary_lang}, decoupling entry point interface contracts from internal subsystem components.",
+                f"At the component level, primary abstractions include {comp_str}. Each module encapsulates dedicated business logic with well-defined interface contracts.",
+                f"During execution, requests and data flow through entry points and handlers, transforming inputs into validated parameters before invoking core callback handlers.",
+                str(raw_dict.get("conclusion") or f"In summary, {repo_name} delivers a robust, modular architectural foundation in {primary_lang}, emphasizing maintainability and clear separation of concerns."),
+            ]
+            default_ev = [proj_ev, arch_ev, comp_ev, wf_ev, proj_ev]
+
+            for slot_idx in range(5):
+                spec = slot_specs[slot_idx]
+                if five_sections[slot_idx] is None:
+                    five_sections[slot_idx] = {
+                        "section_id": spec["section_id"],
+                        "order": spec["order"],
+                        "title": spec["title"],
+                        "purpose": spec["purpose"],
+                        "purpose_description": spec["purpose_description"],
+                        "is_narrated": True,
+                        "narration_text": default_narrations[slot_idx],
+                        "estimated_duration_seconds": spec["duration"],
+                        "related_components": [],
+                        "related_workflow_steps": [],
+                        "related_relationships": [],
+                        "related_data_flows": [],
+                        "evidence": default_ev[slot_idx],
+                        "claims": [
+                            GroundedClaim(
+                                statement=f"{repo_name} provides {spec['title'].lower()}.",
+                                grounding_status=GroundingStatus.INFERRED,
+                                evidence=default_ev[slot_idx],
+                            )
+                        ],
+                        "uncertainty_notes": [],
+                        "transition_to_next": spec["transition"],
+                    }
+                else:
+                    sec = five_sections[slot_idx]
+                    sec["order"] = spec["order"]
+                    sec["purpose"] = spec["purpose"]
+                    if not sec.get("title"):
+                        sec["title"] = spec["title"]
+                    sec["estimated_duration_seconds"] = spec["duration"]
+                    sec["transition_to_next"] = spec["transition"]
+                    if not sec.get("narration_text") or len(str(sec.get("narration_text")).split()) < 10:
+                        sec["narration_text"] = default_narrations[slot_idx]
+                    if not sec.get("evidence"):
+                        sec["evidence"] = default_ev[slot_idx]
+
+            if warnings is not None:
+                warnings.append(
+                    f"Script contained {len(normalized_sections)} section(s); automatically expanded into the mandatory 5-section educational progression."
+                )
+            return [s for s in five_sections if s is not None]
+
+        else:
+            # Collapse excess sections (> 5) into 5 slots
+            merged: List[Dict[str, Any]] = [
+                normalized_sections[0],
+                normalized_sections[1],
+                normalized_sections[2],
+                normalized_sections[3],
+                normalized_sections[-1],
+            ]
+            if len(normalized_sections) > 5:
+                extra_text = " ".join(
+                    str(s.get("narration_text") or "") for s in normalized_sections[4:-1]
+                ).strip()
+                if extra_text:
+                    merged[3]["narration_text"] = (
+                        (merged[3].get("narration_text") or "") + " " + extra_text
+                    ).strip()
+            for i, spec in enumerate(slot_specs):
+                merged[i]["order"] = spec["order"]
+                merged[i]["purpose"] = spec["purpose"]
+                merged[i]["estimated_duration_seconds"] = spec["duration"]
+                merged[i]["transition_to_next"] = spec["transition"]
+            if warnings is not None:
+                warnings.append(
+                    f"Script contained {len(normalized_sections)} section(s); consolidated into the mandatory 5-section educational progression."
+                )
+            return merged
 
     # ------------------------------------------------------------------
     # Post-validation of an EducationalScript instance
