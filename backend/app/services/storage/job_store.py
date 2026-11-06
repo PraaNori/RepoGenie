@@ -1,5 +1,6 @@
 """Job storage service."""
 import asyncio
+import functools
 import logging
 import uuid
 from datetime import datetime, timezone
@@ -141,8 +142,24 @@ class JobInternal(BaseModel):
 logger = logging.getLogger(__name__)
 
 class JobStore:
+    """
+    Durable Job Storage Service for RepoGenie.
+
+    Architecture & Concurrency Model:
+    - Designed for single-process async concurrency with dedicated per-job locks
+      (`get_job_lock`) that serialize operations on each job without blocking others.
+    - Employs POSIX-atomic file replacement (`tmp_file.replace(state_file)`) ensuring
+      readers always observe consistent, uncorrupted on-disk snapshots.
+    - Uses file modification timestamps (`st_mtime`) to detect on-disk updates and
+      invalidate in-memory caches.
+    - Note: Distributed multi-process writers (e.g. multi-worker Uvicorn clusters)
+      require external distributed locks (such as Redis/etcd) to coordinate state
+      transitions across separate operating system processes.
+    """
+
     def __init__(self):
         self._jobs: Dict[str, JobInternal] = {}
+        self._job_mtimes: Dict[str, float] = {}
         self._job_locks: Dict[str, asyncio.Lock] = {}
         self._meta_lock = asyncio.Lock()
         self._storage_jobs_dir = Path(settings.VIDEO_OUTPUT_DIR).resolve()
@@ -151,33 +168,53 @@ class JobStore:
         self._wrap_update_methods()
 
     def _persist_job(self, job: JobInternal) -> None:
-        """Atomically persists JobInternal state to storage/jobs/<job_id>/job_state.json."""
+        """
+        Atomically persists JobInternal state to storage/jobs/<job_id>/job_state.json.
+        Guarantees atomic replacement via temporary file swap and cleans up temporary files
+        on any failure.
+        """
+        job_dir = self._storage_jobs_dir / job.job_id
+        job_dir.mkdir(parents=True, exist_ok=True)
+        state_file = job_dir / "job_state.json"
+        tmp_file = job_dir / f"job_state_{uuid.uuid4().hex[:8]}.tmp"
         try:
-            job_dir = self._storage_jobs_dir / job.job_id
-            job_dir.mkdir(parents=True, exist_ok=True)
-            state_file = job_dir / "job_state.json"
-            tmp_file = job_dir / f"job_state_{uuid.uuid4().hex[:8]}.tmp"
-            tmp_file.write_text(job.model_dump_json(indent=2), encoding="utf-8")
+            payload = job.model_dump_json(indent=2)
+            tmp_file.write_text(payload, encoding="utf-8")
             tmp_file.replace(state_file)
+            try:
+                self._job_mtimes[job.job_id] = state_file.stat().st_mtime
+            except OSError:
+                pass
         except Exception as e:
-            logger.warning("Failed to persist job %s state to disk: %s", job.job_id, e)
+            logger.error("Failed to persist job %s state to disk: %s", job.job_id, e, exc_info=True)
+            raise RuntimeError(f"Failed to persist job '{job.job_id}' state to disk: {e}") from e
+        finally:
+            if tmp_file.exists():
+                try:
+                    tmp_file.unlink()
+                except OSError:
+                    pass
 
     def _load_job_from_disk(self, job_id: str) -> Optional[JobInternal]:
         """Loads JobInternal from storage/jobs/<job_id>/job_state.json or orphaned repo directory."""
-        try:
-            state_file = self._storage_jobs_dir / job_id / "job_state.json"
-            if state_file.is_file():
+        state_file = self._storage_jobs_dir / job_id / "job_state.json"
+        if state_file.is_file():
+            try:
                 content = state_file.read_text(encoding="utf-8")
                 job = JobInternal.model_validate_json(content)
                 self._jobs[job_id] = job
+                try:
+                    self._job_mtimes[job_id] = state_file.stat().st_mtime
+                except OSError:
+                    pass
                 return job
-        except Exception as e:
-            logger.warning("Failed loading job state from disk for %s: %s", job_id, e)
+            except Exception as e:
+                logger.error("Failed loading job state from disk for %s: %s", job_id, e)
 
         # Legacy / orphaned fallback: If cloned repository directory exists in storage/repos/<job_id>
         try:
             repo_dir = settings.repos_path / job_id
-            if repo_dir.is_dir():
+            if repo_dir.is_dir() and (repo_dir / ".git").is_dir():
                 return self._recover_orphaned_repo_job(job_id, repo_dir)
         except Exception as e:
             logger.warning("Failed to recover orphaned repo for %s: %s", job_id, e)
@@ -185,7 +222,15 @@ class JobStore:
         return None
 
     def _recover_orphaned_repo_job(self, job_id: str, repo_dir: Path) -> Optional[JobInternal]:
-        """Recovers an orphaned cloned repo directory into a valid JobInternal record."""
+        """
+        Safely reconstructs an orphaned repository into a valid JobInternal record.
+        Only runs if no job state already exists for this job_id.
+        Performs static AST analysis only; does NOT execute repository code.
+        """
+        state_file = self._storage_jobs_dir / job_id / "job_state.json"
+        if state_file.is_file() or job_id in self._jobs:
+            return self._jobs.get(job_id)
+
         try:
             import subprocess
             res = subprocess.run(
@@ -201,6 +246,10 @@ class JobStore:
             repo_name = parts[-1] if len(parts) >= 1 else repo_dir.name
 
             files = [p for p in repo_dir.rglob("*") if p.is_file() and not any(part.startswith(".") for part in p.parts)]
+            if not files:
+                logger.warning("Orphaned repo directory %s contains no source files; skipping recovery", repo_dir)
+                return None
+
             total_size = sum(f.stat().st_size for f in files)
             file_count = len(files)
             size_mb = total_size / (1024 * 1024)
@@ -288,8 +337,12 @@ class JobStore:
                                 content = state_file.read_text(encoding="utf-8")
                                 job = JobInternal.model_validate_json(content)
                                 self._jobs[job.job_id] = job
+                                try:
+                                    self._job_mtimes[job.job_id] = state_file.stat().st_mtime
+                                except OSError:
+                                    pass
                             except Exception as err:
-                                logger.warning("Failed parsing job state for %s: %s", job_folder.name, err)
+                                logger.debug("Skipping unparseable or legacy job state for %s: %s", job_folder.name, err)
         except Exception as e:
             logger.warning("Error scanning jobs on disk: %s", e)
 
@@ -302,15 +355,27 @@ class JobStore:
                     setattr(self, attr_name, self._make_persisting_wrapper(method))
 
     def _make_persisting_wrapper(self, func):
+        @functools.wraps(func)
         def wrapper(*args, **kwargs):
+            # Extract target job_id from positional or keyword arguments
+            job_id = None
             if args:
-                first_arg = args[0]
-                if isinstance(first_arg, str) and first_arg not in self._jobs:
-                    self.get_internal_job(first_arg)
+                first = args[0]
+                if isinstance(first, str):
+                    job_id = first
+                elif hasattr(first, "job_id"):
+                    job_id = getattr(first, "job_id", None)
+            if not job_id and "job_id" in kwargs and isinstance(kwargs["job_id"], str):
+                job_id = kwargs["job_id"]
+
+            if job_id and job_id not in self._jobs:
+                self.get_internal_job(job_id)
+
             res = func(*args, **kwargs)
             if isinstance(res, JobInternal):
                 self._persist_job(res)
             return res
+
         wrapper._is_wrapped = True
         return wrapper
 
@@ -370,8 +435,21 @@ class JobStore:
         return internal.to_response()
 
     def get_internal_job(self, job_id: str) -> Optional[JobInternal]:
+        state_file = self._storage_jobs_dir / job_id / "job_state.json"
+        cached_mtime = self._job_mtimes.get(job_id)
+
         if job_id in self._jobs:
+            if state_file.is_file() and cached_mtime is not None:
+                try:
+                    disk_mtime = state_file.stat().st_mtime
+                    if disk_mtime > cached_mtime:
+                        loaded = self._load_job_from_disk(job_id)
+                        if loaded is not None:
+                            return loaded
+                except OSError:
+                    pass
             return self._jobs[job_id]
+
         return self._load_job_from_disk(job_id)
 
     def list_jobs(self) -> List[JobResponse]:
@@ -554,11 +632,27 @@ class JobStore:
         job.knowledge = knowledge
         job.stages[2].status = StatusEnum.COMPLETED
         job.stages[2].completed_at = now
+        files_count = (
+            code_analysis.total_parsed_files
+            if code_analysis is not None
+            else (len(knowledge.code_structure.files) if (knowledge and knowledge.code_structure) else 0)
+        )
+        deps_count = (
+            architecture.dependency_graph.total_internal_dependencies
+            if (architecture is not None and architecture.dependency_graph is not None)
+            else 0
+        )
+        imp_count = len(knowledge.important_files) if (knowledge and knowledge.important_files) else 0
+        fw_count = (
+            len(knowledge.technology_stack.frameworks)
+            if (knowledge and knowledge.technology_stack and knowledge.technology_stack.frameworks)
+            else 0
+        )
         job.stages[2].detail = (
-            f"Consolidated knowledge ({code_analysis.total_parsed_files} files, "
-            f"{architecture.dependency_graph.total_internal_dependencies} internal deps, "
-            f"{len(knowledge.important_files)} important files, "
-            f"{len(knowledge.technology_stack.frameworks)} frameworks)"
+            f"Consolidated knowledge ({files_count} files, "
+            f"{deps_count} internal deps, "
+            f"{imp_count} important files, "
+            f"{fw_count} frameworks)"
         )
         job.progress_percentage = 33
         # Set next stage ready (Stage 4: AI Summary Generation)

@@ -62,16 +62,26 @@ export async function getJobStatus(jobId) {
       },
     });
 
-    const data = await response.json();
-
-    if (!response.ok) {
-      throw new Error(data.detail || `Failed to fetch job (${response.status})`);
+    let data;
+    try {
+      data = await response.json();
+    } catch {
+      data = {};
     }
 
-    return { success: true, data };
+    if (!response.ok) {
+      return {
+        success: false,
+        status: response.status,
+        error: data.detail || `Failed to fetch job (${response.status})`,
+      };
+    }
+
+    return { success: true, status: response.status, data };
   } catch (error) {
     return {
       success: false,
+      status: 0,
       error: error.message || 'Error checking job status',
     };
   }
