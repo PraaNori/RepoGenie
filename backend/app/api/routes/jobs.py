@@ -1063,22 +1063,39 @@ async def generate_job_visual_assets(
         job_store.update_job_visual_planning_started(job_id)
 
         try:
-            result = visual_generation_service.initialize_visual_assets(
+            plan = visual_generation_service.initialize_visual_assets(
                 job_id=job_id,
                 storyboard=internal.educational_storyboard,
                 script=internal.educational_script,
                 knowledge=internal.knowledge,
                 refresh=refresh,
             )
-            job_store.update_job_visual_planning_success(job_id, result)
-            return result
+
+            # Generate technical diagrams for scenes requiring diagram visual types (Phase 5.2)
+            rendered_result = visual_generation_service.generate_diagrams_for_job(
+                job_id=job_id,
+                plan=plan,
+                storyboard=internal.educational_storyboard,
+                knowledge=internal.knowledge,
+                code_understanding=internal.code_understanding,
+                workflow_understanding=internal.workflow_understanding,
+            )
+
+            # Stage 07 is only marked COMPLETED if all required assets in the job have completed.
+            # If any scenes are non-diagrams (e.g. title cards, summaries), Stage 07 remains IN_PROGRESS.
+            if rendered_result.is_fully_rendered:
+                job_store.update_job_visual_generation_success(job_id, rendered_result)
+            else:
+                job_store.update_job_visual_planning_success(job_id, rendered_result)
+
+            return rendered_result
         except Exception as exc:
-            logger.exception("Unexpected error during visual asset planning for job %s: %s", job_id, exc)
+            logger.exception("Unexpected error during visual asset generation for job %s: %s", job_id, exc)
             job_store.update_job_visual_generation_failed(job_id, str(exc))
             exc_msg = _sanitize_error_message(str(exc), internal.local_path)
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Unexpected error during visual asset planning: {exc_msg}",
+                detail=f"Unexpected error during visual asset generation: {exc_msg}",
             )
 
 

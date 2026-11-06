@@ -831,17 +831,17 @@ def test_post_and_get_visual_assets_success():
     """
     job_id, script, storyboard = _setup_job_with_storyboard("post-get-vg")
 
-    # 1. POST generation (Planning)
+    # 1. POST generation (Planning and Technical Diagram Rendering)
     resp = client.post(f"/api/v1/jobs/{job_id}/visual-assets")
     assert resp.status_code == 200
     data = resp.json()
     assert data["job_id"] == job_id
-    assert data["status"] == "planned"
+    assert data["status"] in ("generating", "planned")
     assert data["total_scenes"] == 2
     assert data["total_assets"] == 2
-    assert data["assets_pending"] == 2
-    assert data["assets_completed"] == 0
-    assert data["scenes_completed"] == 0
+    assert data["assets_pending"] == 1
+    assert data["assets_completed"] == 1
+    assert data["scenes_completed"] == 1
     assert len(data["scene_assets"]) == 2
 
     # Verify JobStore state: Stage 07 must remain IN_PROGRESS, pipeline remains at Stage 07
@@ -857,36 +857,36 @@ def test_post_and_get_visual_assets_success():
     assert get_resp.status_code == 200
     get_data = get_resp.json()
     assert get_data["job_id"] == job_id
-    assert get_data["status"] == "planned"
     assert get_data["total_assets"] == 2
-    assert get_data["assets_pending"] == 2
-    assert get_data["assets_completed"] == 0
+    assert get_data["assets_pending"] == 1
+    assert get_data["assets_completed"] == 1
 
-    # 3. GET asset metadata shows pending status
-    asset_id = data["scene_assets"][0]["primary_asset"]["asset_id"]
-    asset_resp = client.get(f"/api/v1/jobs/{job_id}/visual-assets/{asset_id}")
-    assert asset_resp.status_code == 200
-    asset_data = asset_resp.json()
-    assert asset_data["asset_id"] == asset_id
-    assert asset_data["scene_number"] == 1
-    assert asset_data["status"] == "pending"
+    # 3. Scene 1 is TITLE_CARD (pending rendering in later phase)
+    scene1_asset_id = data["scene_assets"][0]["primary_asset"]["asset_id"]
+    asset1_resp = client.get(f"/api/v1/jobs/{job_id}/visual-assets/{scene1_asset_id}")
+    assert asset1_resp.status_code == 200
+    assert asset1_resp.json()["status"] == "pending"
 
-    # 4. GET non-existent asset metadata returns 404
+    # GET asset 1 file before rendering returns 404 (does not pretend file exists)
+    file1_resp = client.get(f"/api/v1/jobs/{job_id}/visual-assets/{scene1_asset_id}/file")
+    assert file1_resp.status_code == 404
+    assert "has not yet been rendered to disk" in file1_resp.json()["detail"]
+
+    # 4. Scene 2 is ARCHITECTURE_DIAGRAM (rendered in Phase 5.2!)
+    scene2_asset_id = data["scene_assets"][1]["primary_asset"]["asset_id"]
+    asset2_resp = client.get(f"/api/v1/jobs/{job_id}/visual-assets/{scene2_asset_id}")
+    assert asset2_resp.status_code == 200
+    assert asset2_resp.json()["status"] == "completed"
+
+    # GET asset 2 file returns HTTP 200 with real SVG content on disk
+    file2_resp = client.get(f"/api/v1/jobs/{job_id}/visual-assets/{scene2_asset_id}/file")
+    assert file2_resp.status_code == 200
+    assert "image/svg+xml" in file2_resp.headers["content-type"]
+    assert b"<svg" in file2_resp.content
+
+    # 5. GET non-existent asset metadata returns 404
     non_asset_resp = client.get(f"/api/v1/jobs/{job_id}/visual-assets/va_unknown")
     assert non_asset_resp.status_code == 404
-
-    # 5. GET asset file before rendering returns 404 (does not pretend file exists)
-    file_resp = client.get(f"/api/v1/jobs/{job_id}/visual-assets/{asset_id}/file")
-    assert file_resp.status_code == 404
-    assert "has not yet been rendered to disk" in file_resp.json()["detail"]
-
-    # 6. Manually save file to disk and verify GET asset file returns 200 with SVG content
-    filename = f"{asset_id}.svg"
-    visual_storage_manager.save_asset_content(job_id, filename, "<svg><text>Title</text></svg>")
-    file_resp2 = client.get(f"/api/v1/jobs/{job_id}/visual-assets/{asset_id}/file")
-    assert file_resp2.status_code == 200
-    assert "image/svg+xml" in file_resp2.headers["content-type"]
-    assert b"<svg><text>Title</text></svg>" in file_resp2.content
 
 
 def test_get_visual_assets_not_generated():

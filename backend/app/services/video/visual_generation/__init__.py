@@ -1,5 +1,5 @@
 """
-Visual generation foundation module (Milestone 5, Phase 5.1).
+Visual generation module for technical diagrams and visual assets (Milestone 5).
 """
 
 from .schemas import (
@@ -23,8 +23,32 @@ from .service import (
     VisualGenerationService,
     visual_generation_service,
 )
+from .diagrams import (
+    ArchitectureDiagramGenerator,
+    BaseDiagramGenerator,
+    CANVAS_HEIGHT,
+    CANVAS_WIDTH,
+    ComponentDiagramGenerator,
+    DataFlowDiagramGenerator,
+    DiagramGenerationResult,
+    DiagramRenderer,
+    DiagramType,
+    WorkflowDiagramGenerator,
+    diagram_renderer,
+    sanitize_filename,
+    sanitize_text,
+)
 
 __all__ = [
+    "ArchitectureDiagramGenerator",
+    "BaseDiagramGenerator",
+    "CANVAS_HEIGHT",
+    "CANVAS_WIDTH",
+    "ComponentDiagramGenerator",
+    "DataFlowDiagramGenerator",
+    "DiagramGenerationResult",
+    "DiagramRenderer",
+    "DiagramType",
     "MediaFormat",
     "PathTraversalError",
     "SceneVisualAssets",
@@ -34,9 +58,13 @@ __all__ = [
     "VisualAssetType",
     "VisualGenerationMetadata",
     "VisualGenerationResult",
+    "VisualGenerationService",
     "VisualGenerationStatus",
     "VisualAssetStorageManager",
-    "VisualGenerationService",
+    "WorkflowDiagramGenerator",
+    "diagram_renderer",
+    "sanitize_filename",
+    "sanitize_text",
     "visual_storage_manager",
     "visual_generation_service",
     "VISUAL_ASSET_SCHEMA_VERSION",

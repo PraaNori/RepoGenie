@@ -15,10 +15,19 @@ import logging
 from datetime import datetime, timezone
 from typing import List, Optional
 
+from ...ai.code_understanding.schemas import RepositoryCodeUnderstanding
 from ...ai.project_understanding.schemas import EvidenceReference
 from ...ai.script_generation.schemas import EducationalScript
 from ...ai.storyboard_generation.schemas import EducationalStoryboard, StoryboardScene, VisualType
+from ...ai.workflow_understanding.schemas import RepositoryWorkflowUnderstanding
 from ....models.schemas import RepositoryKnowledge
+from .diagrams import (
+    ArchitectureDiagramGenerator,
+    ComponentDiagramGenerator,
+    DataFlowDiagramGenerator,
+    DiagramType,
+    WorkflowDiagramGenerator,
+)
 from .schemas import (
     MediaFormat,
     SceneVisualAssets,
@@ -50,10 +59,16 @@ def _map_visual_type_to_asset_type(visual_type: VisualType) -> VisualAssetType:
 
 
 class VisualGenerationService:
-    """Core service establishing the visual asset generation foundation for a job."""
+    """Core service establishing the visual asset generation foundation and diagram rendering for a job."""
 
     def __init__(self, storage_manager: Optional[VisualAssetStorageManager] = None):
         self.storage = storage_manager or visual_storage_manager
+        self.diagram_generators = {
+            VisualType.ARCHITECTURE_DIAGRAM: ArchitectureDiagramGenerator(),
+            VisualType.COMPONENT_DIAGRAM: ComponentDiagramGenerator(),
+            VisualType.WORKFLOW_DIAGRAM: WorkflowDiagramGenerator(),
+            VisualType.DATA_FLOW_VISUALIZATION: DataFlowDiagramGenerator(),
+        }
 
     def plan_visual_asset_for_scene(
         self,
@@ -179,6 +194,216 @@ class VisualGenerationService:
             total_assets,
         )
         return result
+
+    def generate_diagram_for_scene(
+        self,
+        job_id: str,
+        scene: StoryboardScene,
+        knowledge: RepositoryKnowledge,
+        code_understanding: Optional[RepositoryCodeUnderstanding] = None,
+        workflow_understanding: Optional[RepositoryWorkflowUnderstanding] = None,
+        target_asset: Optional[VisualAsset] = None,
+    ) -> VisualAsset:
+        """
+        Renders a production-quality technical diagram SVG for a single StoryboardScene.
+        Saves the SVG to disk and updates the VisualAsset to COMPLETED status.
+        """
+        generator = self.diagram_generators.get(scene.visual_type)
+        if not generator:
+            raise ValueError(
+                f"Visual type '{scene.visual_type.value}' is not a supported technical diagram type."
+            )
+
+        asset = target_asset or self.plan_visual_asset_for_scene(job_id, scene)
+        safe_job_id = self.storage.validate_job_id(job_id)
+        filename = f"{asset.asset_id}.svg"
+
+        logger.info(
+            "Rendering technical diagram (%s) for job %s scene %d...",
+            generator.diagram_type.value,
+            job_id,
+            scene.scene_number,
+        )
+
+        diag_result = generator.generate(
+            scene=scene,
+            knowledge=knowledge,
+            code_understanding=code_understanding,
+            workflow_understanding=workflow_understanding,
+        )
+
+        # Save rendered SVG file to isolated storage
+        saved_path = self.storage.save_asset_content(safe_job_id, filename, diag_result.svg_content)
+        relative_path = self.storage.get_relative_asset_path(safe_job_id, filename)
+
+        # Merge evidence
+        all_evidence = list(scene.evidence)
+        if diag_result.evidence_used:
+            existing_fps = {e.file_path for e in all_evidence if e.file_path}
+            for ev in diag_result.evidence_used:
+                if ev.file_path and ev.file_path not in existing_fps:
+                    all_evidence.append(ev)
+                    existing_fps.add(ev.file_path)
+
+        # Update metadata
+        metadata = VisualGenerationMetadata(
+            generator_name=generator.__class__.__name__,
+            renderer_version="2.0",
+            generation_duration_ms=diag_result.render_duration_ms,
+            diagram_syntax="graphviz+mermaid",
+            render_parameters={
+                "diagram_type": diag_result.diagram_type.value,
+                "mermaid_source": diag_result.mermaid_source,
+                "dot_source": diag_result.dot_source,
+                "components_referenced": diag_result.components_referenced,
+                "files_referenced": diag_result.files_referenced,
+                "warnings": diag_result.validation_warnings,
+            },
+        )
+
+        now = datetime.now(timezone.utc)
+        updated_asset = asset.model_copy(
+            update={
+                "status": VisualAssetStatus.COMPLETED,
+                "media_format": MediaFormat.SVG,
+                "storage_path": relative_path,
+                "width": diag_result.width,
+                "height": diag_result.height,
+                "aspect_ratio": diag_result.aspect_ratio,
+                "source_evidence": all_evidence,
+                "related_files": diag_result.files_referenced or asset.related_files,
+                "validation_warnings": diag_result.validation_warnings,
+                "metadata": metadata,
+                "updated_at": now,
+                "error_message": None,
+            }
+        )
+
+        logger.info(
+            "Successfully generated diagram asset %s for scene %d (%d bytes, %.1f ms)",
+            asset.asset_id,
+            scene.scene_number,
+            len(diag_result.svg_content),
+            diag_result.render_duration_ms,
+        )
+        return updated_asset
+
+    def generate_diagrams_for_job(
+        self,
+        job_id: str,
+        plan: VisualGenerationResult,
+        storyboard: EducationalStoryboard,
+        knowledge: RepositoryKnowledge,
+        code_understanding: Optional[RepositoryCodeUnderstanding] = None,
+        workflow_understanding: Optional[RepositoryWorkflowUnderstanding] = None,
+    ) -> VisualGenerationResult:
+        """
+        Iterates over all planned scenes in the VisualGenerationResult and generates
+        SVG diagrams for scenes whose visual_type is a technical diagram.
+        Updates SceneVisualAssets, asset counts, and returns the updated VisualGenerationResult.
+        """
+        safe_job_id = self.storage.validate_job_id(job_id)
+        scene_by_id = {s.scene_id: s for s in storyboard.scenes}
+
+        updated_scene_assets: List[SceneVisualAssets] = []
+        completed_assets = 0
+        failed_assets = 0
+        completed_scenes = 0
+        failed_scenes = 0
+
+        for sa in plan.scene_assets:
+            scene = scene_by_id.get(sa.scene_id)
+            if not scene:
+                updated_scene_assets.append(sa)
+                continue
+
+            if scene.visual_type in self.diagram_generators:
+                try:
+                    rendered_asset = self.generate_diagram_for_scene(
+                        job_id=safe_job_id,
+                        scene=scene,
+                        knowledge=knowledge,
+                        code_understanding=code_understanding,
+                        workflow_understanding=workflow_understanding,
+                        target_asset=sa.primary_asset,
+                    )
+                    completed_assets += 1
+                    completed_scenes += 1
+
+                    updated_sa = sa.model_copy(
+                        update={
+                            "primary_asset": rendered_asset,
+                            "status": VisualGenerationStatus.COMPLETED,
+                            "error_message": None,
+                        }
+                    )
+                    updated_scene_assets.append(updated_sa)
+                except Exception as exc:
+                    logger.exception(
+                        "Failed to generate diagram for job %s scene %d: %s",
+                        job_id,
+                        scene.scene_number,
+                        exc,
+                    )
+                    failed_assets += 1
+                    failed_scenes += 1
+                    failed_primary = (
+                        sa.primary_asset.model_copy(
+                            update={
+                                "status": VisualAssetStatus.FAILED,
+                                "error_message": str(exc),
+                            }
+                        )
+                        if sa.primary_asset
+                        else None
+                    )
+                    updated_sa = sa.model_copy(
+                        update={
+                            "primary_asset": failed_primary,
+                            "status": VisualGenerationStatus.FAILED,
+                            "error_message": str(exc),
+                        }
+                    )
+                    updated_scene_assets.append(updated_sa)
+            else:
+                # Non-diagram scenes (title cards, summary cards, code walkthroughs)
+                # preserve existing status (e.g. PLANNED / PENDING)
+                if sa.primary_asset and sa.primary_asset.status == VisualAssetStatus.COMPLETED:
+                    completed_assets += 1
+                    completed_scenes += 1
+                updated_scene_assets.append(sa)
+
+        total_assets = plan.total_assets
+        pending_assets = max(0, total_assets - completed_assets - failed_assets)
+
+        now = datetime.now(timezone.utc)
+        overall_status = VisualGenerationStatus.GENERATING
+        if completed_scenes == plan.total_scenes and plan.total_scenes > 0 and failed_scenes == 0:
+            overall_status = VisualGenerationStatus.COMPLETED
+        elif failed_scenes > 0 and completed_scenes == 0:
+            overall_status = VisualGenerationStatus.FAILED
+
+        updated_plan = plan.model_copy(
+            update={
+                "scene_assets": updated_scene_assets,
+                "scenes_completed": completed_scenes,
+                "scenes_failed": failed_scenes,
+                "assets_completed": completed_assets,
+                "assets_pending": pending_assets,
+                "assets_failed": failed_assets,
+                "status": overall_status,
+                "updated_at": now,
+            }
+        )
+
+        logger.info(
+            "Completed diagram generation pass for job %s: %d/%d scenes completed, %d assets rendered",
+            job_id,
+            completed_scenes,
+            plan.total_scenes,
+            completed_assets,
+        )
+        return updated_plan
 
 
 # Singleton instance
