@@ -1036,4 +1036,85 @@ export function getSceneRenderFileUrl(jobId, sceneId) {
   return `${API_BASE_URL}/api/v1/jobs/${jobId}/render-scenes/${sceneId}/file`;
 }
 
+// ==============================================================================
+// Milestone 6.3: Final Video Assembly API Client Methods
+// ==============================================================================
+
+export async function assembleFinalVideo(jobId, refresh = false) {
+  try {
+    const params = new URLSearchParams();
+    if (refresh) params.append('refresh', 'true');
+    const queryString = params.toString() ? `?${params.toString()}` : '';
+
+    const response = await fetch(`${API_BASE_URL}/api/v1/jobs/${jobId}/assemble-video${queryString}`, {
+      method: 'POST',
+      headers: {
+        'Accept': 'application/json',
+      },
+    });
+
+    let data;
+    try {
+      data = await response.json();
+    } catch {
+      data = null;
+    }
+
+    if (!response.ok) {
+      return {
+        success: false,
+        status: response.status,
+        error: (data && data.detail) || `Failed to assemble final video (${response.status})`,
+      };
+    }
+
+    return { success: true, status: response.status, data };
+  } catch (error) {
+    return {
+      success: false,
+      status: 0,
+      error: error.message || 'Error executing final video assembly',
+    };
+  }
+}
+
+export async function getFinalVideoResult(jobId) {
+  try {
+    const response = await fetch(`${API_BASE_URL}/api/v1/jobs/${jobId}/render-result`, {
+      method: 'GET',
+      headers: {
+        'Accept': 'application/json',
+      },
+    });
+
+    let data;
+    try {
+      data = await response.json();
+    } catch {
+      data = null;
+    }
+
+    if (!response.ok) {
+      return {
+        success: false,
+        status: response.status,
+        error: (data && data.detail) || `Failed to fetch final video result (${response.status})`,
+      };
+    }
+
+    return { success: true, status: response.status, data };
+  } catch (error) {
+    return {
+      success: false,
+      status: 0,
+      error: error.message || 'Error checking final video result',
+    };
+  }
+}
+
+export function getFinalVideoFileUrl(jobId) {
+  return `${API_BASE_URL}/api/v1/jobs/${jobId}/video/file`;
+}
+
+
 

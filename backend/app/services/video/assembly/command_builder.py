@@ -139,6 +139,33 @@ class FFmpegCommandBuilder:
         cmd.append(str(output_path.resolve()))
         return cmd
 
+    def build_silent_audio_normalization_command(
+        self,
+        scene_path: Path,
+        output_path: Path,
+        duration_seconds: float,
+        config: VideoRenderConfiguration,
+    ) -> List[str]:
+        """
+        Generates a silent AAC audio track for a silent scene clip so that all scenes
+        in a mixed storyboard share the exact same stream layout (video + audio) for concat demuxer.
+        Copies the video stream without re-encoding (-c:v copy).
+        """
+        cmd: List[str] = [
+            self.ffmpeg_executable,
+            "-y",
+            "-loglevel", "error",
+            "-i", str(scene_path.resolve()),
+            "-f", "lavfi",
+            "-i", f"anullsrc=channel_layout=stereo:sample_rate={config.audio_sample_rate}",
+            "-c:v", "copy",
+            "-c:a", config.audio_codec,
+            "-b:a", config.audio_bitrate,
+            "-shortest",
+            str(output_path.resolve()),
+        ]
+        return cmd
+
     def build_synthetic_color_video_command(
         self,
         output_path: Path,

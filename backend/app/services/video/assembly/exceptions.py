@@ -64,3 +64,8 @@ class SceneRenderError(VideoAssemblyError):
 class JobRenderConcurrencyError(VideoAssemblyError):
     """Raised when an operation conflicts with an ongoing render operation on the same job."""
     pass
+
+
+class FinalVideoAssemblyError(VideoAssemblyError):
+    """Raised when concatenating scenes into the final MP4 video fails."""
+    pass

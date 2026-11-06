@@ -68,6 +68,7 @@ from ...services.video.assembly_input import (
 )
 from ...services.video.assembly import (
     FFmpegNotFoundError,
+    FinalVideoAssemblyError,
     JobRenderConcurrencyError,
     SceneRenderAsset,
     SceneRenderError,
@@ -75,7 +76,9 @@ from ...services.video.assembly import (
     VideoAssemblyError,
     VideoRenderConfiguration,
     VideoRenderJob,
+    VideoRenderResult,
     VideoStorageError,
+    final_video_assembly_service,
     scene_render_service,
     video_assembly_service,
 )
@@ -1889,6 +1892,97 @@ def get_rendered_scene_file_endpoint(job_id: str, scene_id: str):
             path=file_path,
             media_type="video/mp4",
             filename=file_path.name,
+        )
+    except VideoStorageError as vse:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(vse),
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        )
+
+
+# ==============================================================================
+# Milestone 6.3: Final Video Assembly Endpoints
+# ==============================================================================
+
+@router.post("/{job_id}/assemble-video", response_model=VideoRenderResult)
+@router.post("/{job_id}/render", response_model=VideoRenderResult)
+def assemble_final_video_endpoint(
+    job_id: str,
+    refresh: bool = Query(default=False, description="Force re-assembly of final video"),
+):
+    """
+    Assembles rendered scene clips in storyboard order into the final MP4 video.
+    Synchronizes narration audio, silent scenes, and validates output streams with FFprobe.
+    """
+    internal = job_store.get_internal_job(job_id)
+    if not internal:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Job with ID '{job_id}' not found",
+        )
+
+    try:
+        return final_video_assembly_service.assemble_video(job_id=job_id, refresh=refresh)
+    except JobRenderConcurrencyError as jce:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(jce),
+        )
+    except (FFmpegNotFoundError, FinalVideoAssemblyError, VideoStorageError) as err:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(err),
+        )
+    except Exception as exc:
+        logger.error("Unexpected error in assemble_final_video_endpoint for job %s: %s", job_id, exc)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Final video assembly failed unexpectedly: {exc}",
+        )
+
+
+@router.get("/{job_id}/render-result", response_model=VideoRenderResult)
+def get_final_video_result_endpoint(job_id: str):
+    """Retrieves metadata and metrics for the assembled final video."""
+    internal = job_store.get_internal_job(job_id)
+    if not internal:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Job with ID '{job_id}' not found",
+        )
+
+    result = final_video_assembly_service.get_final_video_result(job_id)
+    if not result:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Final video has not been assembled yet for job '{job_id}'",
+        )
+    return result
+
+
+@router.get("/{job_id}/video/file")
+@router.get("/{job_id}/final-video/file")
+def get_final_video_file_endpoint(job_id: str):
+    """Streams or downloads the completed full-length educational video (MP4)."""
+    internal = job_store.get_internal_job(job_id)
+    if not internal:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Job with ID '{job_id}' not found",
+        )
+
+    try:
+        file_path = final_video_assembly_service.get_final_video_file_path(job_id)
+        clean_name = f"{internal.repo_name.replace('/', '_')}_educational_walkthrough.mp4"
+        return FileResponse(
+            path=file_path,
+            media_type="video/mp4",
+            filename=clean_name,
         )
     except VideoStorageError as vse:
         raise HTTPException(

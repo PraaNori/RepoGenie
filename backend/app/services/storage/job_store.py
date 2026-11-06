@@ -1153,6 +1153,29 @@ class JobStore:
         job.stages[8].detail = f"Video assembly completed ({result.duration_seconds:.1f}s, {result.file_size_bytes} bytes)"
         job.progress_percentage = 100
         job.status = StatusEnum.COMPLETED
+
+        # Ensure canonical video result is available for frontend consumption
+        video_url = f"/api/v1/jobs/{job_id}/video/file"
+        dur_int = max(1, int(round(result.duration_seconds)))
+        if job.result:
+            job.result.video_url = video_url
+            job.result.duration_seconds = dur_int
+        else:
+            repo_name = job.repo_name
+            repo_url = job.repo_url
+            desc = (job.project_understanding and getattr(job.project_understanding, "overview", None)) or f"Automated educational walkthrough for {repo_name}."
+            tech = (job.knowledge and getattr(job.knowledge, "detected_frameworks", None)) or ["Python", "FastAPI"]
+            summ = (job.educational_script and getattr(job.educational_script, "introduction", None)) or f"Comprehensive architectural breakdown of {repo_name}."
+            job.result = VideoResult(
+                repo_name=repo_name,
+                repo_url=repo_url,
+                description=desc,
+                tech_stack=tech,
+                summary=summ,
+                video_url=video_url,
+                duration_seconds=dur_int,
+            )
+
         job.updated_at = now
         return job
 

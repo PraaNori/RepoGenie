@@ -7,6 +7,7 @@ from .exceptions import (
     FFmpegNotFoundError,
     FFprobeNotFoundError,
     FFmpegTimeoutError,
+    FinalVideoAssemblyError,
     InvalidRenderConfigurationError,
     JobRenderConcurrencyError,
     MediaProbeError,
@@ -38,6 +39,7 @@ from .storage import VideoStorageManager, video_storage_manager
 from .command_builder import FFmpegCommandBuilder, command_builder
 from .visual_preparer import VisualAssetPreparer, visual_asset_preparer
 from .scene_service import SceneRenderService, scene_render_service
+from .final_service import FinalVideoAssemblyService, final_video_assembly_service
 from .service import VideoAssemblyService, video_assembly_service
 
 __all__ = [
@@ -45,6 +47,7 @@ __all__ = [
     "FFmpegNotFoundError",
     "FFprobeNotFoundError",
     "FFmpegTimeoutError",
+    "FinalVideoAssemblyError",
     "InvalidRenderConfigurationError",
     "JobRenderConcurrencyError",
     "MediaProbeError",
@@ -80,6 +83,8 @@ __all__ = [
     "visual_asset_preparer",
     "SceneRenderService",
     "scene_render_service",
+    "FinalVideoAssemblyService",
+    "final_video_assembly_service",
     "VideoAssemblyService",
     "video_assembly_service",
 ]

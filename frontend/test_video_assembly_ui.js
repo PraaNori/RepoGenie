@@ -98,6 +98,9 @@ test('Video Assembly API Client exports expected methods', () => {
   assert.equal(typeof apiClient.renderScenes, 'function');
   assert.equal(typeof apiClient.getSingleSceneRender, 'function');
   assert.equal(typeof apiClient.getSceneRenderFileUrl, 'function');
+  assert.equal(typeof apiClient.assembleFinalVideo, 'function');
+  assert.equal(typeof apiClient.getFinalVideoResult, 'function');
+  assert.equal(typeof apiClient.getFinalVideoFileUrl, 'function');
 });
 
 test('VideoAssemblyCard renders FFMPEG READY status badge and versions', () => {
@@ -288,6 +291,85 @@ test('VideoAssemblyCard hides Render Scenes button in readOnly mode', () => {
 
   assert.ok(!html.includes('Render Scenes'));
   assert.ok(!html.includes('Force Refresh'));
+});
+
+test('VideoAssemblyCard renders Phase 6.3 Final Video Assembly section and action', () => {
+  const mockSceneResult = {
+    total_scenes: 2,
+    completed_scenes: 2,
+    failed_scenes: 0,
+    is_complete: true,
+    scenes: [
+      {
+        scene_id: 'sc-1',
+        scene_number: 1,
+        title: 'Project Architecture',
+        status: 'completed',
+        is_silent: false,
+        actual_duration_seconds: 6.2,
+      },
+    ],
+  };
+
+  const html = renderToString(
+    React.createElement(VideoAssemblyCard, {
+      jobId: 'job-final-test',
+      systemStatus: mockSystemStatusAvailable,
+      sceneRenders: mockSceneResult,
+      readOnly: false,
+    })
+  );
+
+  assert.ok(html.includes('Final Video Assembly'));
+  assert.ok(html.includes('READY TO ASSEMBLE'));
+  assert.ok(html.includes('Assemble Final Video'));
+});
+
+test('VideoAssemblyCard hides Assemble Final Video button in readOnly mode', () => {
+  const mockSceneResult = {
+    total_scenes: 1,
+    completed_scenes: 1,
+    failed_scenes: 0,
+    is_complete: true,
+    scenes: [],
+  };
+
+  const html = renderToString(
+    React.createElement(VideoAssemblyCard, {
+      jobId: 'job-final-ro',
+      systemStatus: mockSystemStatusAvailable,
+      sceneRenders: mockSceneResult,
+      readOnly: true,
+    })
+  );
+
+  assert.ok(!html.includes('Assemble Final Video'));
+});
+
+test('VideoResultView integrates canonical video URL and caption tracks', () => {
+  const mockJob = {
+    job_id: 'job-res-view-1',
+    repo_name: 'ritchi-e/Food_ordering_WebAPP',
+    repo_url: 'https://github.com/ritchi-e/Food_ordering_WebAPP',
+    has_captions: true,
+    result: {
+      description: 'Test walkthrough',
+      tech_stack: ['Django', 'React'],
+      summary: 'Summary text',
+      video_url: '/api/v1/jobs/job-res-view-1/video/file',
+      duration_seconds: 72,
+    },
+  };
+
+  const html = renderToString(
+    React.createElement(VideoResultView, {
+      job: mockJob,
+    })
+  );
+
+  assert.ok(html.includes('/api/v1/jobs/job-res-view-1/video/file'));
+  assert.ok(html.includes('/api/v1/jobs/job-res-view-1/captions/full/file?format=vtt'));
+  assert.ok(html.includes('kind="subtitles"'));
 });
 
 // Close Vite SSR server after tests complete

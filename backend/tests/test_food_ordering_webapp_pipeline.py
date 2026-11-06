@@ -16,7 +16,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from app.models.schemas import RepositoryKnowledge
+from app.models.schemas import RepositoryKnowledge, StatusEnum
+from app.services.storage.job_store import job_store
 from app.services.ai.exceptions import AIError
 from app.services.ai.llm_manager import LLMManager
 from app.services.ai.schemas import LLMResponse
@@ -42,10 +43,15 @@ from app.services.repo.code_parser import code_parser_service
 from app.services.repo.knowledge_builder import knowledge_builder_service
 from app.services.video.assembly.ffmpeg_manager import ffmpeg_manager
 from app.services.video.assembly.scene_service import SceneRenderService
+from app.services.video.assembly.final_service import FinalVideoAssemblyService
 from app.services.video.assembly.storage import VideoStorageManager
 from app.services.video.assembly.schemas import (
+    SceneRenderAsset,
+    SceneRenderResult,
     SceneRenderStatus,
     VideoRenderConfiguration,
+    VideoRenderResult,
+    VideoRenderStatus,
 )
 from app.services.video.assembly_input.service import AssemblyInputService
 from app.services.video.assembly_input.validator import AssemblyPreflightValidator
@@ -534,11 +540,54 @@ async def test_food_ordering_complete_pipeline_mocked(tmp_path: Path, food_order
         video_storage = VideoStorageManager(base_storage_dir=tmp_path)
         scene_service = SceneRenderService(storage_mgr=video_storage)
         config = VideoRenderConfiguration()
-        rendered_scene = scene_service._render_individual_scene(
-            job_id=job_id,
-            scene=assembly_input.scenes[0],
-            config=config,
-            refresh=True,
+        rendered_assets = []
+        for sc in assembly_input.scenes:
+            ra = scene_service._render_individual_scene(
+                job_id=job_id,
+                scene=sc,
+                config=config,
+                refresh=True,
+            )
+            assert ra.status == SceneRenderStatus.COMPLETED
+            assert ra.actual_duration_seconds > 0.0
+            rendered_assets.append(ra)
+
+        # Register in JobStore
+        job = job_store.create_job(
+            repo_url="https://github.com/ritchi-e/Food_ordering_WebAPP",
+            repo_name="ritchi-e/Food_ordering_WebAPP",
+            repository_owner="ritchi-e",
+            repository_name="Food_ordering_WebAPP",
+            clone_url="https://github.com/ritchi-e/Food_ordering_WebAPP.git",
         )
-        assert rendered_scene.status == SceneRenderStatus.COMPLETED
-        assert rendered_scene.actual_duration_seconds > 0.0
+        job.job_id = job_id
+        job_store._jobs[job_id] = job
+        job.assembly_input = assembly_input
+        job_store.update_job_scene_renders_completed(
+            job_id,
+            SceneRenderResult(
+                job_id=job_id,
+                total_scenes=4,
+                completed_scenes=4,
+                failed_scenes=0,
+                is_complete=True,
+                scenes=rendered_assets,
+            ),
+        )
+
+        # --- 8. Final Video Assembly with FFmpeg ---
+        final_assembly_svc = FinalVideoAssemblyService(storage_mgr=video_storage)
+        final_result = final_assembly_svc.assemble_video(job_id=job_id, refresh=True)
+
+        assert final_result.status == VideoRenderStatus.COMPLETED
+        assert final_result.duration_seconds > 3.0
+        assert final_result.resolution == "1920x1080"
+        assert final_result.video_codec == "h264"
+        assert final_result.audio_codec == "aac"
+
+        # Verify Stage 09 completion
+        assert job.stages[8].status == StatusEnum.COMPLETED
+        assert job.status == StatusEnum.COMPLETED
+        assert job.progress_percentage == 100
+        assert job.result is not None
+        assert f"/api/v1/jobs/{job_id}/video/file" in job.result.video_url

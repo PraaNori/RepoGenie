@@ -13,6 +13,8 @@ import {
   getNarration,
   getCaptions,
   getAssemblyInput,
+  getFinalVideoFileUrl,
+  getCaptionFileUrl,
 } from '../api/client';
 import { 
   Download, 
@@ -254,7 +256,9 @@ export default function VideoResultView({ job, onReset }) {
   const description = job?.result?.description || 'FastAPI framework, high performance, easy to learn, fast to code, ready for production.';
   const techStack = job?.result?.tech_stack || ['Python', 'Starlette', 'Pydantic', 'Uvicorn', 'OpenAPI'];
   const summary = job?.result?.summary || 'This video walks through the Starlette routing core, dependency injection system, Pydantic data validation model, and automatic OpenAPI documentation generation.';
-  const videoUrl = job?.result?.video_url || 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4';
+  const videoUrl = job?.job_id ? getFinalVideoFileUrl(job.job_id) : (job?.result?.video_url || 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4');
+  const hasSubtitles = Boolean(job?.job_id && (job?.has_captions || captions));
+  const captionTrackUrl = hasSubtitles ? getCaptionFileUrl(job.job_id, 'full', 'vtt') : null;
 
   return (
     <div className="max-w-5xl mx-auto py-8 px-4 sm:px-6">
@@ -317,6 +321,15 @@ export default function VideoResultView({ job, onReset }) {
               poster="https://images.unsplash.com/photo-1555066931-4365d14bab8c?q=80&w=1200&auto=format&fit=crop"
               src={videoUrl}
             >
+              {captionTrackUrl && (
+                <track
+                  kind="subtitles"
+                  src={captionTrackUrl}
+                  srcLang="en"
+                  label="English"
+                  default
+                />
+              )}
               Your browser does not support video playback.
             </video>
           </div>

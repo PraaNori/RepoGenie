@@ -148,7 +148,7 @@ class VideoRenderResult(BaseModel):
     resolution: str
     fps: int
     video_codec: str
-    audio_codec: str
+    audio_codec: Optional[str] = None
     completed_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
