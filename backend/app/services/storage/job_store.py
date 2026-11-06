@@ -18,6 +18,8 @@ from ...models.schemas import (
 from ..ai.project_understanding.schemas import ProjectUnderstanding
 from ..ai.code_understanding.schemas import RepositoryCodeUnderstanding
 from ..ai.workflow_understanding.schemas import RepositoryWorkflowUnderstanding
+from ..ai.script_generation.schemas import EducationalScript
+from ..ai.storyboard_generation.schemas import EducationalStoryboard
 
 # Standard 9 pipeline stages
 PIPELINE_STAGES = [
@@ -54,6 +56,8 @@ class JobInternal(BaseModel):
     project_understanding: Optional[ProjectUnderstanding] = None
     code_understanding: Optional[RepositoryCodeUnderstanding] = None
     workflow_understanding: Optional[RepositoryWorkflowUnderstanding] = None
+    educational_script: Optional[EducationalScript] = None
+    educational_storyboard: Optional[EducationalStoryboard] = None
     result: Optional[VideoResult] = None
     error: Optional[str] = None
 
@@ -80,6 +84,10 @@ class JobInternal(BaseModel):
             project_understanding=self.project_understanding,
             has_code_understanding=bool(self.code_understanding is not None),
             has_workflow_understanding=bool(self.workflow_understanding is not None),
+            has_educational_script=bool(self.educational_script is not None),
+            has_educational_storyboard=bool(self.educational_storyboard is not None),
+            educational_script=self.educational_script,
+            educational_storyboard=self.educational_storyboard,
             result=self.result,
             error=self.error,
         )
@@ -431,6 +439,140 @@ class JobStore:
         job.stages[3].status = StatusEnum.FAILED
         job.stages[3].completed_at = now
         job.stages[3].detail = f"AI summary generation failed: {error_message}"
+        job.updated_at = now
+        return job
+
+    def update_job_educational_script_started(self, job_id: str) -> Optional[JobInternal]:
+        job = self._jobs.get(job_id)
+        if not job:
+            return None
+        now = datetime.now(timezone.utc)
+        job.stages[4].status = StatusEnum.IN_PROGRESS
+        job.stages[4].started_at = now
+        job.stages[4].detail = "Generating educational video narration script..."
+        job.current_stage = PIPELINE_STAGES[4]
+        job.progress_percentage = 48
+        job.updated_at = now
+        return job
+
+    def update_job_educational_script_success(
+        self,
+        job_id: str,
+        script: EducationalScript,
+    ) -> Optional[JobInternal]:
+        job = self._jobs.get(job_id)
+        if not job:
+            return None
+        now = datetime.now(timezone.utc)
+        job.educational_script = script
+        job.stages[4].status = StatusEnum.COMPLETED
+        job.stages[4].completed_at = now
+        job.stages[4].detail = (
+            f"Generated educational script ({len(script.sections)} sections, "
+            f"{script.total_estimated_duration_seconds}s)"
+        )
+        job.progress_percentage = 55
+
+        # If a previous storyboard exists, invalidate it because the script changed
+        was_invalidated = False
+        if job.educational_storyboard is not None:
+            job.educational_storyboard = None
+            if job.stages[5].status in (StatusEnum.COMPLETED, StatusEnum.IN_PROGRESS):
+                job.stages[5].status = StatusEnum.PENDING
+                job.stages[5].started_at = None
+                job.stages[5].completed_at = None
+                job.stages[5].detail = "Ready for educational storyboard generation (script was regenerated)"
+                was_invalidated = True
+
+        # Set next stage ready (Stage 6: Storyboard Generation)
+        job.current_stage = PIPELINE_STAGES[5]
+        if job.stages[5].status == StatusEnum.PENDING and not was_invalidated:
+            job.stages[5].detail = "Ready for educational storyboard generation"
+        job.updated_at = now
+        return job
+
+    def update_job_educational_script_failed(self, job_id: str, error_message: str) -> Optional[JobInternal]:
+        job = self._jobs.get(job_id)
+        if not job:
+            return None
+        now = datetime.now(timezone.utc)
+        job.stages[4].status = StatusEnum.FAILED
+        job.stages[4].completed_at = now
+        job.stages[4].detail = f"Educational script generation failed: {error_message}"
+        job.updated_at = now
+        return job
+
+    def get_job_educational_script(self, job_id: str) -> Optional[EducationalScript]:
+        job = self._jobs.get(job_id)
+        if not job:
+            return None
+        return job.educational_script
+
+    def update_job_educational_storyboard_started(self, job_id: str) -> Optional[JobInternal]:
+        job = self._jobs.get(job_id)
+        if not job:
+            return None
+        now = datetime.now(timezone.utc)
+        job.stages[5].status = StatusEnum.IN_PROGRESS
+        job.stages[5].started_at = now
+        job.stages[5].detail = "Generating educational storyboard scenes..."
+        job.current_stage = PIPELINE_STAGES[5]
+        job.progress_percentage = 60
+        job.updated_at = now
+        return job
+
+    def update_job_educational_storyboard_success(
+        self,
+        job_id: str,
+        storyboard: EducationalStoryboard,
+    ) -> Optional[JobInternal]:
+        job = self._jobs.get(job_id)
+        if not job:
+            return None
+        now = datetime.now(timezone.utc)
+        job.educational_storyboard = storyboard
+        job.stages[5].status = StatusEnum.COMPLETED
+        job.stages[5].completed_at = now
+        job.stages[5].detail = (
+            f"Generated educational storyboard ({len(storyboard.scenes)} scenes, "
+            f"{storyboard.total_estimated_duration_seconds}s)"
+        )
+        job.progress_percentage = 66
+        # Set next stage ready (Stage 7: Visual Generation)
+        job.current_stage = PIPELINE_STAGES[6]
+        job.stages[6].status = StatusEnum.PENDING
+        job.stages[6].detail = "Ready for visual generation"
+        job.updated_at = now
+        return job
+
+    def update_job_educational_storyboard_failed(self, job_id: str, error_message: str) -> Optional[JobInternal]:
+        job = self._jobs.get(job_id)
+        if not job:
+            return None
+        now = datetime.now(timezone.utc)
+        job.stages[5].status = StatusEnum.FAILED
+        job.stages[5].completed_at = now
+        job.stages[5].detail = f"Educational storyboard generation failed: {error_message}"
+        job.updated_at = now
+        return job
+
+    def get_job_educational_storyboard(self, job_id: str) -> Optional[EducationalStoryboard]:
+        job = self._jobs.get(job_id)
+        if not job:
+            return None
+        return job.educational_storyboard
+
+    def invalidate_job_educational_storyboard(self, job_id: str) -> Optional[JobInternal]:
+        job = self._jobs.get(job_id)
+        if not job:
+            return None
+        now = datetime.now(timezone.utc)
+        job.educational_storyboard = None
+        if job.stages[5].status in (StatusEnum.COMPLETED, StatusEnum.IN_PROGRESS):
+            job.stages[5].status = StatusEnum.PENDING
+            job.stages[5].started_at = None
+            job.stages[5].completed_at = None
+            job.stages[5].detail = "Ready for educational storyboard generation (script was regenerated)"
         job.updated_at = now
         return job
 

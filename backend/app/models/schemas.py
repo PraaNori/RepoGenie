@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, List, Optional
@@ -414,5 +416,15 @@ class JobResponse(BaseModel):
     project_understanding: Optional[ProjectUnderstanding] = None
     has_code_understanding: bool = False
     has_workflow_understanding: bool = False
+    has_educational_script: bool = False
+    has_educational_storyboard: bool = False
+    educational_script: Optional[EducationalScript] = None
+    educational_storyboard: Optional[EducationalStoryboard] = None
     result: Optional[VideoResult] = None
     error: Optional[str] = None
+
+# Late imports to prevent circular dependencies with AI modules that import models.schemas
+from ..services.ai.script_generation.schemas import EducationalScript
+from ..services.ai.storyboard_generation.schemas import EducationalStoryboard
+
+JobResponse.model_rebuild()

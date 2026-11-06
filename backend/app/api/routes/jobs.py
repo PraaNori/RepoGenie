@@ -26,6 +26,14 @@ from ...services.ai.workflow_understanding import (
     RepositoryWorkflowUnderstanding,
     workflow_understanding_analyzer,
 )
+from ...services.ai.script_generation import (
+    EducationalScript,
+    educational_script_analyzer,
+)
+from ...services.ai.storyboard_generation import (
+    EducationalStoryboard,
+    educational_storyboard_analyzer,
+)
 from ...services.repo.analyzer import repo_analyzer_service
 from ...services.repo.architecture_analyzer import architecture_analyzer_service
 from ...services.repo.code_parser import code_parser_service
@@ -39,6 +47,7 @@ from ...services.repo.ingest import (
     repo_ingestion_service,
 )
 from ...services.storage.job_store import PIPELINE_STAGES, job_store
+from ...core.config import settings
 from ...utils.github_url import (
     GitHubURLValidationError,
     RepositoryAccessibilityError,
@@ -50,6 +59,19 @@ from ...utils.github_url import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
+
+
+def _sanitize_error_message(msg: str, local_path: Optional[str] = None) -> str:
+    """Removes sensitive keys and absolute local repository paths from user-facing error details."""
+    if not msg:
+        return ""
+    if local_path and local_path in msg:
+        msg = msg.replace(local_path, "<REPO_ROOT>")
+    if getattr(settings, "GROQ_API_KEY", None) and settings.GROQ_API_KEY in msg:
+        msg = msg.replace(settings.GROQ_API_KEY, "[REDACTED]")
+    if getattr(settings, "GEMINI_API_KEY", None) and settings.GEMINI_API_KEY in msg:
+        msg = msg.replace(settings.GEMINI_API_KEY, "[REDACTED]")
+    return msg
 
 def run_ingestion_and_analysis_task(job_id: str, clone_url: str):
     """
@@ -742,6 +764,230 @@ def get_job_workflow_understanding(job_id: str):
         )
 
     return internal.workflow_understanding
+
+
+@router.post("/{job_id}/educational-script", response_model=EducationalScript)
+async def generate_job_educational_script(
+    job_id: str,
+    provider: Optional[str] = Query(None, description="Optional override AI provider (e.g. groq, gemini)"),
+    refresh: bool = Query(False, description="Whether to re-generate if already cached"),
+):
+    """
+    Generates or retrieves cached educational narration script for a job.
+    Advances Stage 5 (Script Generation) to COMPLETED upon success.
+    If refresh=True, invalidates any previously generated educational storyboard.
+    """
+    internal = job_store.get_internal_job(job_id)
+    if not internal:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Job with ID '{job_id}' not found",
+        )
+
+    # Check prerequisite stages: ingestion, structure analysis, and code parsing / knowledge consolidation
+    if internal.stages[0].status != StatusEnum.COMPLETED:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Repository ingestion must be completed first (current status: {internal.stages[0].status.value}).",
+        )
+    if internal.stages[1].status != StatusEnum.COMPLETED:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Repository structure analysis must be completed first (current status: {internal.stages[1].status.value}).",
+        )
+    if internal.stages[2].status != StatusEnum.COMPLETED or not internal.knowledge:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Repository knowledge consolidation must be completed first (current status: {internal.stages[2].status.value}).",
+        )
+
+    # Acquire dedicated per-job lock to serialize concurrent requests for the same job atomically
+    job_lock = await job_store.get_job_lock(job_id)
+    async with job_lock:
+        internal = job_store.get_internal_job(job_id)
+        if not internal or not internal.knowledge:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Job with ID '{job_id}' not found",
+            )
+
+        # Return cached if already available and refresh not requested
+        if internal.educational_script and not refresh:
+            return internal.educational_script
+
+        # Prevent duplicate execution if another process or thread marked Stage 5 IN_PROGRESS
+        if internal.stages[4].status == StatusEnum.IN_PROGRESS and not refresh:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Educational script generation is already in progress for job '{job_id}'.",
+            )
+
+        # Update job stage to IN_PROGRESS atomically
+        job_store.update_job_educational_script_started(job_id)
+
+        try:
+            script = await educational_script_analyzer.generate_script(
+                job_id=job_id,
+                knowledge=internal.knowledge,
+                project_understanding=internal.project_understanding,
+                code_understanding=internal.code_understanding,
+                workflow_understanding=internal.workflow_understanding,
+                provider_name=provider,
+                local_path=internal.local_path,
+            )
+            job_store.update_job_educational_script_success(job_id, script)
+            return script
+        except AIError as ai_err:
+            logger.error("AI error during educational script generation for job %s: %s", job_id, ai_err)
+            job_store.update_job_educational_script_failed(job_id, str(ai_err))
+            err_msg = _sanitize_error_message(ai_err.message, internal.local_path)
+            raise HTTPException(
+                status_code=ai_err.status_code if ai_err.status_code and ai_err.status_code >= 400 else 502,
+                detail=f"AI educational script generation failed: {err_msg}",
+            )
+        except Exception as exc:
+            logger.exception("Unexpected error during educational script generation for job %s: %s", job_id, exc)
+            job_store.update_job_educational_script_failed(job_id, str(exc))
+            exc_msg = _sanitize_error_message(str(exc), internal.local_path)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Unexpected error during educational script generation: {exc_msg}",
+            )
+
+
+@router.get("/{job_id}/educational-script", response_model=EducationalScript)
+def get_job_educational_script(job_id: str):
+    """
+    Retrieves cached educational narration script for a job.
+    Returns 404 if not yet generated.
+    """
+    internal = job_store.get_internal_job(job_id)
+    if not internal:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Job with ID '{job_id}' not found",
+        )
+
+    if not internal.educational_script:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Educational script has not yet been generated for job '{job_id}'. Call POST /api/v1/jobs/{job_id}/educational-script to generate.",
+        )
+
+    return internal.educational_script
+
+
+@router.post("/{job_id}/educational-storyboard", response_model=EducationalStoryboard)
+async def generate_job_educational_storyboard(
+    job_id: str,
+    provider: Optional[str] = Query(None, description="Optional override AI provider (e.g. groq, gemini)"),
+    refresh: bool = Query(False, description="Whether to re-generate if already cached"),
+):
+    """
+    Generates or retrieves cached educational storyboard for a job.
+    Requires an existing generated EducationalScript.
+    Advances Stage 6 (Storyboard Generation) to COMPLETED upon success.
+    """
+    internal = job_store.get_internal_job(job_id)
+    if not internal:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Job with ID '{job_id}' not found",
+        )
+
+    # Storyboard requires existing EducationalScript
+    if not internal.educational_script:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Educational script must be generated before storyboard generation for job '{job_id}'. Call POST /api/v1/jobs/{job_id}/educational-script first.",
+        )
+
+    if not internal.knowledge:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Repository knowledge is required for educational storyboard generation.",
+        )
+
+    # Acquire dedicated per-job lock to serialize concurrent requests for the same job atomically
+    job_lock = await job_store.get_job_lock(job_id)
+    async with job_lock:
+        internal = job_store.get_internal_job(job_id)
+        if not internal or not internal.knowledge:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Job with ID '{job_id}' not found",
+            )
+        if not internal.educational_script:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Educational script must be generated before storyboard generation for job '{job_id}'. Call POST /api/v1/jobs/{job_id}/educational-script first.",
+            )
+
+        # Return cached if already available and refresh not requested
+        if internal.educational_storyboard and not refresh:
+            return internal.educational_storyboard
+
+        # Prevent duplicate execution if another process or thread marked Stage 6 IN_PROGRESS
+        if internal.stages[5].status == StatusEnum.IN_PROGRESS and not refresh:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Educational storyboard generation is already in progress for job '{job_id}'.",
+            )
+
+        # Update job stage to IN_PROGRESS atomically
+        job_store.update_job_educational_storyboard_started(job_id)
+
+        try:
+            storyboard = await educational_storyboard_analyzer.generate_storyboard(
+                job_id=job_id,
+                script=internal.educational_script,
+                knowledge=internal.knowledge,
+                project_understanding=internal.project_understanding,
+                code_understanding=internal.code_understanding,
+                workflow_understanding=internal.workflow_understanding,
+                provider_name=provider,
+                local_path=internal.local_path,
+            )
+            job_store.update_job_educational_storyboard_success(job_id, storyboard)
+            return storyboard
+        except AIError as ai_err:
+            logger.error("AI error during educational storyboard generation for job %s: %s", job_id, ai_err)
+            job_store.update_job_educational_storyboard_failed(job_id, str(ai_err))
+            err_msg = _sanitize_error_message(ai_err.message, internal.local_path)
+            raise HTTPException(
+                status_code=ai_err.status_code if ai_err.status_code and ai_err.status_code >= 400 else 502,
+                detail=f"AI educational storyboard generation failed: {err_msg}",
+            )
+        except Exception as exc:
+            logger.exception("Unexpected error during educational storyboard generation for job %s: %s", job_id, exc)
+            job_store.update_job_educational_storyboard_failed(job_id, str(exc))
+            exc_msg = _sanitize_error_message(str(exc), internal.local_path)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Unexpected error during educational storyboard generation: {exc_msg}",
+            )
+
+
+@router.get("/{job_id}/educational-storyboard", response_model=EducationalStoryboard)
+def get_job_educational_storyboard(job_id: str):
+    """
+    Retrieves cached educational storyboard for a job.
+    Returns 404 if not yet generated.
+    """
+    internal = job_store.get_internal_job(job_id)
+    if not internal:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Job with ID '{job_id}' not found",
+        )
+
+    if not internal.educational_storyboard:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Educational storyboard has not yet been generated for job '{job_id}'. Call POST /api/v1/jobs/{job_id}/educational-storyboard to generate.",
+        )
+
+    return internal.educational_storyboard
 
 @router.post("/{job_id}/simulate-step", response_model=JobResponse)
 def simulate_job_step(job_id: str):
