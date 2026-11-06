@@ -12,7 +12,7 @@ import { createServer } from 'vite';
 
 // Start Vite SSR server to dynamically load and transform JSX components
 const vite = await createServer({
-  server: { middlewareMode: true },
+  server: { middlewareMode: true, hmr: false },
   appType: 'custom',
 });
 

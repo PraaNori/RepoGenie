@@ -1,6 +1,12 @@
 import React, { useState, useEffect } from 'react';
 import WorkflowUnderstandingCard from './WorkflowUnderstandingCard';
-import { getWorkflowUnderstanding } from '../api/client';
+import EducationalScriptCard from './EducationalScriptCard';
+import EducationalStoryboardCard from './EducationalStoryboardCard';
+import {
+  getWorkflowUnderstanding,
+  getEducationalScript,
+  getEducationalStoryboard,
+} from '../api/client';
 import { 
   Download, 
   RotateCcw, 
@@ -22,6 +28,12 @@ export default function VideoResultView({ job, onReset }) {
   const [workflowUnderstanding, setWorkflowUnderstanding] = useState(job?.workflow_understanding || null);
   const [workflowError, setWorkflowError] = useState(null);
 
+  const [educationalScript, setEducationalScript] = useState(job?.educational_script || null);
+  const [scriptError, setScriptError] = useState(null);
+
+  const [educationalStoryboard, setEducationalStoryboard] = useState(job?.educational_storyboard || null);
+  const [storyboardError, setStoryboardError] = useState(null);
+
   useEffect(() => {
     let isMounted = true;
     if (job?.job_id && (job?.has_workflow_understanding || job?.workflow_understanding) && !workflowUnderstanding) {
@@ -35,11 +47,9 @@ export default function VideoResultView({ job, onReset }) {
               setWorkflowUnderstanding(res.data);
               setWorkflowError(null);
             } else if (res.status === 404) {
-              // HTTP 404 indicates an absent optional workflow analysis; treat cleanly as absent
               setWorkflowUnderstanding(null);
               setWorkflowError(null);
             } else {
-              // Unexpected server or network error: record for non-intrusive alert
               setWorkflowUnderstanding(null);
               setWorkflowError(res.error || 'Failed to load optional workflow analysis');
             }
@@ -56,6 +66,72 @@ export default function VideoResultView({ job, onReset }) {
       isMounted = false;
     };
   }, [job?.job_id, job?.has_workflow_understanding, job?.workflow_understanding, workflowUnderstanding]);
+
+  useEffect(() => {
+    let isMounted = true;
+    if (job?.job_id && (job?.has_educational_script || job?.educational_script) && !educationalScript) {
+      if (job.educational_script) {
+        setEducationalScript(job.educational_script);
+      } else {
+        getEducationalScript(job.job_id)
+          .then((res) => {
+            if (!isMounted) return;
+            if (res.success) {
+              setEducationalScript(res.data);
+              setScriptError(null);
+            } else if (res.status === 404) {
+              setEducationalScript(null);
+              setScriptError(null);
+            } else {
+              setEducationalScript(null);
+              setScriptError(res.error || 'Failed to load educational script');
+            }
+          })
+          .catch((err) => {
+            if (isMounted) {
+              setEducationalScript(null);
+              setScriptError(err.message || 'Unexpected error loading educational script');
+            }
+          });
+      }
+    }
+    return () => {
+      isMounted = false;
+    };
+  }, [job?.job_id, job?.has_educational_script, job?.educational_script, educationalScript]);
+
+  useEffect(() => {
+    let isMounted = true;
+    if (job?.job_id && (job?.has_educational_storyboard || job?.educational_storyboard) && !educationalStoryboard) {
+      if (job.educational_storyboard) {
+        setEducationalStoryboard(job.educational_storyboard);
+      } else {
+        getEducationalStoryboard(job.job_id)
+          .then((res) => {
+            if (!isMounted) return;
+            if (res.success) {
+              setEducationalStoryboard(res.data);
+              setStoryboardError(null);
+            } else if (res.status === 404) {
+              setEducationalStoryboard(null);
+              setStoryboardError(null);
+            } else {
+              setEducationalStoryboard(null);
+              setStoryboardError(res.error || 'Failed to load educational storyboard');
+            }
+          })
+          .catch((err) => {
+            if (isMounted) {
+              setEducationalStoryboard(null);
+              setStoryboardError(err.message || 'Unexpected error loading educational storyboard');
+            }
+          });
+      }
+    }
+    return () => {
+      isMounted = false;
+    };
+  }, [job?.job_id, job?.has_educational_storyboard, job?.educational_storyboard, educationalStoryboard]);
 
   // Fallback data if viewing directly without active job
   const repoName = job?.repo_name || 'fastapi/fastapi';
@@ -192,6 +268,26 @@ export default function VideoResultView({ job, onReset }) {
         <div className="mt-8 pt-6 border-t border-slate-200">
           <WorkflowUnderstandingCard
             workflowUnderstanding={workflowUnderstanding}
+            readOnly
+          />
+        </div>
+      )}
+
+      {/* Educational Narration Script (Stage 05) */}
+      {educationalScript && (
+        <div className="mt-8 pt-6 border-t border-slate-200">
+          <EducationalScriptCard
+            script={educationalScript}
+            readOnly
+          />
+        </div>
+      )}
+
+      {/* Educational Storyboard (Stage 06) */}
+      {educationalStoryboard && (
+        <div className="mt-8 pt-6 border-t border-slate-200">
+          <EducationalStoryboardCard
+            storyboard={educationalStoryboard}
             readOnly
           />
         </div>

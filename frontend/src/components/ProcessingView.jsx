@@ -2,12 +2,18 @@ import React, { useState, useEffect, useRef } from 'react';
 import ProjectUnderstandingCard from './ProjectUnderstandingCard';
 import CodeUnderstandingCard from './CodeUnderstandingCard';
 import WorkflowUnderstandingCard from './WorkflowUnderstandingCard';
+import EducationalScriptCard from './EducationalScriptCard';
+import EducationalStoryboardCard from './EducationalStoryboardCard';
 import {
   generateProjectUnderstanding,
   getCodeUnderstanding,
   generateCodeUnderstanding,
   getWorkflowUnderstanding,
   generateWorkflowUnderstanding,
+  getEducationalScript,
+  generateEducationalScript,
+  getEducationalStoryboard,
+  generateEducationalStoryboard,
 } from '../api/client';
 import { 
   GitBranch, 
@@ -77,6 +83,19 @@ export default function ProcessingView({
   const [workflowError, setWorkflowError] = useState(null);
   const isFetchingWorkflowRef = useRef(false);
   const isGeneratingWorkflowRef = useRef(false);
+
+  // Milestone 4: Educational Script and Storyboard
+  const [educationalScript, setEducationalScript] = useState(job?.educational_script || null);
+  const [isGeneratingScript, setIsGeneratingScript] = useState(false);
+  const [scriptError, setScriptError] = useState(null);
+  const isFetchingScriptRef = useRef(false);
+  const isGeneratingScriptRef = useRef(false);
+
+  const [educationalStoryboard, setEducationalStoryboard] = useState(job?.educational_storyboard || null);
+  const [isGeneratingStoryboard, setIsGeneratingStoryboard] = useState(false);
+  const [storyboardError, setStoryboardError] = useState(null);
+  const isFetchingStoryboardRef = useRef(false);
+  const isGeneratingStoryboardRef = useRef(false);
 
   useEffect(() => {
     // If the job has code understanding generated and we haven't loaded it yet, fetch it
@@ -171,6 +190,121 @@ export default function ProcessingView({
       setIsGeneratingWorkflow(false);
     }
   };
+
+  useEffect(() => {
+    // If the job has educational script generated and we haven't loaded it yet, fetch it
+    if (job?.job_id && (job?.has_educational_script || job?.educational_script) && !educationalScript) {
+      if (job.educational_script) {
+        setEducationalScript(job.educational_script);
+      } else if (!isFetchingScriptRef.current) {
+        isFetchingScriptRef.current = true;
+        getEducationalScript(job.job_id)
+          .then((res) => {
+            if (res.success) {
+              setEducationalScript(res.data);
+              if (onJobUpdated) {
+                onJobUpdated({ ...job, educational_script: res.data, has_educational_script: true });
+              }
+            }
+          })
+          .finally(() => {
+            isFetchingScriptRef.current = false;
+          });
+      }
+    }
+  }, [job?.job_id, job?.has_educational_script, job?.educational_script, educationalScript]);
+
+  useEffect(() => {
+    // If the job has educational storyboard generated and we haven't loaded it yet, fetch it
+    if (job?.job_id && (job?.has_educational_storyboard || job?.educational_storyboard) && !educationalStoryboard) {
+      if (job.educational_storyboard) {
+        setEducationalStoryboard(job.educational_storyboard);
+      } else if (!isFetchingStoryboardRef.current) {
+        isFetchingStoryboardRef.current = true;
+        getEducationalStoryboard(job.job_id)
+          .then((res) => {
+            if (res.success) {
+              setEducationalStoryboard(res.data);
+              if (onJobUpdated) {
+                onJobUpdated({ ...job, educational_storyboard: res.data, has_educational_storyboard: true });
+              }
+            }
+          })
+          .finally(() => {
+            isFetchingStoryboardRef.current = false;
+          });
+      }
+    }
+  }, [job?.job_id, job?.has_educational_storyboard, job?.educational_storyboard, educationalStoryboard]);
+
+  useEffect(() => {
+    // If job state reports that storyboard was invalidated (e.g. script refreshed on backend), clear storyboard in UI
+    if (job && job.has_educational_storyboard === false && educationalStoryboard) {
+      setEducationalStoryboard(null);
+    }
+  }, [job?.has_educational_storyboard]);
+
+  const handleGenerateScript = async (refresh = false) => {
+    if (!job?.job_id) return;
+    if (isGeneratingScriptRef.current) return;
+    isGeneratingScriptRef.current = true;
+    setIsGeneratingScript(true);
+    setScriptError(null);
+    try {
+      const res = await generateEducationalScript(job.job_id, null, refresh);
+      if (res.success) {
+        setEducationalScript(res.data);
+        if (refresh) {
+          // Script regeneration invalidates previous storyboard
+          setEducationalStoryboard(null);
+          setStoryboardError(null);
+        }
+        if (onJobUpdated) {
+          onJobUpdated({
+            ...job,
+            has_educational_script: true,
+            educational_script: res.data,
+            ...(refresh ? { has_educational_storyboard: false, educational_storyboard: null } : {}),
+          });
+        }
+      } else {
+        setScriptError(res.error);
+      }
+    } catch (err) {
+      setScriptError(err.message || 'Error generating educational script');
+    } finally {
+      isGeneratingScriptRef.current = false;
+      setIsGeneratingScript(false);
+    }
+  };
+
+  const handleGenerateStoryboard = async (refresh = false) => {
+    if (!job?.job_id) return;
+    if (isGeneratingStoryboardRef.current) return;
+    isGeneratingStoryboardRef.current = true;
+    setIsGeneratingStoryboard(true);
+    setStoryboardError(null);
+    try {
+      const res = await generateEducationalStoryboard(job.job_id, null, refresh);
+      if (res.success) {
+        setEducationalStoryboard(res.data);
+        if (onJobUpdated) {
+          onJobUpdated({
+            ...job,
+            has_educational_storyboard: true,
+            educational_storyboard: res.data,
+          });
+        }
+      } else {
+        setStoryboardError(res.error);
+      }
+    } catch (err) {
+      setStoryboardError(err.message || 'Error generating educational storyboard');
+    } finally {
+      isGeneratingStoryboardRef.current = false;
+      setIsGeneratingStoryboard(false);
+    }
+  };
   if (!job) {
     return (
       <div className="max-w-3xl mx-auto py-16 text-center">
@@ -208,6 +342,16 @@ export default function ProcessingView({
     codeAnalysis &&
     architecture?.call_graph &&
     knowledge
+  );
+  const isScriptPrereqReady = Boolean(
+    !isFailed &&
+    job.ingestion_status === 'completed' &&
+    job.stages?.[1]?.status === 'completed' &&
+    knowledge
+  );
+  const isStoryboardPrereqReady = Boolean(
+    !isFailed &&
+    (educationalScript || job?.has_educational_script || job?.educational_script)
   );
 
   return (
@@ -1049,6 +1193,28 @@ export default function ProcessingView({
           onGenerate={handleGenerateWorkflow}
           error={workflowError}
           isPrerequisiteReady={isWorkflowPrereqReady}
+        />
+      )}
+
+      {/* Milestone 4: Educational Script (Stage 05) */}
+      {(knowledge || job?.has_educational_script || educationalScript) && (
+        <EducationalScriptCard
+          script={educationalScript}
+          isLoading={isGeneratingScript || job.stages?.[4]?.status === 'in_progress'}
+          onGenerate={handleGenerateScript}
+          error={scriptError}
+          isPrerequisiteReady={isScriptPrereqReady}
+        />
+      )}
+
+      {/* Milestone 4: Educational Storyboard (Stage 06) */}
+      {(knowledge || job?.has_educational_storyboard || educationalStoryboard) && (
+        <EducationalStoryboardCard
+          storyboard={educationalStoryboard}
+          isLoading={isGeneratingStoryboard || job.stages?.[5]?.status === 'in_progress'}
+          onGenerate={handleGenerateStoryboard}
+          error={storyboardError}
+          isScriptAvailable={isStoryboardPrereqReady}
         />
       )}
 
