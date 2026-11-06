@@ -4,6 +4,7 @@ import CodeUnderstandingCard from './CodeUnderstandingCard';
 import WorkflowUnderstandingCard from './WorkflowUnderstandingCard';
 import EducationalScriptCard from './EducationalScriptCard';
 import EducationalStoryboardCard from './EducationalStoryboardCard';
+import NarrationCard from './NarrationCard';
 import {
   generateProjectUnderstanding,
   getCodeUnderstanding,
@@ -14,6 +15,8 @@ import {
   generateEducationalScript,
   getEducationalStoryboard,
   generateEducationalStoryboard,
+  getNarration,
+  generateNarration,
 } from '../api/client';
 import { 
   GitBranch, 
@@ -96,6 +99,13 @@ export default function ProcessingView({
   const [storyboardError, setStoryboardError] = useState(null);
   const isFetchingStoryboardRef = useRef(false);
   const isGeneratingStoryboardRef = useRef(false);
+
+  // Milestone 5: Narration Audio
+  const [narration, setNarration] = useState(job?.narration || null);
+  const [isGeneratingNarration, setIsGeneratingNarration] = useState(false);
+  const [narrationError, setNarrationError] = useState(null);
+  const isFetchingNarrationRef = useRef(false);
+  const isGeneratingNarrationRef = useRef(false);
 
   useEffect(() => {
     // If the job has code understanding generated and we haven't loaded it yet, fetch it
@@ -243,6 +253,65 @@ export default function ProcessingView({
       setEducationalStoryboard(null);
     }
   }, [job?.has_educational_storyboard]);
+
+  useEffect(() => {
+    // If the job has narration generated and we haven't loaded it yet, fetch it
+    if (job?.job_id && (job?.has_narration || job?.narration) && !narration) {
+      if (job.narration) {
+        setNarration(job.narration);
+      } else if (!isFetchingNarrationRef.current) {
+        isFetchingNarrationRef.current = true;
+        getNarration(job.job_id)
+          .then((res) => {
+            if (res.success) {
+              setNarration(res.data);
+              if (onJobUpdated) {
+                onJobUpdated({ ...job, narration: res.data, has_narration: true });
+              }
+            }
+          })
+          .finally(() => {
+            isFetchingNarrationRef.current = false;
+          });
+      }
+    }
+  }, [job?.job_id, job?.has_narration, job?.narration, narration]);
+
+  useEffect(() => {
+    // If job state reports that narration was invalidated (e.g. storyboard refreshed), clear narration in UI
+    if (job && job.has_narration === false && narration) {
+      setNarration(null);
+    }
+  }, [job?.has_narration]);
+
+  const handleGenerateNarration = async (refresh = false) => {
+    if (!job?.job_id) return;
+    if (isGeneratingNarrationRef.current) return;
+    isGeneratingNarrationRef.current = true;
+    setIsGeneratingNarration(true);
+    setNarrationError(null);
+
+    try {
+      const res = await generateNarration(job.job_id, refresh);
+      if (res.success) {
+        setNarration(res.data);
+        if (onJobUpdated) {
+          onJobUpdated({
+            ...job,
+            narration: res.data,
+            has_narration: true,
+          });
+        }
+      } else {
+        setNarrationError(res.error || 'Failed to synthesize narration audio');
+      }
+    } catch (err) {
+      setNarrationError(err.message || 'Error communicating with server');
+    } finally {
+      setIsGeneratingNarration(false);
+      isGeneratingNarrationRef.current = false;
+    }
+  };
 
   const handleGenerateScript = async (refresh = false) => {
     if (!job?.job_id) return;
@@ -1216,6 +1285,18 @@ export default function ProcessingView({
           onGenerate={handleGenerateStoryboard}
           error={storyboardError}
           isScriptAvailable={isStoryboardPrereqReady}
+        />
+      )}
+
+      {/* Milestone 5: Scene Narration Audio (Stage 08) */}
+      {(knowledge || job?.has_narration || narration || educationalStoryboard) && (
+        <NarrationCard
+          jobId={job.job_id}
+          narration={narration}
+          isLoading={isGeneratingNarration || job.stages?.[7]?.status === 'in_progress'}
+          onGenerate={handleGenerateNarration}
+          error={narrationError}
+          isStoryboardAvailable={Boolean(educationalStoryboard || job?.educational_storyboard || job?.has_educational_storyboard)}
         />
       )}
 

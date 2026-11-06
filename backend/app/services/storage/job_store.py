@@ -22,6 +22,8 @@ from ..ai.script_generation.schemas import EducationalScript
 from ..ai.storyboard_generation.schemas import EducationalStoryboard
 from ..video.visual_generation.schemas import VisualGenerationResult, VisualGenerationStatus
 from ..video.visual_generation.storage import visual_storage_manager
+from ..video.narration.schemas import NarrationAssetStatus, NarrationGenerationResult
+from ..video.narration.audio_storage import audio_storage_manager
 
 # Standard 9 pipeline stages
 PIPELINE_STAGES = [
@@ -61,6 +63,7 @@ class JobInternal(BaseModel):
     educational_script: Optional[EducationalScript] = None
     educational_storyboard: Optional[EducationalStoryboard] = None
     visual_generation: Optional[VisualGenerationResult] = None
+    narration: Optional[NarrationGenerationResult] = None
     result: Optional[VideoResult] = None
     error: Optional[str] = None
 
@@ -90,9 +93,11 @@ class JobInternal(BaseModel):
             has_educational_script=bool(self.educational_script is not None),
             has_educational_storyboard=bool(self.educational_storyboard is not None),
             has_visual_assets=bool(self.visual_generation is not None),
+            has_narration=bool(self.narration is not None),
             educational_script=self.educational_script,
             educational_storyboard=self.educational_storyboard,
             visual_generation=self.visual_generation,
+            narration=self.narration,
             result=self.result,
             error=self.error,
         )
@@ -502,6 +507,19 @@ class JobStore:
                 job.stages[6].completed_at = None
                 job.stages[6].detail = "Ready for visual generation (script was regenerated)"
 
+        # Invalidate downstream narration assets as well
+        if job.narration is not None:
+            job.narration = None
+            try:
+                audio_storage_manager.delete_job_audio(job_id)
+            except Exception as e:
+                logger.warning("Failed to clean audio storage for job %s: %s", job_id, e)
+            if job.stages[7].status in (StatusEnum.COMPLETED, StatusEnum.IN_PROGRESS, StatusEnum.FAILED):
+                job.stages[7].status = StatusEnum.PENDING
+                job.stages[7].started_at = None
+                job.stages[7].completed_at = None
+                job.stages[7].detail = "Ready for voice generation (script was regenerated)"
+
         # Set next stage ready (Stage 6: Storyboard Generation)
         job.current_stage = PIPELINE_STAGES[5]
         if job.stages[5].status == StatusEnum.PENDING and not was_invalidated:
@@ -590,6 +608,19 @@ class JobStore:
                 job.stages[6].detail = "Ready for visual generation (storyboard was regenerated)"
                 was_visual_invalidated = True
 
+        # Invalidate downstream narration assets as well
+        if job.narration is not None:
+            job.narration = None
+            try:
+                audio_storage_manager.delete_job_audio(job_id)
+            except Exception as e:
+                logger.warning("Failed to clean audio storage for job %s: %s", job_id, e)
+            if job.stages[7].status in (StatusEnum.COMPLETED, StatusEnum.IN_PROGRESS, StatusEnum.FAILED):
+                job.stages[7].status = StatusEnum.PENDING
+                job.stages[7].started_at = None
+                job.stages[7].completed_at = None
+                job.stages[7].detail = "Ready for voice generation (storyboard was regenerated)"
+
         # Set next stage ready (Stage 7: Visual Generation)
         job.current_stage = PIPELINE_STAGES[6]
         if job.stages[6].status == StatusEnum.PENDING and not was_visual_invalidated:
@@ -638,6 +669,19 @@ class JobStore:
                 job.stages[6].started_at = None
                 job.stages[6].completed_at = None
                 job.stages[6].detail = "Ready for visual generation (storyboard was invalidated)"
+
+        # Invalidate narration assets as well
+        if job.narration is not None:
+            job.narration = None
+            try:
+                audio_storage_manager.delete_job_audio(job_id)
+            except Exception as e:
+                logger.warning("Failed to clean audio storage for job %s: %s", job_id, e)
+            if job.stages[7].status in (StatusEnum.COMPLETED, StatusEnum.IN_PROGRESS, StatusEnum.FAILED):
+                job.stages[7].status = StatusEnum.PENDING
+                job.stages[7].started_at = None
+                job.stages[7].completed_at = None
+                job.stages[7].detail = "Ready for voice generation (storyboard was invalidated)"
 
         job.updated_at = now
         return job
@@ -775,6 +819,102 @@ class JobStore:
             job.stages[6].completed_at = None
             job.stages[6].detail = "Ready for visual generation (reset)"
         job.current_stage = PIPELINE_STAGES[6]
+        job.updated_at = now
+        return job
+
+    def update_job_narration_started(self, job_id: str) -> Optional[JobInternal]:
+        job = self._jobs.get(job_id)
+        if not job:
+            return None
+        now = datetime.now(timezone.utc)
+        job.stages[7].status = StatusEnum.IN_PROGRESS
+        job.stages[7].started_at = now
+        job.stages[7].detail = "Synthesizing scene narration audio with ElevenLabs..."
+        job.current_stage = PIPELINE_STAGES[7]
+        job.progress_percentage = 78
+        job.updated_at = now
+        return job
+
+    def update_job_narration_success(
+        self,
+        job_id: str,
+        result: NarrationGenerationResult,
+    ) -> Optional[JobInternal]:
+        job = self._jobs.get(job_id)
+        if not job:
+            return None
+
+        # Guard: Verify that all assets are completed or explicitly skipped
+        if result.status != NarrationAssetStatus.COMPLETED:
+            raise ValueError(
+                f"Cannot mark narration generation as completed: result status is '{result.status.value}', expected 'completed'."
+            )
+        if (result.assets_completed + result.assets_skipped) != result.total_assets or result.total_assets == 0:
+            raise ValueError(
+                f"Cannot mark narration generation as completed: only {result.assets_completed + result.assets_skipped}/{result.total_assets} assets generated or skipped."
+            )
+        if result.assets_failed > 0:
+            raise ValueError(
+                f"Cannot mark narration generation as completed: {result.assets_failed} assets failed."
+            )
+        if result.assets_pending > 0 or result.assets_generating > 0:
+            raise ValueError(
+                f"Cannot mark narration generation as completed: {result.assets_pending} assets pending, {result.assets_generating} generating."
+            )
+
+        now = datetime.now(timezone.utc)
+        job.narration = result
+        job.stages[7].status = StatusEnum.COMPLETED
+        job.stages[7].completed_at = now
+        job.stages[7].detail = (
+            f"Generated narration audio ({result.scenes_completed} scenes synthesized, "
+            f"{result.scenes_skipped} skipped)"
+        )
+        job.progress_percentage = 85
+        # Set next stage ready (Stage 9: Video Assembly)
+        job.current_stage = PIPELINE_STAGES[8]
+        if job.stages[8].status == StatusEnum.PENDING:
+            job.stages[8].detail = "Ready for video assembly"
+        job.updated_at = now
+        return job
+
+    def update_job_narration_failed(self, job_id: str, error_message: str) -> Optional[JobInternal]:
+        job = self._jobs.get(job_id)
+        if not job:
+            return None
+        now = datetime.now(timezone.utc)
+        job.stages[7].status = StatusEnum.FAILED
+        job.stages[7].completed_at = now
+        job.stages[7].detail = f"Voice generation failed: {error_message}"
+        job.current_stage = PIPELINE_STAGES[7]
+        if job.narration:
+            job.narration.status = NarrationAssetStatus.FAILED
+            job.narration.error_message = error_message
+        job.updated_at = now
+        return job
+
+    def get_job_narration(self, job_id: str) -> Optional[NarrationGenerationResult]:
+        job = self._jobs.get(job_id)
+        if not job:
+            return None
+        return job.narration
+
+    def invalidate_job_narration(self, job_id: str) -> Optional[JobInternal]:
+        job = self._jobs.get(job_id)
+        if not job:
+            return None
+        now = datetime.now(timezone.utc)
+        job.narration = None
+        try:
+            audio_storage_manager.delete_job_audio(job_id)
+        except Exception as e:
+            logger.warning("Failed to clean audio storage for job %s: %s", job_id, e)
+        if job.stages[7].status in (StatusEnum.COMPLETED, StatusEnum.IN_PROGRESS, StatusEnum.FAILED):
+            job.stages[7].status = StatusEnum.PENDING
+            job.stages[7].started_at = None
+            job.stages[7].completed_at = None
+            job.stages[7].detail = "Ready for voice generation (reset)"
+        job.current_stage = PIPELINE_STAGES[7]
         job.updated_at = now
         return job
 

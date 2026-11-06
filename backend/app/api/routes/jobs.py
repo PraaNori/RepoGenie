@@ -43,6 +43,18 @@ from ...services.video.visual_generation import (
     visual_generation_service,
     visual_storage_manager,
 )
+from ...services.video.narration import (
+    ElevenLabsAuthError,
+    ElevenLabsConfigurationError,
+    ElevenLabsError,
+    ElevenLabsRateLimitError,
+    ElevenLabsVoiceNotFoundError,
+    NarrationAsset,
+    NarrationGenerationResult,
+    audio_storage_manager,
+    elevenlabs_provider,
+    narration_service,
+)
 from ...services.repo.analyzer import repo_analyzer_service
 from ...services.repo.architecture_analyzer import architecture_analyzer_service
 from ...services.repo.code_parser import code_parser_service
@@ -1189,6 +1201,200 @@ def get_job_visual_asset_file(job_id: str, asset_id: str):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Invalid asset path: {pte}",
+        )
+
+
+@router.post("/{job_id}/narration", response_model=NarrationGenerationResult)
+async def generate_job_narration(
+    job_id: str,
+    refresh: bool = Query(False, description="Whether to re-synthesize previously generated narration audio"),
+):
+    """
+    Synthesizes narration audio for all scenes in an EducationalStoryboard using ElevenLabs TTS.
+    Requires an existing generated EducationalStoryboard.
+    Advances Stage 08 (Voice Generation) to COMPLETED only when 100% of required audio assets are generated.
+    """
+    internal = job_store.get_internal_job(job_id)
+    if not internal:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Job with ID '{job_id}' not found",
+        )
+
+    # Ingestion & Analysis prerequisites
+    if internal.stages[0].status != StatusEnum.COMPLETED:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Repository ingestion must be completed first (current status: {internal.stages[0].status.value}).",
+        )
+    if internal.stages[1].status != StatusEnum.COMPLETED:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Repository structure analysis must be completed first (current status: {internal.stages[1].status.value}).",
+        )
+    if internal.stages[2].status != StatusEnum.COMPLETED or not internal.knowledge:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Repository knowledge consolidation must be completed first (current status: {internal.stages[2].status.value}).",
+        )
+
+    # Storyboard prerequisite
+    if not internal.educational_storyboard:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Educational storyboard must be generated before narration generation for job '{job_id}'. Call POST /api/v1/jobs/{job_id}/educational-storyboard first.",
+        )
+
+    # ElevenLabs configuration check
+    try:
+        elevenlabs_provider.validate_configuration()
+    except ElevenLabsConfigurationError as cfg_err:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(cfg_err),
+        )
+
+    # Acquire dedicated per-job lock for atomic serialization
+    job_lock = await job_store.get_job_lock(job_id)
+    async with job_lock:
+        internal = job_store.get_internal_job(job_id)
+        if not internal or not internal.educational_storyboard:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Job with ID '{job_id}' or its educational storyboard not found",
+            )
+
+        # Return cached narration if already available and refresh not requested
+        if internal.narration and not refresh and internal.narration.is_fully_generated:
+            return internal.narration
+
+        # Mark Stage 08 as IN_PROGRESS
+        job_store.update_job_narration_started(job_id)
+
+        try:
+            rendered_result = await narration_service.generate_narration_for_job(
+                job_id=job_id,
+                storyboard=internal.educational_storyboard,
+                script=internal.educational_script,
+                refresh=refresh,
+            )
+
+            if rendered_result.is_fully_generated:
+                job_store.update_job_narration_success(job_id, rendered_result)
+            else:
+                job_store.update_job_narration_failed(
+                    job_id,
+                    rendered_result.error_message or "One or more scene audio files failed generation.",
+                )
+
+            return rendered_result
+        except ElevenLabsAuthError as auth_err:
+            job_store.update_job_narration_failed(job_id, str(auth_err))
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(auth_err))
+        except ElevenLabsVoiceNotFoundError as voice_err:
+            job_store.update_job_narration_failed(job_id, str(voice_err))
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(voice_err))
+        except ElevenLabsRateLimitError as rate_err:
+            job_store.update_job_narration_failed(job_id, str(rate_err))
+            raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=str(rate_err))
+        except Exception as exc:
+            logger.exception("Unexpected error during narration generation for job %s: %s", job_id, exc)
+            job_store.update_job_narration_failed(job_id, str(exc))
+            exc_msg = _sanitize_error_message(str(exc), internal.local_path)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Unexpected error during narration generation: {exc_msg}",
+            )
+
+
+@router.get("/{job_id}/narration", response_model=NarrationGenerationResult)
+def get_job_narration(job_id: str):
+    """
+    Retrieves narration audio generation plan, asset status, and timing synchronization for a job.
+    Returns 404 if not yet generated.
+    """
+    internal = job_store.get_internal_job(job_id)
+    if not internal:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Job with ID '{job_id}' not found",
+        )
+
+    if not internal.narration:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Narration audio has not yet been generated for job '{job_id}'. Call POST /api/v1/jobs/{job_id}/narration to generate.",
+        )
+
+    return internal.narration
+
+
+@router.get("/{job_id}/narration/{asset_id}", response_model=NarrationAsset)
+def get_job_narration_asset_by_id(job_id: str, asset_id: str):
+    """
+    Retrieves metadata for a specific scene narration audio asset.
+    Returns 404 if not found.
+    """
+    internal = job_store.get_internal_job(job_id)
+    if not internal:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Job with ID '{job_id}' not found",
+        )
+
+    if not internal.narration:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Narration audio has not yet been generated for job '{job_id}'.",
+        )
+
+    asset = internal.narration.get_asset_by_id(asset_id)
+    if not asset:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Narration audio asset '{asset_id}' not found in job '{job_id}'.",
+        )
+
+    return asset
+
+
+@router.get("/{job_id}/narration/{asset_id}/file")
+def get_job_narration_asset_file(job_id: str, asset_id: str):
+    """
+    Streams the raw audio media file (MP3) for a scene narration asset if available on disk.
+    Enforces safe path handling and returns 404 if not yet synthesized to disk.
+    """
+    internal = job_store.get_internal_job(job_id)
+    if not internal or not internal.narration:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Job '{job_id}' or its narration assets not found.",
+        )
+
+    asset = internal.narration.get_asset_by_id(asset_id)
+    if not asset:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Narration audio asset '{asset_id}' not found in job '{job_id}'.",
+        )
+
+    if not audio_storage_manager.audio_file_exists(job_id, asset_id, format=asset.format):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Narration audio file for asset '{asset_id}' does not exist on disk.",
+        )
+
+    try:
+        abs_path = audio_storage_manager.get_audio_path(job_id, asset_id, format=asset.format)
+        return FileResponse(
+            path=str(abs_path),
+            media_type="audio/mpeg",
+            filename=f"{asset_id}.mp3",
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Error accessing audio file: {e}",
         )
 
 @router.post("/{job_id}/simulate-step", response_model=JobResponse)

@@ -419,9 +419,11 @@ class JobResponse(BaseModel):
     has_educational_script: bool = False
     has_educational_storyboard: bool = False
     has_visual_assets: bool = False
+    has_narration: bool = False
     educational_script: Optional[EducationalScript] = None
     educational_storyboard: Optional[EducationalStoryboard] = None
     visual_generation: Optional[VisualGenerationResult] = None
+    narration: Optional[NarrationGenerationResult] = None
     result: Optional[VideoResult] = None
     error: Optional[str] = None
 
@@ -430,6 +432,7 @@ from ..services.ai.script_generation.schemas import EducationalScript
 from ..services.ai.storyboard_generation.schemas import EducationalStoryboard
 try:
     from ..services.video.visual_generation.schemas import VisualGenerationResult
+    from ..services.video.narration.schemas import NarrationGenerationResult
     JobResponse.model_rebuild()
 except (ImportError, AttributeError):
     pass

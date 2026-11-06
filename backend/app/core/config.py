@@ -65,6 +65,14 @@ class Settings(BaseSettings):
     AI_MAX_OUTPUT_TOKENS: int = 2048
     AI_TEMPERATURE: float = 0.2
 
+    # ElevenLabs Narration Configuration (Milestone 5.4)
+    ELEVENLABS_API_KEY: Optional[str] = None
+    ELEVENLABS_VOICE_ID: Optional[str] = None
+    ELEVENLABS_MODEL_ID: str = "eleven_multilingual_v2"
+    ELEVENLABS_OUTPUT_FORMAT: str = "mp3_44100_128"
+    ELEVENLABS_TIMEOUT: float = 30.0
+    ELEVENLABS_MAX_RETRIES: int = 3
+
     @property
     def cors_origins_list(self) -> List[str]:
         return [origin.strip() for origin in self.CORS_ORIGINS.split(",") if origin.strip()]

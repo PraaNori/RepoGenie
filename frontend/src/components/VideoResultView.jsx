@@ -2,10 +2,12 @@ import React, { useState, useEffect } from 'react';
 import WorkflowUnderstandingCard from './WorkflowUnderstandingCard';
 import EducationalScriptCard from './EducationalScriptCard';
 import EducationalStoryboardCard from './EducationalStoryboardCard';
+import NarrationCard from './NarrationCard';
 import {
   getWorkflowUnderstanding,
   getEducationalScript,
   getEducationalStoryboard,
+  getNarration,
 } from '../api/client';
 import { 
   Download, 
@@ -33,6 +35,9 @@ export default function VideoResultView({ job, onReset }) {
 
   const [educationalStoryboard, setEducationalStoryboard] = useState(job?.educational_storyboard || null);
   const [storyboardError, setStoryboardError] = useState(null);
+
+  const [narration, setNarration] = useState(job?.narration || null);
+  const [narrationError, setNarrationError] = useState(null);
 
   useEffect(() => {
     let isMounted = true;
@@ -132,6 +137,39 @@ export default function VideoResultView({ job, onReset }) {
       isMounted = false;
     };
   }, [job?.job_id, job?.has_educational_storyboard, job?.educational_storyboard, educationalStoryboard]);
+
+  useEffect(() => {
+    let isMounted = true;
+    if (job?.job_id && (job?.has_narration || job?.narration) && !narration) {
+      if (job.narration) {
+        setNarration(job.narration);
+      } else {
+        getNarration(job.job_id)
+          .then((res) => {
+            if (!isMounted) return;
+            if (res.success) {
+              setNarration(res.data);
+              setNarrationError(null);
+            } else if (res.status === 404) {
+              setNarration(null);
+              setNarrationError(null);
+            } else {
+              setNarration(null);
+              setNarrationError(res.error || 'Failed to load narration audio');
+            }
+          })
+          .catch((err) => {
+            if (isMounted) {
+              setNarration(null);
+              setNarrationError(err.message || 'Unexpected error loading narration audio');
+            }
+          });
+      }
+    }
+    return () => {
+      isMounted = false;
+    };
+  }, [job?.job_id, job?.has_narration, job?.narration, narration]);
 
   // Fallback data if viewing directly without active job
   const repoName = job?.repo_name || 'fastapi/fastapi';
@@ -288,6 +326,17 @@ export default function VideoResultView({ job, onReset }) {
         <div className="mt-8 pt-6 border-t border-slate-200">
           <EducationalStoryboardCard
             storyboard={educationalStoryboard}
+            readOnly
+          />
+        </div>
+      )}
+
+      {/* Narration Audio (Stage 08) */}
+      {narration && (
+        <div className="mt-8 pt-6 border-t border-slate-200">
+          <NarrationCard
+            jobId={job?.job_id}
+            narration={narration}
             readOnly
           />
         </div>

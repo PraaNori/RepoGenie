@@ -521,3 +521,79 @@ export async function generateEducationalStoryboard(jobId, provider = null, refr
     };
   }
 }
+
+export function getNarrationAudioUrl(jobId, assetId) {
+  return `${API_BASE_URL}/api/v1/jobs/${jobId}/narration/${assetId}/file`;
+}
+
+export async function getNarration(jobId) {
+  try {
+    const response = await fetch(`${API_BASE_URL}/api/v1/jobs/${jobId}/narration`, {
+      method: 'GET',
+      headers: {
+        'Accept': 'application/json',
+      },
+    });
+
+    let data;
+    try {
+      data = await response.json();
+    } catch {
+      data = {};
+    }
+
+    if (!response.ok) {
+      return {
+        success: false,
+        status: response.status,
+        error: data.detail || `Failed to fetch narration audio (${response.status})`,
+      };
+    }
+
+    return { success: true, status: response.status, data };
+  } catch (error) {
+    return {
+      success: false,
+      status: 0,
+      error: error.message || 'Error checking narration audio',
+    };
+  }
+}
+
+export async function generateNarration(jobId, refresh = false) {
+  try {
+    const params = new URLSearchParams();
+    if (refresh) params.append('refresh', 'true');
+    const queryString = params.toString() ? `?${params.toString()}` : '';
+
+    const response = await fetch(`${API_BASE_URL}/api/v1/jobs/${jobId}/narration${queryString}`, {
+      method: 'POST',
+      headers: {
+        'Accept': 'application/json',
+      },
+    });
+
+    let data;
+    try {
+      data = await response.json();
+    } catch {
+      data = {};
+    }
+
+    if (!response.ok) {
+      return {
+        success: false,
+        status: response.status,
+        error: data.detail || `Failed to generate narration audio (${response.status})`,
+      };
+    }
+
+    return { success: true, status: response.status, data };
+  } catch (error) {
+    return {
+      success: false,
+      status: 0,
+      error: error.message || 'Error generating narration audio',
+    };
+  }
+}
