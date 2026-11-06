@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import html
 import logging
+import textwrap
 import time
 from typing import List, Optional
 
@@ -65,37 +66,59 @@ class SummaryCardGenerator:
             conclusion = f"Modular, well-structured architecture across the {repo_name} codebase."
             warnings.append("No explicit script conclusion available; generated architectural wrap-up.")
 
-        # 2. Key takeaways (3 structured takeaways)
+        # 2. Key takeaways (3 structured takeaways grounded in script and repository evidence)
         takeaways: List[dict] = []
+
+        # Find relevant script sections if script is present
+        arch_sec = None
+        work_sec = None
+        if script and script.sections:
+            for s in script.sections:
+                p_str = getattr(s.purpose, "value", str(s.purpose)).lower()
+                if "arch" in p_str and not arch_sec:
+                    arch_sec = s
+                elif any(k in p_str for k in ("work", "flow", "comp", "deep")) and not work_sec:
+                    work_sec = s
 
         # Takeaway 1: Architecture & Design Pattern
         t1_title = "Layered Architecture"
         t1_desc = f"Clean separation of concerns with modular subsystems in {repo_name}."
-        pri_lang = ""
-        if knowledge and knowledge.technology_stack:
+        if arch_sec and arch_sec.claims:
+            t1_title = sanitize_text(arch_sec.title, 32)
+            t1_desc = sanitize_text(arch_sec.claims[0].statement, 130)
+        elif code_understanding and hasattr(code_understanding, "architecture_overview") and code_understanding.architecture_overview:
+            t1_desc = sanitize_text(code_understanding.architecture_overview, 130)
+        elif knowledge and knowledge.technology_stack:
             pri_lang = getattr(knowledge.technology_stack, "primary_language", None)
             if not pri_lang and getattr(knowledge.technology_stack, "languages", None):
                 first_lang = knowledge.technology_stack.languages[0]
                 pri_lang = getattr(first_lang, "name", str(first_lang))
-
-        if code_understanding and hasattr(code_understanding, "architecture_overview") and code_understanding.architecture_overview:
-            t1_desc = sanitize_text(code_understanding.architecture_overview, 100)
-        elif pri_lang:
-            t1_desc = f"Engineered in {pri_lang} with clear component boundaries."
+            if pri_lang:
+                t1_desc = f"Engineered in {pri_lang} with clear component boundaries."
         takeaways.append({"title": t1_title, "desc": t1_desc, "category": "architecture", "color": "#4F46E5", "bg": "#EEF2FF"})
 
         # Takeaway 2: Core Execution & Data Flow
         t2_title = "Execution Dispatch"
         t2_desc = "Grounded workflows coordinate input parsing, processing, and return."
-        if code_understanding and code_understanding.components:
+        if work_sec:
+            t2_title = f"Execution: {sanitize_text(work_sec.title, 20)}"
+            if work_sec.claims:
+                t2_desc = sanitize_text(work_sec.claims[0].statement, 130)
+            elif work_sec.related_components:
+                cnames = [c.name for c in work_sec.related_components[:2]]
+                t2_desc = f"Core dispatch orchestrated across {' & '.join(cnames)}."
+        elif code_understanding and code_understanding.components:
             comp_names = [getattr(c, "component_name", None) or getattr(c, "name", "Core") for c in code_understanding.components[:2]]
             t2_desc = f"Key components: {' & '.join(comp_names)} handle primary responsibilities."
         takeaways.append({"title": t2_title, "desc": t2_desc, "category": "execution", "color": "#059669", "bg": "#ECFDF5"})
 
-        # Takeaway 3: Reliability & Static Verification
-        t3_title = "Grounded Intelligence"
+        # Takeaway 3: Objectives & Grounded Verification
+        t3_title = "Grounded Verification"
         t3_desc = "All components, call sites, and workflows are verified by AST static evidence."
-        if knowledge and knowledge.statistics:
+        if script and script.learning_objectives:
+            t3_title = "Grounded Learning"
+            t3_desc = sanitize_text(script.learning_objectives[0], 130)
+        elif knowledge and knowledge.statistics:
             t3_desc = f"Analyzed {knowledge.statistics.source_files or 10} source files with validated AST relationships."
         takeaways.append({"title": t3_title, "desc": t3_desc, "category": "verification", "color": "#D97706", "bg": "#FFFBEB"})
 
@@ -159,9 +182,17 @@ class SummaryCardGenerator:
         for idx, t in enumerate(takeaways[:3]):
             cx = start_x + (idx * (card_w + 50.0))
             esc_t_title = html.escape(t["title"])
-            esc_t_desc = html.escape(sanitize_text(t["desc"], max_length=120))
+            esc_t_desc = sanitize_text(t["desc"], max_length=130)
             c_color = t["color"]
             c_bg = t["bg"]
+
+            # Wrap description cleanly at word boundaries
+            desc_lines = textwrap.wrap(esc_t_desc, width=38)[:4]
+            desc_spans = []
+            for line_idx, line in enumerate(desc_lines):
+                desc_spans.append(
+                    f'<text x="36" y="{172 + (line_idx * 28)}" font-size="16" font-weight="500" fill="#475569">{html.escape(line)}</text>'
+                )
 
             takeaway_cards.append(f"""
     <!-- Takeaway Card {idx + 1} -->
@@ -180,10 +211,18 @@ class SummaryCardGenerator:
       <line x1="36" y1="130" x2="{card_w - 36}" y2="130" stroke="#F1F5F9" stroke-width="1.5" />
 
       <!-- Description Body -->
-      <text x="36" y="172" font-size="16" font-weight="500" fill="#475569">{esc_t_desc[:44]}</text>
-      {f'<text x="36" y="204" font-size="16" font-weight="500" fill="#475569">{esc_t_desc[44:88]}</text>' if len(esc_t_desc) > 44 else ''}
-      {f'<text x="36" y="236" font-size="16" font-weight="500" fill="#475569">{esc_t_desc[88:]}</text>' if len(esc_t_desc) > 88 else ''}
+      {chr(10).join(desc_spans)}
     </g>""")
+
+        # Wrap conclusion text cleanly
+        concl_clean = sanitize_text(conclusion, max_length=170)
+        concl_lines = textwrap.wrap(concl_clean, width=85)[:2]
+        concl_spans = []
+        if len(concl_lines) == 1:
+            concl_spans.append(f'<text x="44" y="96" font-size="22" font-weight="600" fill="#0F172A">"{html.escape(concl_lines[0])}"</text>')
+        elif len(concl_lines) >= 2:
+            concl_spans.append(f'<text x="44" y="88" font-size="22" font-weight="600" fill="#0F172A">"{html.escape(concl_lines[0])}</text>')
+            concl_spans.append(f'<text x="44" y="126" font-size="20" font-weight="500" fill="#334155">{html.escape(concl_lines[1])}"</text>')
 
         return f"""<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 {CANVAS_WIDTH} {CANVAS_HEIGHT}" width="{CANVAS_WIDTH}" height="{CANVAS_HEIGHT}">
   <defs>
@@ -230,8 +269,7 @@ class SummaryCardGenerator:
     <rect width="1720" height="180" rx="16" fill="#F8FAFC" stroke="#E2E8F0" stroke-width="1.5" />
     <rect x="0" y="0" width="8" height="180" rx="4" fill="#10B981" />
     <text x="44" y="44" font-size="13" font-weight="700" fill="#059669" letter-spacing="0.06em">CONCLUSION OVERVIEW</text>
-    <text x="44" y="90" font-size="22" font-weight="600" fill="#0F172A">"{esc_concl[:90]}"</text>
-    {f'<text x="44" y="128" font-size="20" font-weight="500" fill="#334155">{esc_concl[90:180]}</text>' if len(esc_concl) > 90 else ''}
+    {chr(10).join(concl_spans)}
   </g>
 
   <!-- 3 Structured Takeaways Cards Row -->

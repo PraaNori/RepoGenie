@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import html
 import logging
+import textwrap
 import time
 from typing import List, Optional
 
@@ -162,7 +163,9 @@ class TitleCardGenerator:
     ) -> str:
         """Renders 1920x1080 title card SVG."""
         esc_title = html.escape(sanitize_text(full_repo_title, max_length=50))
-        esc_desc = html.escape(sanitize_text(description, max_length=180))
+        desc_lines = textwrap.wrap(sanitize_text(description, max_length=180), width=80)
+        desc_line1 = html.escape(desc_lines[0]) if desc_lines else ""
+        desc_line2 = html.escape(desc_lines[1]) if len(desc_lines) > 1 else ""
         esc_scene_title = html.escape(sanitize_text(scene.title, max_length=70))
 
         # Render tech pill badges
@@ -189,7 +192,10 @@ class TitleCardGenerator:
 
         for idx, obj in enumerate(objectives[:3]):
             cx = card_start_x + (idx * (card_w + 50.0))
-            esc_obj = html.escape(sanitize_text(obj, max_length=110))
+            wrapped = textwrap.wrap(sanitize_text(obj, max_length=110), width=34)
+            o_l1 = html.escape(wrapped[0]) if len(wrapped) > 0 else ""
+            o_l2 = html.escape(wrapped[1]) if len(wrapped) > 1 else ""
+            o_l3 = html.escape(wrapped[2]) if len(wrapped) > 2 else ""
             num = icons[idx]
             ic_c = icon_colors[idx]
             ic_bg = icon_bgs[idx]
@@ -204,9 +210,9 @@ class TitleCardGenerator:
       <text x="58" y="47" font-size="13" font-weight="700" fill="{ic_c}" text-anchor="middle">{num}</text>
       <!-- Title -->
       <text x="36" y="90" font-size="12" font-weight="700" fill="#64748B" letter-spacing="0.06em">MODULE TOPIC</text>
-      <text x="36" y="126" font-size="17" font-weight="600" fill="#0F172A">{esc_obj[:46]}</text>
-      {f'<text x="36" y="156" font-size="17" font-weight="600" fill="#0F172A">{esc_obj[46:92]}</text>' if len(esc_obj) > 46 else ''}
-      {f'<text x="36" y="186" font-size="17" font-weight="600" fill="#0F172A">{esc_obj[92:]}</text>' if len(esc_obj) > 92 else ''}
+      <text x="36" y="126" font-size="17" font-weight="600" fill="#0F172A">{o_l1}</text>
+      {f'<text x="36" y="156" font-size="17" font-weight="600" fill="#0F172A">{o_l2}</text>' if o_l2 else ''}
+      {f'<text x="36" y="186" font-size="17" font-weight="600" fill="#0F172A">{o_l3}</text>' if o_l3 else ''}
     </g>""")
 
         return f"""<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 {CANVAS_WIDTH} {CANVAS_HEIGHT}" width="{CANVAS_WIDTH}" height="{CANVAS_HEIGHT}">
@@ -250,8 +256,8 @@ class TitleCardGenerator:
     <text x="0" y="100" class="hero-title">{esc_title}</text>
 
     <!-- Problem statement / Description -->
-    <text x="0" y="160" class="hero-desc">{esc_desc[:90]}</text>
-    {f'<text x="0" y="196" class="hero-desc">{esc_desc[90:180]}</text>' if len(esc_desc) > 90 else ''}
+    <text x="0" y="160" class="hero-desc">{desc_line1}</text>
+    {f'<text x="0" y="196" class="hero-desc">{desc_line2}</text>' if desc_line2 else ''}
 
     <!-- Technology tags row -->
     <g transform="translate(0, 240)">

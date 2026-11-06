@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import html
 import logging
+import textwrap
 import time
 from typing import Any, Dict, List, Optional
 
@@ -182,21 +183,29 @@ class CodeWalkthroughGenerator:
         panel_w = 550.0
 
         # Context Card 1: Symbol Header & Summary
-        esc_summary = html.escape(sanitize_text(excerpt.explanation_summary or scene.purpose or "Core execution logic", max_length=160))
+        raw_summary = sanitize_text(excerpt.explanation_summary or scene.purpose or "Core execution logic", max_length=150)
         esc_sig = html.escape(sanitize_text(excerpt.signature or symbol_name, max_length=70))
+        summary_lines = textwrap.wrap(raw_summary, width=44)[:2]
+        summary_spans = []
+        for s_idx, s_line in enumerate(summary_lines):
+            fill = "#475569" if s_idx == 0 else "#64748B"
+            summary_spans.append(f'<text x="24" y="{105 + (s_idx * 24)}" font-size="14" font-weight="500" fill="{fill}">{html.escape(s_line)}</text>')
 
         # Context Card 2: Parameters & Return Contract (if present)
         contract_markup = ""
         if excerpt.parameters_and_returns:
-            esc_pr = html.escape(sanitize_text(excerpt.parameters_and_returns, max_length=150))
+            raw_pr = sanitize_text(excerpt.parameters_and_returns, max_length=140)
+            pr_lines = textwrap.wrap(raw_pr, width=46)[:2]
+            pr_spans = []
+            for p_idx, p_line in enumerate(pr_lines):
+                pr_spans.append(f'<text x="24" y="{60 + (p_idx * 22)}" font-size="14" font-weight="500" fill="#334155">{html.escape(p_line)}</text>')
             contract_markup = f"""
     <!-- Contract Callout -->
     <g transform="translate(0, 180)">
       <rect width="{panel_w}" height="100" rx="12" fill="#F8FAFC" stroke="#E2E8F0" stroke-width="1.5" />
       <rect x="0" y="0" width="6" height="100" rx="3" fill="#10B981" />
       <text x="24" y="32" font-size="12" font-weight="700" fill="#059669" letter-spacing="0.05em">DATA &amp; RETURN CONTRACT</text>
-      <text x="24" y="60" font-size="14" font-weight="500" fill="#334155">{esc_pr[:75]}</text>
-      {f'<text x="24" y="82" font-size="14" font-weight="500" fill="#334155">{esc_pr[75:]}</text>' if len(esc_pr) > 75 else ''}
+      {chr(10).join(pr_spans)}
     </g>"""
 
         # Context Card 3: Grounded Line Annotations
@@ -205,7 +214,12 @@ class CodeWalkthroughGenerator:
 
         for idx, l in enumerate(excerpt.lines):
             if l.annotation:
-                esc_ann = html.escape(sanitize_text(l.annotation, max_length=130))
+                raw_ann = sanitize_text(l.annotation, max_length=130)
+                ann_lines = textwrap.wrap(raw_ann, width=44)[:2]
+                ann_spans = []
+                for a_idx, a_line in enumerate(ann_lines):
+                    fill = "#1E293B" if a_idx == 0 else "#475569"
+                    ann_spans.append(f'<text x="24" y="{66 + (a_idx * 24)}" font-size="14" font-weight="500" fill="{fill}">{html.escape(a_line)}</text>')
                 item_card = f"""
     <g transform="translate(0, {ann_offset_y:.1f})">
       <rect width="{panel_w}" height="110" rx="12" fill="#FFFFFF" stroke="#CBD5E1" stroke-width="1.5" />
@@ -214,8 +228,7 @@ class CodeWalkthroughGenerator:
       <rect x="24" y="16" width="68" height="24" rx="12" fill="#EEF2FF" stroke="#6366F1" stroke-width="1" />
       <text x="58" y="32" font-size="12" font-weight="700" fill="#4F46E5" text-anchor="middle">Line {l.line_number}</text>
       <!-- Annotation explanation -->
-      <text x="24" y="66" font-size="14" font-weight="500" fill="#1E293B">{esc_ann[:65]}</text>
-      {f'<text x="24" y="90" font-size="14" font-weight="500" fill="#475569">{esc_ann[65:]}</text>' if len(esc_ann) > 65 else ''}
+      {chr(10).join(ann_spans)}
     </g>"""
                 annotation_items.append(item_card)
                 ann_offset_y += 125.0
@@ -224,13 +237,16 @@ class CodeWalkthroughGenerator:
 
         if not annotation_items:
             # Fallback note explaining the component role
+            fallback_spans = []
+            for f_idx, f_line in enumerate(summary_lines):
+                fill = "#334155" if f_idx == 0 else "#64748B"
+                fallback_spans.append(f'<text x="24" y="{66 + (f_idx * 24)}" font-size="14" font-weight="500" fill="{fill}">{html.escape(f_line)}</text>')
             fallback_ann = f"""
     <g transform="translate(0, {ann_offset_y:.1f})">
       <rect width="{panel_w}" height="110" rx="12" fill="#FFFFFF" stroke="#E2E8F0" stroke-width="1.5" />
       <rect x="0" y="0" width="6" height="110" rx="3" fill="#818CF8" />
       <text x="24" y="32" font-size="12" font-weight="700" fill="#4F46E5" letter-spacing="0.05em">CODE INSIGHT</text>
-      <text x="24" y="66" font-size="14" font-weight="500" fill="#334155">{esc_summary[:70]}</text>
-      {f'<text x="24" y="90" font-size="14" font-weight="500" fill="#64748B">{esc_summary[70:]}</text>' if len(esc_summary) > 70 else ''}
+      {chr(10).join(fallback_spans)}
     </g>"""
             annotation_items.append(fallback_ann)
 
@@ -312,8 +328,7 @@ class CodeWalkthroughGenerator:
     <text x="24" y="68" font-family="JetBrains Mono, Fira Code, Consolas, monospace" font-size="15" font-weight="600" fill="#0F172A">{esc_sig}</text>
 
     <!-- Summary explanation -->
-    <text x="24" y="105" font-size="14" font-weight="500" fill="#475569">{esc_summary[:70]}</text>
-    {f'<text x="24" y="128" font-size="14" font-weight="500" fill="#64748B">{esc_summary[70:]}</text>' if len(esc_summary) > 70 else ''}
+    {chr(10).join(summary_spans)}
 
     {contract_markup}
     {''.join(annotation_items)}
