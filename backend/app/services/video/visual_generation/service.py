@@ -146,7 +146,7 @@ class VisualGenerationService:
                 visual_description=scene.visual_description,
                 primary_asset=primary_asset,
                 supplementary_assets=[],
-                status=VisualGenerationStatus.PENDING,
+                status=VisualGenerationStatus.PLANNED,
             )
             scene_assets_list.append(scene_assets)
 
@@ -155,12 +155,16 @@ class VisualGenerationService:
             job_id=safe_job_id,
             storyboard_id=storyboard.storyboard_id,
             script_id=storyboard.script_id,
-            status=VisualGenerationStatus.PENDING,
+            status=VisualGenerationStatus.PLANNED,
             video_orientation=VideoOrientation.LANDSCAPE,
             total_scenes=len(scene_assets_list),
             scenes_completed=0,
             scenes_failed=0,
             total_assets=total_assets,
+            assets_pending=total_assets,
+            assets_generating=0,
+            assets_completed=0,
+            assets_failed=0,
             scene_assets=scene_assets_list,
             storage_directory=relative_dir,
             created_at=now,

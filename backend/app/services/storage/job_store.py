@@ -20,7 +20,7 @@ from ..ai.code_understanding.schemas import RepositoryCodeUnderstanding
 from ..ai.workflow_understanding.schemas import RepositoryWorkflowUnderstanding
 from ..ai.script_generation.schemas import EducationalScript
 from ..ai.storyboard_generation.schemas import EducationalStoryboard
-from ..video.visual_generation.schemas import VisualGenerationResult
+from ..video.visual_generation.schemas import VisualGenerationResult, VisualGenerationStatus
 from ..video.visual_generation.storage import visual_storage_manager
 
 # Standard 9 pipeline stages
@@ -642,6 +642,42 @@ class JobStore:
         job.updated_at = now
         return job
 
+    def update_job_visual_planning_started(self, job_id: str) -> Optional[JobInternal]:
+        job = self._jobs.get(job_id)
+        if not job:
+            return None
+        now = datetime.now(timezone.utc)
+        job.stages[6].status = StatusEnum.IN_PROGRESS
+        job.stages[6].started_at = now
+        job.stages[6].detail = "Planning visual asset specifications..."
+        job.current_stage = PIPELINE_STAGES[6]
+        job.progress_percentage = 68
+        job.updated_at = now
+        return job
+
+    def update_job_visual_planning_success(
+        self,
+        job_id: str,
+        plan: VisualGenerationResult,
+    ) -> Optional[JobInternal]:
+        job = self._jobs.get(job_id)
+        if not job:
+            return None
+        now = datetime.now(timezone.utc)
+        job.visual_generation = plan
+        # Stage 07 remains IN_PROGRESS: visual planning is NOT visual rendering.
+        # It must NOT be marked COMPLETED and must NOT advance to Stage 08.
+        job.stages[6].status = StatusEnum.IN_PROGRESS
+        job.stages[6].completed_at = None
+        job.stages[6].detail = (
+            f"Visual asset plan initialized ({len(plan.scene_assets)} scenes, "
+            f"{plan.total_assets} assets pending rendering)"
+        )
+        job.current_stage = PIPELINE_STAGES[6]
+        job.progress_percentage = 70
+        job.updated_at = now
+        return job
+
     def update_job_visual_generation_started(self, job_id: str) -> Optional[JobInternal]:
         job = self._jobs.get(job_id)
         if not job:
@@ -649,9 +685,9 @@ class JobStore:
         now = datetime.now(timezone.utc)
         job.stages[6].status = StatusEnum.IN_PROGRESS
         job.stages[6].started_at = now
-        job.stages[6].detail = "Initializing visual asset generation foundation..."
+        job.stages[6].detail = "Rendering visual assets..."
         job.current_stage = PIPELINE_STAGES[6]
-        job.progress_percentage = 70
+        job.progress_percentage = 71
         job.updated_at = now
         return job
 
@@ -663,13 +699,36 @@ class JobStore:
         job = self._jobs.get(job_id)
         if not job:
             return None
+
+        # Guard: Verify that all assets are genuinely rendered and completed
+        if result.status != VisualGenerationStatus.COMPLETED:
+            raise ValueError(
+                f"Cannot mark visual generation as completed: result status is '{result.status.value}', expected 'completed'."
+            )
+        if result.scenes_completed != result.total_scenes or result.total_scenes == 0:
+            raise ValueError(
+                f"Cannot mark visual generation as completed: only {result.scenes_completed}/{result.total_scenes} scenes completed."
+            )
+        if result.scenes_failed > 0:
+            raise ValueError(
+                f"Cannot mark visual generation as completed: {result.scenes_failed} scenes failed."
+            )
+        if result.assets_completed != result.total_assets or result.total_assets == 0:
+            raise ValueError(
+                f"Cannot mark visual generation as completed: only {result.assets_completed}/{result.total_assets} assets rendered."
+            )
+        if result.assets_pending > 0 or result.assets_generating > 0 or result.assets_failed > 0:
+            raise ValueError(
+                f"Cannot mark visual generation as completed: {result.assets_pending} assets pending, {result.assets_generating} generating, {result.assets_failed} failed."
+            )
+
         now = datetime.now(timezone.utc)
         job.visual_generation = result
         job.stages[6].status = StatusEnum.COMPLETED
         job.stages[6].completed_at = now
         job.stages[6].detail = (
-            f"Generated visual asset plan ({len(result.scene_assets)} scenes, "
-            f"{result.total_assets} assets)"
+            f"Rendered all visual assets ({result.scenes_completed} scenes, "
+            f"{result.assets_completed} assets completed)"
         )
         job.progress_percentage = 75
         # Set next stage ready (Stage 8: Voice Generation)
@@ -687,6 +746,10 @@ class JobStore:
         job.stages[6].status = StatusEnum.FAILED
         job.stages[6].completed_at = now
         job.stages[6].detail = f"Visual generation failed: {error_message}"
+        job.current_stage = PIPELINE_STAGES[6]
+        if job.visual_generation:
+            job.visual_generation.status = VisualGenerationStatus.FAILED
+            job.visual_generation.error_message = error_message
         job.updated_at = now
         return job
 
@@ -706,11 +769,12 @@ class JobStore:
             visual_storage_manager.delete_job_visuals(job_id)
         except Exception as e:
             logger.warning("Failed to clean visual storage for job %s: %s", job_id, e)
-        if job.stages[6].status in (StatusEnum.COMPLETED, StatusEnum.IN_PROGRESS):
+        if job.stages[6].status in (StatusEnum.COMPLETED, StatusEnum.IN_PROGRESS, StatusEnum.FAILED):
             job.stages[6].status = StatusEnum.PENDING
             job.stages[6].started_at = None
             job.stages[6].completed_at = None
             job.stages[6].detail = "Ready for visual generation (reset)"
+        job.current_stage = PIPELINE_STAGES[6]
         job.updated_at = now
         return job
 

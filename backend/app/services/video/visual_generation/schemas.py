@@ -29,6 +29,7 @@ _SAFE_PATH_PATTERN = re.compile(r"^jobs/[a-zA-Z0-9_\-]+/visuals/[a-zA-Z0-9_\-]+\
 class VisualGenerationStatus(str, Enum):
     """Lifecycle status for storyboard-level and scene-level visual generation."""
     PENDING = "pending"
+    PLANNED = "planned"
     GENERATING = "generating"
     COMPLETED = "completed"
     FAILED = "failed"
@@ -240,7 +241,7 @@ class SceneVisualAssets(BaseModel):
         description="Additional visual assets (e.g. overlays, sub-diagrams)",
     )
     status: VisualGenerationStatus = Field(
-        default=VisualGenerationStatus.PENDING,
+        default=VisualGenerationStatus.PLANNED,
         description="Aggregated generation status for this scene's visuals",
     )
     error_message: Optional[str] = Field(
@@ -292,8 +293,8 @@ class VisualGenerationResult(BaseModel):
         description="ID of the EducationalScript underlying the storyboard",
     )
     status: VisualGenerationStatus = Field(
-        default=VisualGenerationStatus.PENDING,
-        description="Overall visual generation lifecycle status",
+        default=VisualGenerationStatus.PLANNED,
+        description="Overall visual generation lifecycle status (e.g. 'planned', 'generating', 'completed', 'failed')",
     )
     video_orientation: VideoOrientation = Field(
         default=VideoOrientation.LANDSCAPE,
@@ -318,6 +319,26 @@ class VisualGenerationResult(BaseModel):
         default=0,
         ge=0,
         description="Total visual assets planned or generated",
+    )
+    assets_pending: int = Field(
+        default=0,
+        ge=0,
+        description="Number of assets awaiting rendering",
+    )
+    assets_generating: int = Field(
+        default=0,
+        ge=0,
+        description="Number of assets currently rendering",
+    )
+    assets_completed: int = Field(
+        default=0,
+        ge=0,
+        description="Number of assets successfully rendered to disk",
+    )
+    assets_failed: int = Field(
+        default=0,
+        ge=0,
+        description="Number of assets that failed rendering",
     )
     scene_assets: List[SceneVisualAssets] = Field(
         default_factory=list,
@@ -368,7 +389,25 @@ class VisualGenerationResult(BaseModel):
             raise ValueError(
                 f"scenes_failed ({self.scenes_failed}) cannot exceed total_scenes ({self.total_scenes})"
             )
+        if self.assets_completed > self.total_assets:
+            raise ValueError(
+                f"assets_completed ({self.assets_completed}) cannot exceed total_assets ({self.total_assets})"
+            )
         return self
+
+    @property
+    def is_fully_rendered(self) -> bool:
+        """Returns True only when all required assets are completed and rendered."""
+        return (
+            self.status == VisualGenerationStatus.COMPLETED
+            and self.total_assets > 0
+            and self.assets_completed == self.total_assets
+            and self.assets_pending == 0
+            and self.assets_generating == 0
+            and self.assets_failed == 0
+            and self.scenes_completed == self.total_scenes
+            and self.scenes_failed == 0
+        )
 
     def get_scene_assets(self, scene_id: str) -> Optional[SceneVisualAssets]:
         """Finds visual asset collection for a specific scene by scene_id."""

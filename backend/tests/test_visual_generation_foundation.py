@@ -4,11 +4,17 @@ Tests for Milestone 5, Phase 5.1: Visual Generation Foundation.
 Covers:
 1. Strongly typed Pydantic schemas (VisualAsset, SceneVisualAssets, VisualGenerationResult, metadata, enums).
 2. Isolated storage manager (directory isolation, path traversal prevention, safe relative paths, deletion).
-3. VisualGenerationService (scene-to-asset blueprint mapping, PENDING lifecycle state, evidence preservation).
-4. JobStore integration & Invalidation Cascade (script regeneration invalidates storyboard and visuals;
-   storyboard regeneration invalidates visuals and purges disk assets; Stage 7 tracking).
+3. VisualGenerationService (scene-to-asset blueprint mapping, PLANNED status, PENDING asset lifecycle state, evidence preservation).
+4. JobStore integration & Lifecycle Correctness:
+   - Visual planning initializes the plan without marking Stage 07 as COMPLETED.
+   - Visual planning does NOT advance the pipeline to Stage 08 (Voice Generation).
+   - All planned assets remain in PENDING status before rendering.
+   - Stage 07 is marked COMPLETED only when every required asset has successfully rendered.
+   - A failed asset prevents premature completion.
+   - Invalidation cascade: Storyboard invalidation clears visual plan and purges disk assets.
+   - Invalidation cascade: Script invalidation clears storyboard, visual plan, and purges disk assets.
 5. FastAPI endpoints (POST /visual-assets, GET /visual-assets, GET /visual-assets/{asset_id},
-   GET /visual-assets/{asset_id}/file, 404, 409, concurrency locking).
+   GET /visual-assets/{asset_id}/file, 404, 409, refresh).
 """
 
 from __future__ import annotations
@@ -55,7 +61,7 @@ from app.services.ai.storyboard_generation.schemas import (
     StoryboardScene,
     VisualType,
 )
-from app.services.storage.job_store import job_store
+from app.services.storage.job_store import PIPELINE_STAGES, job_store
 from app.services.video.visual_generation import (
     MediaFormat,
     PathTraversalError,
@@ -386,7 +392,7 @@ def test_scene_visual_assets_validation():
         primary_asset=asset,
     )
     assert scene_assets.total_assets_count == 1
-    assert scene_assets.status == VisualGenerationStatus.PENDING
+    assert scene_assets.status == VisualGenerationStatus.PLANNED
 
     # Mismatched scene_id between SceneVisualAssets and primary_asset
     mismatched_asset = asset.model_copy(update={"scene_id": "different-scene"})
@@ -423,15 +429,19 @@ def test_visual_generation_result_validation():
         job_id="job1",
         storyboard_id="sb-1",
         script_id="script-1",
+        status=VisualGenerationStatus.PLANNED,
         total_scenes=1,
         scenes_completed=0,
         scenes_failed=0,
         total_assets=1,
+        assets_pending=1,
+        assets_completed=0,
         scene_assets=[scene_assets],
         storage_directory="jobs/job1/visuals",
     )
-    assert result.status == VisualGenerationStatus.PENDING
+    assert result.status == VisualGenerationStatus.PLANNED
     assert result.video_orientation == VideoOrientation.LANDSCAPE
+    assert not result.is_fully_rendered
 
     # Completed scenes cannot exceed total scenes
     with pytest.raises(ValueError, match="scenes_completed .* cannot exceed total_scenes"):
@@ -443,6 +453,21 @@ def test_visual_generation_result_validation():
             scenes_completed=5,
             scenes_failed=0,
             total_assets=1,
+            scene_assets=[scene_assets],
+            storage_directory="jobs/job1/visuals",
+        )
+
+    # Completed assets cannot exceed total assets
+    with pytest.raises(ValueError, match="assets_completed .* cannot exceed total_assets"):
+        VisualGenerationResult(
+            job_id="job1",
+            storyboard_id="sb-1",
+            script_id="script-1",
+            total_scenes=1,
+            scenes_completed=0,
+            scenes_failed=0,
+            total_assets=1,
+            assets_completed=5,
             scene_assets=[scene_assets],
             storage_directory="jobs/job1/visuals",
         )
@@ -533,7 +558,7 @@ def test_service_plan_visual_asset_for_scene():
 
 
 def test_service_initialize_visual_assets(tmp_path: Path):
-    """Verifies that initialize_visual_assets produces a complete PENDING blueprint."""
+    """Verifies that initialize_visual_assets produces a complete PLANNED blueprint."""
     mgr = VisualAssetStorageManager(base_storage_dir=tmp_path)
     service = VisualGenerationService(storage_manager=mgr)
 
@@ -545,13 +570,22 @@ def test_service_initialize_visual_assets(tmp_path: Path):
     assert result.job_id == "job-init-1"
     assert result.storyboard_id == storyboard.storyboard_id
     assert result.script_id == script.script_id
-    assert result.status == VisualGenerationStatus.PENDING
+    assert result.status == VisualGenerationStatus.PLANNED
     assert result.total_scenes == 2
     assert result.scenes_completed == 0
     assert result.scenes_failed == 0
     assert result.total_assets == 2
+    assert result.assets_pending == 2
+    assert result.assets_completed == 0
+    assert result.assets_generating == 0
+    assert result.assets_failed == 0
     assert len(result.scene_assets) == 2
     assert result.storage_directory == "jobs/job-init-1/visuals"
+
+    # All scenes and assets are planned/pending
+    for sa in result.scene_assets:
+        assert sa.status == VisualGenerationStatus.PLANNED
+        assert sa.primary_asset.status == VisualAssetStatus.PENDING
 
     # Directory was created on disk
     vis_dir = mgr.get_job_visuals_dir("job-init-1", create=False)
@@ -577,39 +611,129 @@ def test_service_initialize_visual_assets_validation():
 
 
 # ---------------------------------------------------------------------------
-# 4. JobStore Integration & Invalidation Cascade Tests
+# 4. JobStore Integration & Correct Lifecycle Tests
 # ---------------------------------------------------------------------------
 
-def test_jobstore_visual_generation_lifecycle():
-    """Tests starting, completing, failing, retrieving, and invalidating visual assets."""
-    job_id, script, storyboard = _setup_job_with_storyboard("vg-lifecycle")
+def test_visual_planning_does_not_mark_stage_completed_or_advance():
+    """
+    REGRESSION TEST:
+    Verifies that initializing a visual asset plan:
+    1. Keeps Stage 07 (Visual Generation) IN_PROGRESS (not COMPLETED).
+    2. Does NOT set completed_at timestamp on Stage 07.
+    3. Does NOT advance current_stage to Stage 08 (Voice Generation).
+    4. Keeps all assets in PENDING status.
+    """
+    job_id, script, storyboard = _setup_job_with_storyboard("vg-plan-lifecycle")
 
-    # 1. Start visual generation
-    job_store.update_job_visual_generation_started(job_id)
+    # Start planning
+    job_store.update_job_visual_planning_started(job_id)
     j = job_store.get_job(job_id)
     assert j.stages[6].name == StageEnum.VISUAL_GENERATION.value
     assert j.stages[6].status == StatusEnum.IN_PROGRESS
+    assert j.current_stage == StageEnum.VISUAL_GENERATION.value
 
-    # 2. Complete visual generation
+    # Plan initialized
     blueprint = visual_generation_service.initialize_visual_assets(job_id, storyboard)
-    job_store.update_job_visual_generation_success(job_id, blueprint)
+    job_store.update_job_visual_planning_success(job_id, blueprint)
+
+    j_after = job_store.get_job(job_id)
+    # Stage 07 MUST NOT be marked COMPLETED
+    assert j_after.stages[6].status == StatusEnum.IN_PROGRESS
+    assert j_after.stages[6].status != StatusEnum.COMPLETED
+    assert j_after.stages[6].completed_at is None
+    assert "pending rendering" in j_after.stages[6].detail
+
+    # MUST NOT advance to Stage 08
+    assert j_after.current_stage == StageEnum.VISUAL_GENERATION.value
+    assert j_after.current_stage != StageEnum.VOICE_GENERATION.value
+    assert j_after.stages[7].status == StatusEnum.PENDING
+
+    # Visual assets remain pending
+    assert j_after.visual_generation is not None
+    assert j_after.visual_generation.status == VisualGenerationStatus.PLANNED
+    assert j_after.visual_generation.assets_pending == 2
+    assert j_after.visual_generation.assets_completed == 0
+    assert j_after.visual_generation.scenes_completed == 0
+    for sa in j_after.visual_generation.scene_assets:
+        assert sa.primary_asset.status == VisualAssetStatus.PENDING
+
+
+def test_stage_07_completed_only_when_all_assets_rendered():
+    """
+    REGRESSION TEST:
+    Verifies that Stage 07 is only marked COMPLETED when all required visual assets
+    have genuinely been rendered and completed.
+    Attempting to mark visual generation complete while assets are pending raises ValueError.
+    """
+    job_id, script, storyboard = _setup_job_with_storyboard("vg-render-complete")
+    blueprint = visual_generation_service.initialize_visual_assets(job_id, storyboard)
+    job_store.update_job_visual_planning_success(job_id, blueprint)
+
+    # Attempting to call visual generation success with pending assets MUST FAIL
+    with pytest.raises(ValueError, match="Cannot mark visual generation as completed"):
+        job_store.update_job_visual_generation_success(job_id, blueprint)
+
+    # Simulate completed rendering of all scenes and assets
+    completed_scene_assets = []
+    for sa in blueprint.scene_assets:
+        rendered_primary = sa.primary_asset.model_copy(
+            update={"status": VisualAssetStatus.COMPLETED}
+        )
+        completed_sa = sa.model_copy(
+            update={
+                "status": VisualGenerationStatus.COMPLETED,
+                "primary_asset": rendered_primary,
+            }
+        )
+        completed_scene_assets.append(completed_sa)
+
+    completed_result = blueprint.model_copy(
+        update={
+            "status": VisualGenerationStatus.COMPLETED,
+            "scenes_completed": blueprint.total_scenes,
+            "scenes_failed": 0,
+            "assets_completed": blueprint.total_assets,
+            "assets_pending": 0,
+            "assets_generating": 0,
+            "assets_failed": 0,
+            "scene_assets": completed_scene_assets,
+        }
+    )
+    assert completed_result.is_fully_rendered is True
+
+    # Now update_job_visual_generation_success succeeds
+    job_store.update_job_visual_generation_success(job_id, completed_result)
     j = job_store.get_job(job_id)
+
+    # Stage 07 is legitimately COMPLETED
     assert j.stages[6].status == StatusEnum.COMPLETED
-    assert j.has_visual_assets is True
-    assert j.visual_generation is not None
-    assert j.visual_generation.total_assets == 2
+    assert j.stages[6].completed_at is not None
+    assert "Rendered all visual assets" in j.stages[6].detail
 
-    # 3. Retrieve
-    retrieved = job_store.get_job_visual_generation(job_id)
-    assert retrieved is not None
-    assert retrieved.job_id == job_id
+    # Advances to Stage 08 (Voice Generation)
+    assert j.current_stage == StageEnum.VOICE_GENERATION.value
+    assert j.stages[7].detail == "Ready for voice generation"
 
-    # 4. Invalidate visual generation directly
-    job_store.invalidate_job_visual_generation(job_id)
+
+def test_failed_asset_prevents_premature_completion():
+    """
+    REGRESSION TEST:
+    Verifies that a failure during visual rendering marks Stage 07 as FAILED
+    and does NOT advance to Stage 08.
+    """
+    job_id, script, storyboard = _setup_job_with_storyboard("vg-fail")
+    blueprint = visual_generation_service.initialize_visual_assets(job_id, storyboard)
+    job_store.update_job_visual_planning_success(job_id, blueprint)
+
+    # Calling update_job_visual_generation_failed
+    job_store.update_job_visual_generation_failed(job_id, "SVG rendering timed out")
     j = job_store.get_job(job_id)
-    assert j.stages[6].status == StatusEnum.PENDING
-    assert j.has_visual_assets is False
-    assert j.visual_generation is None
+
+    assert j.stages[6].status == StatusEnum.FAILED
+    assert "SVG rendering timed out" in j.stages[6].detail
+    assert j.current_stage == StageEnum.VISUAL_GENERATION.value
+    assert j.current_stage != StageEnum.VOICE_GENERATION.value
+    assert j.stages[7].status == StatusEnum.PENDING
 
 
 def test_invalidation_cascade_storyboard_invalidates_visuals(tmp_path: Path):
@@ -623,7 +747,7 @@ def test_invalidation_cascade_storyboard_invalidates_visuals(tmp_path: Path):
 
     # Setup visual assets and create a file on disk
     blueprint = visual_generation_service.initialize_visual_assets(job_id, storyboard)
-    job_store.update_job_visual_generation_success(job_id, blueprint)
+    job_store.update_job_visual_planning_success(job_id, blueprint)
 
     # Manually save a file to disk to verify it gets deleted
     visual_storage_manager.save_asset_content(job_id, "va_test.svg", "<svg></svg>")
@@ -652,7 +776,7 @@ def test_invalidation_cascade_script_invalidates_storyboard_and_visuals():
     job_id, script, storyboard = _setup_job_with_storyboard("sc-inv-vg")
 
     blueprint = visual_generation_service.initialize_visual_assets(job_id, storyboard)
-    job_store.update_job_visual_generation_success(job_id, blueprint)
+    job_store.update_job_visual_planning_success(job_id, blueprint)
 
     visual_storage_manager.save_asset_content(job_id, "va_test2.svg", "<svg></svg>")
     assert visual_storage_manager.asset_file_exists(job_id, "va_test2.svg")
@@ -696,27 +820,49 @@ def test_post_visual_assets_missing_storyboard_prerequisite():
 
 
 def test_post_and_get_visual_assets_success():
-    """POST /visual-assets generates blueprint, GET retrieves it."""
+    """
+    POST /visual-assets generates plan, GET retrieves it.
+    Verifies that:
+    - Status is 'planned' (not completed).
+    - Assets are reported as pending rendering.
+    - Stage 07 is IN_PROGRESS (not COMPLETED).
+    - Pipeline remains at Stage 07 (does NOT advance to Stage 08).
+    - Unrendered files return 404 and are not claimed to exist.
+    """
     job_id, script, storyboard = _setup_job_with_storyboard("post-get-vg")
 
-    # 1. POST generation
+    # 1. POST generation (Planning)
     resp = client.post(f"/api/v1/jobs/{job_id}/visual-assets")
     assert resp.status_code == 200
     data = resp.json()
     assert data["job_id"] == job_id
-    assert data["status"] == "pending"
+    assert data["status"] == "planned"
     assert data["total_scenes"] == 2
     assert data["total_assets"] == 2
+    assert data["assets_pending"] == 2
+    assert data["assets_completed"] == 0
+    assert data["scenes_completed"] == 0
     assert len(data["scene_assets"]) == 2
+
+    # Verify JobStore state: Stage 07 must remain IN_PROGRESS, pipeline remains at Stage 07
+    j = job_store.get_job(job_id)
+    assert j.stages[6].status == StatusEnum.IN_PROGRESS
+    assert j.stages[6].status != StatusEnum.COMPLETED
+    assert j.stages[6].completed_at is None
+    assert j.current_stage == StageEnum.VISUAL_GENERATION.value
+    assert j.current_stage != StageEnum.VOICE_GENERATION.value
 
     # 2. GET retrieval
     get_resp = client.get(f"/api/v1/jobs/{job_id}/visual-assets")
     assert get_resp.status_code == 200
     get_data = get_resp.json()
     assert get_data["job_id"] == job_id
+    assert get_data["status"] == "planned"
     assert get_data["total_assets"] == 2
+    assert get_data["assets_pending"] == 2
+    assert get_data["assets_completed"] == 0
 
-    # 3. GET asset metadata
+    # 3. GET asset metadata shows pending status
     asset_id = data["scene_assets"][0]["primary_asset"]["asset_id"]
     asset_resp = client.get(f"/api/v1/jobs/{job_id}/visual-assets/{asset_id}")
     assert asset_resp.status_code == 200
@@ -729,7 +875,7 @@ def test_post_and_get_visual_assets_success():
     non_asset_resp = client.get(f"/api/v1/jobs/{job_id}/visual-assets/va_unknown")
     assert non_asset_resp.status_code == 404
 
-    # 5. GET asset file before rendering returns 404 (file not on disk)
+    # 5. GET asset file before rendering returns 404 (does not pretend file exists)
     file_resp = client.get(f"/api/v1/jobs/{job_id}/visual-assets/{asset_id}/file")
     assert file_resp.status_code == 404
     assert "has not yet been rendered to disk" in file_resp.json()["detail"]

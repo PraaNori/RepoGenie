@@ -1055,19 +1055,12 @@ async def generate_job_visual_assets(
                 detail=f"Educational storyboard must be generated before visual asset generation for job '{job_id}'. Call POST /api/v1/jobs/{job_id}/educational-storyboard first.",
             )
 
-        # Return cached if already available and refresh not requested
+        # Return cached plan if already available and refresh not requested
         if internal.visual_generation and not refresh:
             return internal.visual_generation
 
-        # Prevent duplicate execution if another process or thread marked Stage 7 IN_PROGRESS
-        if internal.stages[6].status == StatusEnum.IN_PROGRESS and not refresh:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail=f"Visual asset generation is already in progress for job '{job_id}'.",
-            )
-
-        # Update job stage to IN_PROGRESS atomically
-        job_store.update_job_visual_generation_started(job_id)
+        # Update job stage to IN_PROGRESS atomically for planning
+        job_store.update_job_visual_planning_started(job_id)
 
         try:
             result = visual_generation_service.initialize_visual_assets(
@@ -1077,15 +1070,15 @@ async def generate_job_visual_assets(
                 knowledge=internal.knowledge,
                 refresh=refresh,
             )
-            job_store.update_job_visual_generation_success(job_id, result)
+            job_store.update_job_visual_planning_success(job_id, result)
             return result
         except Exception as exc:
-            logger.exception("Unexpected error during visual asset generation for job %s: %s", job_id, exc)
+            logger.exception("Unexpected error during visual asset planning for job %s: %s", job_id, exc)
             job_store.update_job_visual_generation_failed(job_id, str(exc))
             exc_msg = _sanitize_error_message(str(exc), internal.local_path)
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Unexpected error during visual asset generation: {exc_msg}",
+                detail=f"Unexpected error during visual asset planning: {exc_msg}",
             )
 
 
