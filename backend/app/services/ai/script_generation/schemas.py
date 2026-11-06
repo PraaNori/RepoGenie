@@ -412,6 +412,10 @@ class ScriptGenerationMetadata(BaseModel):
     latency_ms: float = Field(default=0.0, ge=0)
     token_usage: Optional[TokenUsageRecord] = None
     source_understandings: List[UnderstandingSource] = Field(default_factory=list)
+    missing_understandings: List[UnderstandingSource] = Field(default_factory=list)
+    llm_call_count: int = Field(default=0, ge=0)
+    revision_attempted: bool = False
+    evidence_package_chars: int = Field(default=0, ge=0)
 
 
 class EducationalScript(BaseModel):

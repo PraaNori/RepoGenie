@@ -1,8 +1,31 @@
-"""Educational script schemas and validation (Milestone 4, Phase 1)."""
+"""Educational script schemas, validation, and AI generation service (Milestone 4, Phases 1–2)."""
 
+from .analyzer import (
+    EducationalScriptAnalyzer,
+    ScriptGenerationAnalyzer,
+    ScriptGenerationError,
+    ScriptGenerationService,
+    educational_script_analyzer,
+    script_generation_analyzer,
+)
+from .evidence_builder import (
+    DEFAULT_MAX_EVIDENCE_CHARS,
+    ScriptEvidenceBuilder,
+    ScriptEvidenceItem,
+    ScriptEvidencePackage,
+    script_evidence_builder,
+)
+from .prompts import (
+    NARRATIVE_PROFILE_GUIDANCE,
+    SYSTEM_PROMPT,
+    build_script_repair_prompt,
+    build_script_revision_prompt,
+    build_script_user_prompt,
+)
 from .schemas import (
     DEFAULT_MAX_COMFORTABLE_WPM,
     DEFAULT_MIN_COMFORTABLE_WPM,
+    DEFAULT_STATIC_ANALYSIS_CAVEATS,
     DEFAULT_WORDS_PER_MINUTE,
     DURATION_TOLERANCE_SECONDS,
     TARGET_MAX_DURATION_SECONDS,
@@ -25,22 +48,38 @@ from .schemas import (
     count_words,
     estimate_narration_seconds,
 )
+from .validator import (
+    ScriptValidator,
+    script_validator,
+)
 
 __all__ = [
     "ArchitectureRelationshipReference",
     "ComponentReference",
     "DEFAULT_MAX_COMFORTABLE_WPM",
+    "DEFAULT_MAX_EVIDENCE_CHARS",
     "DEFAULT_MIN_COMFORTABLE_WPM",
+    "DEFAULT_STATIC_ANALYSIS_CAVEATS",
     "DEFAULT_WORDS_PER_MINUTE",
     "DURATION_TOLERANCE_SECONDS",
     "DataFlowReference",
     "DurationTarget",
     "EducationalScript",
+    "EducationalScriptAnalyzer",
     "GroundedClaim",
     "GroundingStatus",
+    "NARRATIVE_PROFILE_GUIDANCE",
     "NarrationPacing",
+    "SYSTEM_PROMPT",
+    "ScriptEvidenceBuilder",
+    "ScriptEvidenceItem",
+    "ScriptEvidencePackage",
+    "ScriptGenerationAnalyzer",
+    "ScriptGenerationError",
     "ScriptGenerationMetadata",
+    "ScriptGenerationService",
     "ScriptSection",
+    "ScriptValidator",
     "SectionPurpose",
     "TARGET_MAX_DURATION_SECONDS",
     "TARGET_MIN_DURATION_SECONDS",
@@ -48,6 +87,13 @@ __all__ = [
     "VideoFormatSpec",
     "VideoOrientation",
     "WorkflowStepReference",
+    "build_script_repair_prompt",
+    "build_script_revision_prompt",
+    "build_script_user_prompt",
     "count_words",
+    "educational_script_analyzer",
     "estimate_narration_seconds",
+    "script_evidence_builder",
+    "script_generation_analyzer",
+    "script_validator",
 ]
