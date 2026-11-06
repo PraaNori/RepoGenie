@@ -114,8 +114,15 @@ class AssemblyInputService:
             if not narration_text and narr_asset and getattr(narr_asset, "narration_text", None):
                 narration_text = narr_asset.narration_text.strip()
 
-            # Determine if scene is intentionally silent (no spoken text planned or asset was skipped)
-            is_silent = (len(narration_text) == 0) and (narr_asset is None or narr_asset.status == NarrationAssetStatus.SKIPPED)
+            # Determine if scene is intentionally silent (no spoken text planned or asset was explicitly skipped)
+            if narr_asset and narr_asset.status == NarrationAssetStatus.FAILED:
+                is_silent = False  # Failed narration scenes must NEVER be treated as silent
+            elif narr_asset and narr_asset.status == NarrationAssetStatus.SKIPPED and len(narration_text) == 0:
+                is_silent = True
+            elif len(narration_text) == 0 and narr_asset is None:
+                is_silent = True
+            else:
+                is_silent = False
 
             # Determine scene duration based on narration or planned estimation
             if narr_asset and narr_asset.status == NarrationAssetStatus.COMPLETED and narr_asset.duration_seconds > 0:
@@ -132,15 +139,30 @@ class AssemblyInputService:
             vis_asset = visual_map.get(scene.scene_id) or visual_map.get(f"num_{scene.scene_number}")
             if vis_asset:
                 asset_id = vis_asset.asset_id
-                svg_filename = f"{asset_id}.svg"
-                vis_path = visual_storage_manager.get_job_visuals_dir(job_id) / svg_filename
-                valid, err, size = self._validator.validate_visual_file(vis_path)
+                if getattr(vis_asset, "storage_path", None):
+                    filename = Path(vis_asset.storage_path).name
+                    file_format = filename.split(".")[-1].lower()
+                    vis_path = visual_storage_manager.get_job_visuals_dir(job_id) / filename
+                    rel_path = vis_asset.storage_path
+                else:
+                    filename = f"{asset_id}.svg"
+                    file_format = "svg"
+                    vis_path = visual_storage_manager.get_job_visuals_dir(job_id) / filename
+                    rel_path = visual_storage_manager.get_relative_asset_path(job_id, filename)
+
+                if getattr(vis_asset, "status", None) == VisualAssetStatus.FAILED:
+                    valid = False
+                    err = f"Visual asset for scene {scene.scene_number} failed: {getattr(vis_asset, 'error_message', 'Generation failed')}"
+                    size = 0
+                else:
+                    valid, err, size = self._validator.validate_visual_file(vis_path)
+
                 visual_ref = AssemblyAssetReference(
                     asset_id=asset_id,
                     scene_id=scene.scene_id,
                     asset_type="visual",
-                    relative_path=visual_storage_manager.get_relative_asset_path(job_id, svg_filename),
-                    file_format="svg",
+                    relative_path=rel_path,
+                    file_format=file_format,
                     file_size_bytes=size,
                     duration_seconds=None,
                     is_valid=valid,
@@ -153,7 +175,14 @@ class AssemblyInputService:
                 if narr_asset:
                     asset_id = narr_asset.asset_id
                     audio_path = audio_storage_manager.get_audio_path(job_id, asset_id, format="mp3")
-                    valid, err, size, measured_dur = self._validator.validate_audio_file(audio_path)
+                    if narr_asset.status == NarrationAssetStatus.FAILED:
+                        valid = False
+                        err = f"Narration audio for scene {scene.scene_number} failed: {narr_asset.error_message or 'Synthesis failed'}"
+                        size = 0
+                        measured_dur = 0.0
+                    else:
+                        valid, err, size, measured_dur = self._validator.validate_audio_file(audio_path)
+
                     narration_ref = AssemblyAssetReference(
                         asset_id=asset_id,
                         scene_id=scene.scene_id,
@@ -176,19 +205,16 @@ class AssemblyInputService:
                     srt_path = caption_storage_manager.get_caption_path(job_id, cap_id, format="srt")
                     vtt_path = caption_storage_manager.get_caption_path(job_id, cap_id, format="vtt")
 
-                    srt_valid, srt_err, srt_size = self._validator.validate_caption_file(srt_path, format="srt")
-                    caption_srt_ref = AssemblyAssetReference(
-                        asset_id=cap_id,
-                        scene_id=scene.scene_id,
-                        asset_type="caption_srt",
-                        relative_path=caption_storage_manager.get_relative_caption_path(job_id, cap_id, format="srt"),
-                        file_format="srt",
-                        file_size_bytes=srt_size,
-                        is_valid=srt_valid,
-                        validation_error=srt_err,
-                    )
-
-                    vtt_valid, vtt_err, vtt_size = self._validator.validate_caption_file(vtt_path, format="vtt")
+                    if cap_asset.status == CaptionStatus.FAILED:
+                        srt_valid = False
+                        srt_err = f"Captions for scene {scene.scene_number} failed: {getattr(cap_asset, 'error_message', None) or 'Generation failed'}"
+                        srt_size = 0
+                        vtt_valid = False
+                        vtt_err = srt_err
+                        vtt_size = 0
+                    else:
+                        srt_valid, srt_err, srt_size = self._validator.validate_caption_file(srt_path, format="srt")
+                        vtt_valid, vtt_err, vtt_size = self._validator.validate_caption_file(vtt_path, format="vtt")
                     caption_vtt_ref = AssemblyAssetReference(
                         asset_id=cap_id,
                         scene_id=scene.scene_id,

@@ -17,3 +17,4 @@ tree-sitter-c>=0.23.0
 tree-sitter-cpp>=0.23.0
 google-genai>=2.34.0
 groq>=1.7.0
+Pillow>=10.0.0

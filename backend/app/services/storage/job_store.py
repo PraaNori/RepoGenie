@@ -632,6 +632,7 @@ class JobStore:
 
         # Invalidate downstream caption assets
         self.invalidate_job_captions(job_id)
+        self.invalidate_job_assembly_input(job_id)
 
         # Set next stage ready (Stage 7: Visual Generation)
         job.current_stage = PIPELINE_STAGES[6]
@@ -697,6 +698,7 @@ class JobStore:
 
         # Invalidate downstream caption assets
         self.invalidate_job_captions(job_id)
+        self.invalidate_job_assembly_input(job_id)
 
         job.updated_at = now
         return job
@@ -901,6 +903,7 @@ class JobStore:
         
         # Invalidate dependent captions when narration is newly generated or replaced
         self.invalidate_job_captions(job_id)
+        self.invalidate_job_assembly_input(job_id)
 
         job.updated_at = now
         return job
@@ -945,6 +948,7 @@ class JobStore:
 
         # Invalidate dependent captions as well
         self.invalidate_job_captions(job_id)
+        self.invalidate_job_assembly_input(job_id)
 
         job.updated_at = now
         return job
