@@ -133,13 +133,20 @@ class FFmpegCommandBuilder:
     ) -> str:
         """
         Builds the FFmpeg video filter expression for burning subtitles into video frames.
-        Uses readable white text with dark outline and safe bottom margin.
+        Styles subtitles for 1920x1080 video:
+        - Font size scaled to ~36-38px height (FontSize=10 in libass 288p script resolution).
+        - Maximum 2 lines with natural balanced line wrapping (WrapStyle=0).
+        - Width limited to ~80% video width (MarginL=50, MarginR=50).
+        - Positioned bottom center with a 55-65px safe margin (Alignment=2, MarginV=16).
+        - Crisp white text with a subtle dark outline and shadow (PrimaryColour=&H00FFFFFF, Outline=1.2, Shadow=0.5).
+        - Transparent background avoiding large opaque boxes (BorderStyle=1, BackColour=&H00000000).
         """
         escaped_path = self.escape_subtitles_filter_path(srt_path)
         default_style = (
-            "FontName=Helvetica,FontSize=24,Bold=1,"
-            "PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BackColour=&H80000000,"
-            "BorderStyle=1,Outline=2,Shadow=1,Alignment=2,MarginV=40"
+            "FontName=Helvetica,FontSize=10,Bold=1,"
+            "PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BackColour=&H00000000,"
+            "BorderStyle=1,Outline=1.2,Shadow=0.5,Alignment=2,"
+            "MarginV=16,MarginL=50,MarginR=50,Spacing=0.2,WrapStyle=0"
         )
         chosen_style = style or default_style
         return f"subtitles=filename='{escaped_path}':force_style='{chosen_style}'"

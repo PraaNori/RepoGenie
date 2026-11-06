@@ -78,10 +78,16 @@ def test_subtitles_filter_string_generation(command_builder: FFmpegCommandBuilde
     filter_str = command_builder.build_subtitles_filter_string(srt_file)
     assert filter_str.startswith("subtitles=filename='")
     assert "force_style='" in filter_str
+    assert "FontSize=10" in filter_str               # Scaled font height (~36px on 1080p)
     assert "PrimaryColour=&H00FFFFFF" in filter_str  # White text
     assert "OutlineColour=&H00000000" in filter_str  # Dark outline
+    assert "Outline=1.2" in filter_str               # Subtle outline
+    assert "BackColour=&H00000000" in filter_str     # Transparent background (no box)
     assert "Alignment=2" in filter_str               # Bottom center
-    assert "MarginV=40" in filter_str                # Safe margin
+    assert "MarginV=16" in filter_str                # 55-65px safe margin
+    assert "MarginL=50" in filter_str                # Limit width to ~80%
+    assert "MarginR=50" in filter_str
+    assert "WrapStyle=0" in filter_str               # Natural balanced 2-line wrapping
 
 
 def test_concat_command_with_and_without_subtitles(command_builder: FFmpegCommandBuilder, tmp_path: Path):
@@ -297,6 +303,22 @@ def test_burned_in_subtitles_actual_media_rendering(tmp_path: Path):
     assert max_sub_brightness >= 240, f"Expected bright white subtitle pixels at t=1.0s, got {max_sub_brightness}"
     # Gap frame on black background must not have text (brightness < 30)
     assert max_gap_brightness < 30, f"Expected dark background during gap at t=2.0s, got {max_gap_brightness}"
+
+    # Verify subtitle geometry on 1920x1080 frame:
+    bbox = im_sub.getbbox()
+    assert bbox is not None, "Expected non-empty bounding box for rendered subtitles"
+    rendered_text_height = bbox[3] - bbox[1]
+    rendered_text_width = bbox[2] - bbox[0]
+    bottom_safe_margin = 1080 - bbox[3]
+
+    # Height should be approximately 36px (within 34-44px range)
+    assert 34 <= rendered_text_height <= 44, f"Expected subtitle height ~36px, got {rendered_text_height}px"
+    # Bottom margin should be within the 55-65px safe margin
+    assert 55 <= bottom_safe_margin <= 65, f"Expected safe bottom margin 55-65px, got {bottom_safe_margin}px"
+    # Width must not exceed 80% of video width (0.80 * 1920 = 1536px)
+    assert rendered_text_width <= int(1920 * 0.80), f"Subtitle width {rendered_text_width}px exceeds 80% width"
+    # Unobstructed top: all content above y=950 is completely clear
+    assert bbox[1] >= 950, f"Subtitle top edge y={bbox[1]} impinges on upper 88% slide area"
 
 
 def test_missing_or_empty_subtitles_file_fallback(tmp_path: Path):
